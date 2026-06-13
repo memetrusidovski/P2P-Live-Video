@@ -1,0 +1,47 @@
+# === LaTeX ===
+*.aux
+*.log
+*.toc
+*.synctex.gz
+*.pdf
+*.fls
+*.fdb_latexmk
+*.blg
+*.bbl
+
+# === Rust ===
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# === Go ===
+/bin/
+/pkg/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# === C ===
+*.o
+*.obj
+*.out
+*.exe
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+vwen/
+.venv/
+env/
+.env
+
