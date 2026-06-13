@@ -1,3 +1,5 @@
+# BitStream Protocol
+
 # P2P Real-Time Streaming Mesh — Research & Design Notes
 
 ### ⚡ Purpose
