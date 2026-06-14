@@ -1,0 +1,150 @@
+syntax = "proto3";
+
+package p2p.live.v1;
+
+option go_package = "p2p/live/v1;livev1";
+option java_multiple_files = true;
+option java_package = "com.p2p.live.v1";
+
+// Chapter 2: Peer Discovery and Stream Registration RPCs (S/Kademlia DHT)
+service StreamDirectoryService {
+  rpc RegisterPeer(RegisterPeerRequest) returns (RegisterPeerResponse);
+  rpc GetPeers(GetPeersRequest) returns (GetPeersResponse);
+}
+
+// S/Kademlia ID Validation Block
+message SKademliaIdentity {
+  bytes node_id = 1;         // 32-byte secure node ID
+  bytes public_key = 2;      // 32-byte Ed25519 node public key
+  uint64 static_nonce = 3;   // Static proof of work nonce
+  uint64 dynamic_nonce = 4;  // Dynamic proof of work nonce bound to IP
+  bytes external_ip = 5;     // Resolved external IP (IPv4 or IPv6)
+  uint64 timestamp = 6;      // Microsecond timestamp to prevent replays
+  bytes signature = 7;       // 64-byte Ed25519 signature of the header fields
+}
+
+message RegisterPeerRequest {
+  bytes stream_id = 1;       // 32-byte stream key (hash of publisher's pubkey)
+  SKademliaIdentity identity = 2; // Identity proofs of the registering node
+  uint32 port = 3;           // Listening UDP port
+  uint32 protocol_type = 4;  // Protocol code (e.g. 1 = UDP/QUIC)
+}
+
+message RegisterPeerResponse {
+  uint32 status_code = 1;    // Standard status code (e.g., 200 OK, 400 Bad Proof)
+  string message = 2;        // Status description
+}
+
+message GetPeersRequest {
+  bytes stream_id = 1;       // Target stream key
+  SKademliaIdentity requester = 2; // Identity of the node querying the list
+}
+
+message GetPeersResponse {
+  uint32 status_code = 1;
+  repeated PeerAddress peers = 2; // Compact list of active peers returned
+}
+
+message PeerAddress {
+  bytes ip_address = 1;      // 4-byte IPv4 or 16-byte IPv6
+  uint32 port = 2;           // Active UDP port
+  bytes node_id = 3;         // S/Kademlia NodeID of target peer
+}
+
+// Chapter 3: Overlay Membership and Epidemic Gossip (HyParView)
+message GossipExchange {
+  uint32 version = 1;
+  uint32 sequence_number = 2;
+  bytes sender_node_id = 3;
+  repeated PeerAddress neighbors = 4;
+  bytes hmac_signature = 5;  // Authenticated validation signature
+}
+
+message NeighborRequest {
+  uint32 version = 1;
+  bytes sender_node_id = 2;
+  enum Priority {
+    PRIORITY_UNSPECIFIED = 0;
+    PRIORITY_HIGH = 1;       // Used for active parent reconnection
+    PRIORITY_LOW = 2;        // Used for standard mesh expansion
+  }
+  Priority priority = 3;
+}
+
+message DisconnectNotification {
+  uint32 version = 1;
+  bytes sender_node_id = 2;
+  enum DisconnectReason {
+    DISCONNECT_REASON_UNSPECIFIED = 0;
+    DISCONNECT_REASON_CHOKE = 1;
+    DISCONNECT_REASON_QUIT = 2;
+    DISCONNECT_REASON_EVICTION = 3;
+  }
+  DisconnectReason reason = 3;
+}
+
+message ShuffleRequest {
+  uint32 version = 1;
+  bytes original_sender_id = 2;
+  uint32 ttl = 3;
+  repeated PeerAddress nodes_to_shuffle = 4;
+}
+
+// Chapter 4: Media Distribution Frames
+message BlockTransmission {
+  uint32 version = 1;
+  uint32 segment_sequence_number = 2;
+  uint32 block_index = 3;
+  repeated bytes merkle_proof_path = 4; // Collection of sibling hashes
+  bytes block_payload = 5;              // 16 KB segment payload data
+}
+
+message RaptorQSymbol {
+  uint32 version = 1;
+  uint32 segment_sequence_number = 2;
+  uint32 source_block_number = 3;       // SBN
+  uint32 encoding_symbol_id = 4;        // ESI
+  bytes symbol_payload = 5;             // Fixed 1024-byte payload
+}
+
+message BufferStateBitfield {
+  uint32 version = 1;
+  uint32 segment_sequence_number = 2;
+  uint32 starting_block_index = 3;
+  bytes bitfield_data = 4;              // Packed bitfield byte array
+}
+
+// Chapter 5: Economic Incentives & Reputations
+message ProofOfUpload {
+  uint32 version = 1;
+  uint32 segment_sequence_number = 2;
+  uint32 block_index = 3;
+  bytes stream_id = 4;
+  bytes uploader_node_id = 5;
+  uint64 timestamp = 6;
+  bytes downloader_signature = 7;       // Ed25519 signature from receiver
+}
+
+message ReputationAuditGossip {
+  uint32 version = 1;
+  bytes sender_node_id = 2;
+  repeated SuspectRecord suspects = 3;
+}
+
+message SuspectRecord {
+  bytes node_id = 1;
+  float penalty_score = 2;              // Multiplier scoring deduction (0.0 to 1.0)
+}
+
+// Chapter 6: NAT Traversal Relays
+message RelayProposal {
+  uint32 version = 1;
+  bytes target_node_id = 2;
+  uint32 target_port_number = 3;
+}
+
+message RelayBind {
+  uint32 version = 1;
+  bytes client_a_id = 2;
+  bytes client_b_id = 3;
+}
