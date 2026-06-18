@@ -2,7 +2,7 @@
 
 All transport-layer control packets in the protocol must carry the cryptographic ID validation block to ensure immediate, zero-trust verification at the network socket layer.
 
-This 156-byte header is prepended to payload structures.
+This 152-byte header is prepended to payload structures.
 
 ```text
  0                   1                   2                   3

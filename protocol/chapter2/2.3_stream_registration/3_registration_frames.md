@@ -33,8 +33,26 @@ GET_PEERS Response Frame:
 |   Returned Peer Count (N)     | Reserved                      |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                                                               |
-|        Compacted List of N Peer Addresses (6 bytes per peer)  |
-|               [4-byte IPv4 Address || 2-byte Port]           |
+|        Compacted List of N Peer Address Records               |
+|        (variable length — see PeerAddressRecord below)        |
 |                                                               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+PeerAddressRecord (IPv4, 7 bytes):
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+| AddrFamily(0x04) |       IPv4 Address (4 bytes)               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|         Port (2 bytes)        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+PeerAddressRecord (IPv6, 19 bytes):
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+| AddrFamily(0x06) |                                            |
++-+-+-+-+-+-+-+-+-+         IPv6 Address (16 bytes)             |
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|         Port (2 bytes)        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
+
+*   **AddrFamily:** `0x04` = IPv4 (record is 7 bytes total), `0x06` = IPv6 (record is 19 bytes total). Receivers skip unknown family bytes using the Payload Length field.

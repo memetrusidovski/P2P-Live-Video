@@ -9,7 +9,6 @@ This appendix provides formal Mermaid.js sequence diagrams detailing the asynchr
 This flow maps how a joining node validates its Proof-of-Work Node ID, queries seed nodes to populate its local routing table, and retrieves the active peer list for stream initiation.
 
 ```mermaid
-sequence_diagram
 %%{init: {'theme': 'dark'}}%%
 sequenceDiagram
     autonumber
@@ -52,7 +51,6 @@ sequenceDiagram
 This diagram demonstrates how a node detects a dead connection and promotes a candidate standby peer from its local Passive Set to resume data flow in less than $250\text{ ms}$.
 
 ```mermaid
-sequence_diagram
 %%{init: {'theme': 'dark'}}%%
 sequenceDiagram
     autonumber
@@ -87,7 +85,6 @@ sequenceDiagram
 This flow maps the data path: how high-priority edge chunks are pushed via multi-forest trees, how missed chunks are repaired via pulling, and how cryptographic Proof-of-Upload (PoU) receipts are exchanged to earn contribution score.
 
 ```mermaid
-sequence_diagram
 %%{init: {'theme': 'dark'}}%%
 sequenceDiagram
     autonumber
@@ -123,7 +120,6 @@ sequenceDiagram
 This diagram details the sequence where two NAT-restricted peers establish direct socket pathways using STUN candidate discovery and bidirectional hole punching.
 
 ```mermaid
-sequence_diagram
 %%{init: {'theme': 'dark'}}%%
 sequenceDiagram
     autonumber
