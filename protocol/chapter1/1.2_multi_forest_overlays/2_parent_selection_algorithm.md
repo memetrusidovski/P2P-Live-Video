@@ -9,8 +9,18 @@ $$\text{Score}(p, i) = \left( w_1 \cdot \text{CapacityScore}(p) \right) - \left(
 
 ### Component 1: Capacity Score
 The parent $p$ gossips its available remaining upload slots ($K_{\text{avail}}$) and historical reliability ($R \in [0, 1]$, representing the percentage of chunks delivered on time).
-$$\text{CapacityScore}(p) = \ln(1 + K_{\text{avail}}) \cdot R$$
-*We use the natural log so that a peer with 100 slots is scored higher than one with 10, but not 10 times higher, encouraging load distribution.*
+$$\text{CapacityScore}(p) = \sqrt{K_{\text{avail}}} \cdot R$$
+*We use square-root compression so that a peer with more slots is scored higher, but not proportionally higher, encouraging load distribution. An earlier draft used $\ln(1 + K_{\text{avail}})$, but the log is too flat at the top end: it gave a 10 Gbps server (10,000 slots) only a 3.8× advantage over a 10 Mbps node — so nearby mid-tier peers routinely outscored available backbone capacity. The square root yields a 31.6× advantage in that comparison: strong enough to route toward super nodes, still far from the raw 1000× that would cause monopolisation. The exponent is a tuning parameter to be validated in simulation (Chapter 8) before deployment.*
+
+**Warm-Up Gating:** A freshly joined relay has no data to forward until it has received and Merkle-verified its first complete segment (~1 second of buffering). During this window it MUST advertise $K_{\text{avail}} = 0$, which removes it from parent selection entirely (probes are skipped by the `available_slots > 0` check below). Without this rule, a new relay's high capacity score attracts children who then receive nothing for a full second — the relay answers keepalives (so it is never evicted as dead) while its empty bitfield forces every child into mesh-PULL fallback, compounding into latency spikes during rapid-growth phases when many relays are warming up at once.
+
+```python
+# Capacity gossip advertisement:
+if len(verified_segment_buffer) == 0:
+    advertise_K_avail = 0                  # warm-up: hidden from parent selection
+else:
+    advertise_K_avail = floor(u_v / B_m)   # normal advertisement
+```
 
 ### Component 2: Latency Penalty (RTT)
 Peer $i$ pings candidate $p$ over UDP to establish the current Round Trip Time (RTT) in milliseconds.
@@ -46,7 +56,7 @@ def execute_tree_join(node_i, target_slice_m, dht_interface):
             # Step 3: Execute Scoring Function
             w1, w2, w3 = 1000.0, 1.0, 50.0  # Tuning weights
             
-            cap_score = math.log(1 + probe_response.available_slots) * probe_response.reliability
+            cap_score = math.sqrt(probe_response.available_slots) * probe_response.reliability
             lat_penalty = probe_response.rtt_ms
             hop_penalty = math.exp(0.5 * probe_response.hop_count)
             
@@ -68,6 +78,14 @@ def execute_tree_join(node_i, target_slice_m, dht_interface):
     # If all candidates rejected (e.g., they filled their slots during probing)
     return FAILURE_RETRY_BACKOFF
 ```
+
+### Depth Admission Rule
+
+A parent **must reject** any join request that would place the child deeper than $D_{\text{max}} = 8$ hops from the source — that is, a candidate advertising $h_p \ge D_{\text{max}}$ is not a legal parent. A saturated forest may never resolve pressure by growing deeper than its latency budget allows.
+
+### On `FAILURE_RETRY_BACKOFF`
+
+This return value is the protocol's **capacity-saturation signal** for tree $T_m$: every candidate either had no free slots or sat at the depth limit. Its handling is defined normatively in [Chapter 1 §1.1.5 Capacity Adaptation](../1.1_scale_latency/5_capacity_adaptation.md): the peer retries with backoff, and after **2 consecutive failed rounds** sheds tree $T_m$ (dropping to the next lower SVC layer) rather than continuing to search, with a 10-second hysteresis before the standard upward-migration loop attempts re-join. The base-layer tree is never shed.
 
 ## 2.3 Continuous Optimization (Greedy Upward Migration)
 

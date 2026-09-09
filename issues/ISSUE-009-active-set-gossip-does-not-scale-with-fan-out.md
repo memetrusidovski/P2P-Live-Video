@@ -1,6 +1,6 @@
 # ISSUE-009: Active Set Gossip Cap (c_a=8) Does Not Scale With Tree Fan-Out
 
-**Status:** Open  
+**Status:** Resolved  
 **Priority:** Medium  
 **Component:** Chapter 3 — HyParView Gossip / Chapter 4 — Media Distribution  
 **Affects:** Super nodes with large tree fan-out (K_v >> c_a)  
@@ -57,7 +57,7 @@ The FEC RaptorQ parity (10% overhead) absorbs a 5% drop rate locally, so this is
 Super nodes (nodes where K_v > c_a × 2) maintain a lightweight one-to-many broadcast channel to all tree children for bitfield state:
 
 ```
-relay_broadcast_bitfield_interval = 100ms   (same as τ_gossip but broadcast, not peer-to-peer)
+relay_broadcast_bitfield_interval = 100ms   (matches τ_sched, the scheduler cycle; broadcast, not peer-to-peer)
 ```
 
 This is a UDP multicast or targeted unicast burst to all K_v children, carrying only the bitfield (which block indices the relay currently holds). It does not carry membership state or TFT state — those remain on the Active Set gossip channel.
@@ -82,3 +82,12 @@ The relay broadcast approach is architecturally correct but adds protocol comple
 ## Effort
 
 Low (scaled c_a approach). Medium (relay broadcast channel — requires new frame type).
+
+---
+
+## Resolution
+
+Applied the scaled-c_a approach to the spec:
+
+- `protocol/chapter3/3.1_neighbor_sets/1_memory_structures.md` — new "Scaled Active Set for High-Fan-Out Relays" section: relays with `K_v > 2·c_a` use `c_a_eff = min(64, floor(K_v/10))`, extra slots filled preferentially with own tree children for direct bitfield visibility; control-plane cost analysis included. The relay-broadcast bitfield channel is documented as a future option, not a requirement.
+- `protocol/appendix_b_parameters.md` — c_a entry annotated with the relay scaling rule (see below).

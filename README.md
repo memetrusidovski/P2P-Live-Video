@@ -1,55 +1,52 @@
 # BitStream Protocol
 
-# P2P Real-Time Streaming Mesh — Research & Design Notes
+# Pure P2P Protocol for Million-Scale Live Video
 
 ### ⚡ Purpose
-This repository collects research and design ideas for a **decentralized, real-time video streaming network** built on a **peer-to-peer mesh**.  
-The goal: achieve near real-time distribution of HLS (or similar) video chunks to **thousands of peers** — efficiently, securely, and without centralized bottlenecks.
+This repository contains the design specification for a **decentralized, real-time video streaming network** — tokenless, trackerless, and built to distribute a live stream to **up to 1,000,000 concurrent viewers** without centralized egress costs.
 
-The ideas here outline algorithms, topology strategies, and security models that allow the network to **self-optimize**, **resist attacks**, and **adapt to network conditions**.
+> **📘 The canonical specification lives in [`protocol/`](protocol/).** Start at [`protocol/INDEX.md`](protocol/INDEX.md) for the full chapter map, or [`protocol/README.md`](protocol/README.md) for the table of contents.
+>
+> The notes in [`thoughts/`](thoughts/) are earlier exploratory material, retained for the reasoning they capture. Where they disagree with `protocol/`, the specification wins.
+
+Known design gaps and their fixes are tracked in [`issues/`](issues/).
 
 ---
 
 ### 🎯 Core Objectives
-- **Low latency:** deliver HLS segments in near real time (2–10 s latency budget).  
-- **Scalability:** support 1,000+ peers with efficient bandwidth use.  
-- **Resilience:** recover quickly from churn, failures, and attacks.  
-- **Fairness:** reward good uploaders, demote weak or malicious peers.  
-- **Security:** protect against poisoning, Sybil, and DoS attacks with signed manifests and reputation.
+- **Low latency:** 3–5 s end-to-end playout deadline, with a 4.0 s sliding buffer and ≤ 1.5 s startup join.
+- **Scalability:** 1,000,000 concurrent viewers at ≤ 7 hops mean depth.
+- **Resilience:** sub-250 ms churn recovery; graceful resolution degradation instead of buffering.
+- **Fairness:** reward contributors with lower latency and higher quality; leave free-riders at the base layer.
+- **Security:** signed manifests, Merkle-verified blocks, Sybil-resistant identities, kernel-level DDoS shielding.
 
 ---
 
 ### 🕸️ High-Level Architecture
-1. **Hybrid mesh topology**  
-   Peers form local clusters based on latency and capacity. Clusters interconnect through stable “super-peers” or lightweight relays.  
-2. **Fountain/erasure coding**  
-   Each video segment is split into small symbols, encoded (e.g., RaptorQ). Any subset of M symbols can reconstruct the segment.  
-3. **Deadline-aware swarming**  
-   Peers prioritize symbol requests by urgency and rarity, keeping the buffer full before playback deadlines.  
-4. **Pull-dominant with optimistic push**  
-   Peers mostly request missing data (“pull”) but may opportunistically push symbols to improve propagation speed.  
-5. **Content authentication**  
-   Segments are described by signed manifests and Merkle-verified symbols to prevent pollution or tampering.  
-6. **Adaptive topology control**  
-   Peers are scored continuously (upload rate, reliability, latency, contribution). High-score peers move closer to the source; weak or malicious nodes are gradually ignored.  
-7. **Reputation-driven clustering**  
-   Reputation and performance determine cluster membership and super-peer promotion.  
-8. **Security hardening**  
-   - Signed manifests and Merkle proofs  
-   - Rate limiting & proof-of-work for new peers  
-   - Encrypted transports (DTLS/TLS)  
-   - Gossip-based local reputation rather than global trust lists  
+1. **Multi-forest overlay**
+   The stream is split into $M$ sub-stream slices carried by $M$ edge-disjoint spanning trees. Each relay-class peer is an interior node in its assigned tree(s) and a leaf elsewhere, so no peer carries the full bitrate upstream. $M$ scales with swarm size (1 → 6).
+2. **S/Kademlia discovery**
+   256-bit XOR routing with Proof-of-Work-bound node IDs and disjoint parallel lookups for eclipse resistance. Streams are self-authenticating: `StreamID = Blake3(publisher pubkey)`.
+3. **HyParView membership**
+   Active set (~8 open QUIC connections) plus a passive standby set (~32 addresses) for sub-second repair under churn.
+4. **Hybrid push-pull**
+   Live-edge segments are pushed proactively down the trees (no request RTT); the trailing 1.5 s of the buffer is repaired by reactive mesh pull.
+5. **RaptorQ FEC**
+   One source block per 16 KB Merkle block ($K = 16$ symbols of 1024 B), with adaptive 5–30% parity sized per link, so packet loss is repaired locally instead of by retransmission.
+6. **Zero-trust verification**
+   Every 16 KB block is Blake3 Merkle-verified against a broadcaster-signed manifest *before* it is forwarded. Corrupted data cannot propagate more than one hop.
+7. **Tit-for-Tat + Proof-of-Upload**
+   500 ms reciprocity cycles with cryptographically signed upload receipts; contribution buys shallower placement and higher SVC layers.
+8. **Emergent relays, no TURN**
+   Peers behind symmetric NAT are served by community relays recruited with a 3× reputation multiplier — paid in latency, not tokens.
 
 ---
 
 ### ⚙️ Key Algorithms
-- **Peer scoring formula** combines upload capacity, reliability, latency, availability, and contribution ratio.  
-- **Promotion/demotion loop** continuously reshapes the overlay:  
-  - Good peers gain connections and move closer to the source.  
-  - Bad peers lose neighbors and drop out.  
-- **Cluster maintenance** keeps local mesh sizes stable (e.g., 50–200 peers).  
-- **Deadline scheduler** prioritizes missing symbols by urgency, rarity, and network cost.  
-- **Erasure coding layer** provides redundancy against loss and churn.  
+- **Parent selection:** multivariate scoring over available capacity, RTT, and hop depth, with warm-up gating and depth admission limits.
+- **Topology healing:** deterministic sibling election over a signed child roster, falling back to passive-set promotion within 250 ms.
+- **Deadline scheduler:** ranks missing blocks by playout urgency and rarity every 100 ms.
+- **Capacity adaptation:** when swarm upload cannot sustain full bitrate, SVC enhancement layers are shed in priority order — the base layer never fails.
 
 ---
 
@@ -58,33 +55,32 @@ The ideas here outline algorithms, topology strategies, and security models that
 |--------|-------------|
 | Chunk poisoning | Signed manifests + Merkle verification |
 | DoS / spam | Token buckets, rate limits, relay shielding |
-| Sybil infiltration | Join tokens or proof-of-work |
-| Free-riding | Contribution-based scoring & throttling |
-| Replay attacks | Short-lived segment IDs |
+| Sybil infiltration | S/Kademlia Proof-of-Work node IDs + subnet diversity limits |
+| Free-riding | Tit-for-Tat unchoking, PoU receipts, SVC layer entitlement |
+| Replay attacks | Monotonic segment sequence numbers + timestamp drift bounds |
 
 ---
 
 ### 🧩 Implementation Directions
-- **Transport layer:** WebRTC or libp2p with STUN/TURN fallback  
-- **Coding:** RaptorQ or Reed-Solomon  
-- **Verification:** Ed25519 signatures, Merkle trees  
-- **Scheduling:** adaptive pull with pipelined requests  
-- **Simulation:** event-driven network to tune parameters (cluster size, FEC overhead, latency)  
+- **Transport layer:** QUIC over UDP with ICE/STUN hole punching and emergent community relays (no TURN)
+- **Coding:** RaptorQ (RFC 6330) systematic fountain codes
+- **Verification:** Ed25519 signatures over Blake3 Merkle trees
+- **Scheduling:** hybrid push (live edge) / deadline-aware pull (trailing buffer)
+- **Simulation:** event-driven network simulation to tune parameters before deployment — see [`protocol/chapter8_simulation/`](protocol/chapter8_simulation/)
 
 ---
 
 ### 🧠 Future Work
-- Detailed message/state-machine spec (bitfields, gossip messages, request/response formats)  
-- Peer reputation propagation models  
-- Cluster balancing under churn  
-- Integration with WebRTC data channels or QUIC  
-- Security protocol proofs and performance simulations  
+- Reference implementation and the Chapter 8 simulation harness
+- Vivaldi synthetic coordinates / ASN-aware peer selection for geographic locality
+- Active-active multi-source ingest with signed broadcaster handover
+- Security protocol proofs and large-scale adversarial simulation
 
 ---
 
 ### 💬 Contributing
-This repository is currently a **concept collection**.  
-The goal is to refine the architecture, define core algorithms, and prototype the system.  
+This repository is a **design specification**, not yet an implementation.
+The goal is to refine the architecture, close the tracked issues, and prototype the system.
 Issues and pull requests with design notes, literature references, or implementation sketches are welcome.
 
 ---

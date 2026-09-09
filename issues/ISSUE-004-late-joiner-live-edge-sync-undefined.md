@@ -1,6 +1,6 @@
 # ISSUE-004: Late-Joiner Live-Edge Sync Is Undefined in the Protocol
 
-**Status:** Open  
+**Status:** Resolved  
 **Priority:** High  
 **Component:** Chapter 4 — Media Distribution / Chapter 2 — Stream Registration  
 **Affects:** Every viewer that joins a stream after it has started  
@@ -82,3 +82,15 @@ The broadcaster must also maintain a short manifest cache (last 8–10 seconds o
 ## Effort
 
 Medium. Requires extending the DHT registration payload, adding a `live_edge_segment_id` field to the `REGISTER_PEER` frame, and defining the new-viewer bootstrap sequence in the state machine (add a sync step between CONNECTING and ACTIVE).
+
+---
+
+## Resolution
+
+Applied the proposed fix to the spec:
+
+- `protocol/chapter2/2.3_stream_registration/1_publisher_genesis_key.md` — new "Publisher Stream Record (Live-Edge Anchor)" section defines the signed DHT record with `live_edge_segment_id`, `live_edge_manifest_hash`, `live_edge_timestamp` (µs), `swarm_size`, `manifest_version`, `num_trees`, and `tree_mapping`, republished every 1.0s.
+- `protocol/chapter2/2.3_stream_registration/2_store_get_rpcs.md` — `GET_PEERS` responses now carry the Stream Record, so live-edge sync needs no extra round-trip.
+- `protocol/chapter4/4.3_hybrid_push_pull/1_buffer_sliding_timeline.md` — new "Late-Joiner Live-Edge Synchronization" section defines the 5-step join sequence (anchor at X, manifest from parent, PUSH from X+1, PULL gaps of X) plus the 8–10s late-joiner serving buffer and the "never wall-clock, never segment 0" rule.
+- `protocol/chapter1/1.3_peer_lifecycle/1_transition_model.md` — CONNECTING now includes live-edge anchoring; ACTIVE requires it.
+- `protocol/schemas/p2p_live.proto` — new `StreamRecord` + `TreeMapping` messages; `GetPeersResponse.stream_record` field added.

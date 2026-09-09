@@ -13,7 +13,7 @@ Used to request active connection promotion from the Passive Set.
 |                      S/Kademlia Sender NodeID                 |
 |                            (32 bytes)                         |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|   Priority (0x01=High, 0x02=Low) | Reserved                   |
+|   Priority (0x01=High, 0x02=Low) | TreeID   | Reserved        |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
 SHUFFLE Frame (Type 0x06):
@@ -42,3 +42,6 @@ Used to gracefully terminate a peer connection and release socket resources.
 |   Reason Code (0x01=Choke, 0x02=Quit, 0x03=Eviction)          |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
+
+*   **NEIGHBOR `TreeID`:** `0x00` requests plain HyParView membership promotion (the classic semantics); a value $m > 0$ requests a **parent slot in tree $T_m$** — this is the `RELAY_JOIN_REQUEST` used by topology healing (Ch1 §1.2.3) when sent with `Priority = High`. Successful requests are answered with an `ACCEPTED` (0x08) frame carrying the acceptor's hop depth (Appendix D §D.4.4).
+*   The complete frame-type registry, including `JOIN` (0x03), `FORWARD_JOIN` (0x09), `ACCEPTED` (0x08), and the HMAC-authenticated `GOSSIP_EXCHANGE` (0x14) carrying the Ch3 §3.2.2 session HMAC, is defined in [Appendix D](../../appendix_d_frame_registry.md).

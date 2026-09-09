@@ -1,6 +1,6 @@
 # ISSUE-003: TFT Optimistic Unchoke Creates a Join Queue for Simultaneous Viewers
 
-**Status:** Open  
+**Status:** Resolved  
 **Priority:** Medium  
 **Component:** Chapter 5 — Tit-for-Tat Incentive Layer  
 **Affects:** Streams where multiple viewers join at the same time (stream launch, shared links, events)  
@@ -76,3 +76,12 @@ Option A is the most robust. Option C is the lowest-effort quick fix.
 ## Effort
 
 Low–Medium. Changes confined to the TFT unchoker loop. No wire format changes needed.
+
+---
+
+## Resolution
+
+Applied Option A (adaptive slot count) to the spec:
+
+- `protocol/chapter5/5.1_tit_for_tat/3_optimistic_exploration.md` — optimistic slots now scale with the observed join burst: `optimistic_slots = min(ceil(new_joiners / 3), 4)`, where new joiners are peers with ~zero contribution score over the last 2 s. Candidates are drawn preferentially from the new-joiner pool; steady-state behaviour (1 slot) is unchanged. Updated pseudocode included.
+- `protocol/chapter5/5.1_tit_for_tat/2_sliding_window_unchoker.md` — noted that optimistically unchoked peers are exempt from the choke loop during their 2 s exploration window.

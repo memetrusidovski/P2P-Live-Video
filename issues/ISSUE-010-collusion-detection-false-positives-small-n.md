@@ -1,6 +1,6 @@
 # ISSUE-010: Collusion Detection False Positives Flag Legitimate Peers at Small N
 
-**Status:** Open  
+**Status:** Resolved  
 **Priority:** Medium  
 **Component:** Chapter 5 — Reputation Auditing  
 **Affects:** Streams at N < ~20 peers  
@@ -92,3 +92,13 @@ This change means collusion detection is effectively disabled below N=20, which 
 ## Effort
 
 Low. Single guard condition in the collusion check function. No wire format changes. The `REPUTATION_AUDIT_GOSSIP` frame format is unchanged; the change is in the local evaluation logic that determines what to include in the gossip.
+
+---
+
+## Resolution
+
+Applied the proposed fix to the spec:
+
+- `protocol/chapter5/5.3_reputation_auditing/1_graph_collusion_auditing.md` — new "Small-Swarm Guard" section: collusion flags fully suppressed below `COLLUSION_MIN_SWARM_SIZE = 20` (swarm size read from the DHT Stream Record added by ISSUE-004), plus degree-weighted confidence `symmetry_score × (1 − 1/degree(A))` so a degree-1 node can never be flagged. Updated pseudocode included.
+- `protocol/chapter5/5.3_reputation_auditing/2_ip_subnet_penalties.md` — the /24//48 subnet penalty is suppressed below the same threshold (friends on one ISP / CGNAT households are legitimate at small N).
+- `protocol/appendix_b_parameters.md` — added `N_collusion = 20`.

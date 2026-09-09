@@ -1,10 +1,10 @@
 # ISSUE-002: Hardcoded M=6 Forest Size Forces Source to Bear Full CDN Load During Cold-Start
 
-**Status:** Open  
+**Status:** Resolved  
 **Priority:** High  
 **Component:** Chapter 1 — Multi-Forest Overlay / Stream Slicing  
 **Affects:** All streams at N < ~18 peers  
-**File:** `protocol/chapter1/1.2_multi_forest_deep_dive/1_graph_theory_and_slicing.md`, `4_stream_slicing_architecture.md`, `protocol/appendix_b_parameters.md`
+**File:** `protocol/chapter1/1.2_multi_forest_overlays/1_graph_theory_and_slicing.md`, `4_stream_slicing_architecture.md`, `protocol/appendix_b_parameters.md`
 
 ---
 
@@ -77,3 +77,14 @@ This means at N=2, M=1 and the source pushes the full 6 Mbps to 1 viewer — wel
 ## Effort
 
 Medium. Requires manifest versioning, a `MANIFEST_UPDATE` frame type, and client-side re-join logic at M transitions. The core tree join algorithm is unchanged — only the input M varies.
+
+---
+
+## Resolution
+
+Applied the dynamic-M fix to the spec:
+
+- `protocol/chapter1/1.2_multi_forest_overlays/1_graph_theory_and_slicing.md` — new §1.3.1 "Dynamic Forest Sizing" defines the M ladder (M=1 at N<6 up to M=6 at N≥30) with per-step slice bitrates and rationale; the "exactly N/M relays" claim softened to statistical.
+- `protocol/chapter1/1.2_multi_forest_overlays/4_stream_slicing_architecture.md` — new §4.5 "Dynamic Forest Resizing (MANIFEST_UPDATE)" defines the signed, versioned `MANIFEST_UPDATE` frame, the 5-second migration window with old trees kept active, and drain/close semantics; the §4.4 manifest example now carries `manifest_version`.
+- `protocol/appendix_b_parameters.md` — the `M = 6` constant is now `M_max = 6` with the dynamic ladder referenced.
+- The current M is carried in the publisher's DHT Stream Record (`num_trees`), added by ISSUE-004's shared record change.

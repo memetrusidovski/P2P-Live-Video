@@ -23,33 +23,35 @@ Output: Execution Status
 14:             
 15:         case DISCOVERY:
 16:             PublisherRecords <- QueryDHT(StreamID)
-17:             If PublisherRecords is not empty then:
-18:                 State <- JOINING
-19:                 
-20:         case JOINING:
-21:             TriggerHyParViewHandshakes()
-22:             If Size(ActiveSet) >= TargetActiveSize then:
-23:                 State <- CONNECTING
+17:             SwarmSize <- KnownPeerCount(PublisherRecords)  // cached for JOINING
+18:             If PublisherRecords is not empty then:
+19:                 State <- JOINING
+20:                 
+21:         case JOINING:
+22:             TriggerHyParViewHandshakes()
+23:             JoinThreshold <- Max(1, Min(4, SwarmSize - 1))  // adaptive (see 1_transition_model.md)
+24:             If Size(ActiveSet) >= JoinThreshold then:
+25:                 State <- CONNECTING
 24:                 
-25:         case CONNECTING:
-26:             Parents <- ExecuteMultiForestJoin(M)
-27:             If Size(Parents) == M then:
-28:                 State <- ACTIVE
-29:                 
-30:         case ACTIVE:
-31:             ProcessStreamingBuffers()
-32:             EvaluateNeighborScores()
-33:             If AnyParentTimeoutDetected(Timestamp) then:
-34:                 State <- CHURN_REPAIR
-35:                 
-36:         case CHURN_REPAIR:
-37:             TriggerSubsecondParentReRoute()
-38:             If AllSlicesRestored() then:
-39:                 State <- ACTIVE
-40:             Else If AllConnectionsLost() then:
-41:                 State <- DISCOVERY
-42:                 
-43:     // Handle OS signals and low-latency network packet arrivals
-44:     PollNetworkSockets()
-45:     SleepMicroseconds(500) // Yield CPU
+26:         case CONNECTING:
+27:             Parents <- ExecuteMultiForestJoin(M)
+28:             If Size(Parents) == M then:
+29:                 State <- ACTIVE
+30:                 
+31:         case ACTIVE:
+32:             ProcessStreamingBuffers()
+33:             EvaluateNeighborScores()
+34:             If AnyParentTimeoutDetected(Timestamp) then:
+35:                 State <- CHURN_REPAIR
+36:                 
+37:         case CHURN_REPAIR:
+38:             TriggerSubsecondParentReRoute()
+39:             If AllSlicesRestored() then:
+40:                 State <- ACTIVE
+41:             Else If AllConnectionsLost() then:
+42:                 State <- DISCOVERY
+43:                 
+44:     // Handle OS signals and low-latency network packet arrivals
+45:     PollNetworkSockets()
+46:     SleepMicroseconds(500) // Yield CPU
 ```

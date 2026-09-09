@@ -2,6 +2,8 @@
 
 The Distributed Hash Table (DHT) acts as the decentralized ledger for stream lookup. Unlike standard static torrent files, live streaming streams require a dynamic peer lookup system to track active uploaders as viewers continuously join and leave.
 
+These "RPCs" are **plain-UDP request/response frames** (`REGISTER_PEER` 0x0A, `GET_PEERS` 0x0B — see Appendix D), not remote procedure calls over a session protocol: they precede any QUIC session and therefore each carries the full 152-byte S/Kademlia validation block (Ch2 §2.2.3).
+
 ```text
       [ Joining Peer ]                      [ DHT Guardian Node ]
              |                                        |
@@ -25,3 +27,4 @@ To register as an active peer for a specific stream:
 To fetch a list of active uploaders:
 1.  The client executes a `GET_PEERS` RPC targeting $K_s$.
 2.  The DHT guardians return a compacted list of up to 20 highly active peers, prioritized by RTT coordinates if the optional latency extension is active.
+3.  The response also carries the publisher's current signed **Stream Record** (see [1. Publisher Genesis Key](1_publisher_genesis_key.md)), giving the joining client the live-edge segment ID, current swarm size, and forest size $M$ in the same round-trip — no additional lookup is needed before live-edge synchronization (Ch4 §4.3) can begin.

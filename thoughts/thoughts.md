@@ -1,5 +1,12 @@
 # Decentralized P2P Live Streaming Protocol Architecture
 
+> **⚠️ Historical design notes — superseded by [`protocol/`](../protocol/).**
+>
+> This document captures early exploratory reasoning and is retained for that reasoning, not as a specification. Where it disagrees with the canonical spec in `protocol/`, **the spec wins**. Two divergences are worth calling out explicitly:
+>
+> - **Topology:** this document argues for an unstructured mesh ("Tree Structures Are Fragile"). The specification instead mandates a structured multi-forest overlay, because mesh-pull flooding cannot meet the latency bound — see [`protocol/chapter1/1.1_scale_latency/4_unstructured_swarm_failure.md`](../protocol/chapter1/1.1_scale_latency/4_unstructured_swarm_failure.md). Tree fragility is addressed by sub-250 ms healing ([`3_topology_healing.md`](../protocol/chapter1/1.2_multi_forest_overlays/3_topology_healing.md)) rather than by abandoning trees.
+> - **Latency target:** the "< 30 seconds end-to-end" figure here is superseded by the specification's 3–5 s playout deadline.
+
 ## Overview
 
 This document describes the architecture of a highly decentralized live video streaming protocol designed to support:

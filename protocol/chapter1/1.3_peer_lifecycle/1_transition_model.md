@@ -6,11 +6,26 @@ To maintain the stability of the multi-forest overlay under high churn and netwo
 | :--- | :--- | :--- | :--- |
 | **BOOTSTRAP** | `0x00` | Instantiating keypairs, validating Node ID, loading local candidate cache | `DISCOVERY` (Initial seed loaded) |
 | **DISCOVERY** | `0x01` | Querying S/Kademlia DHT for active stream keys and stream publisher info | `JOINING` (Stream records fetched) |
-| **JOINING** | `0x02` | Executing HyParView handshakes, populating Active and Passive sets | `CONNECTING` (Active set size $\ge 4$) |
-| **CONNECTING**| `0x03` | Initiating Tree Join handshakes to establish parent connections | `ACTIVE` (Parents connected for all $M$ slices) |
+| **JOINING** | `0x02` | Executing HyParView handshakes, populating Active and Passive sets | `CONNECTING` (Active set size $\ge \theta_{\text{join}}$, see below) |
+| **CONNECTING**| `0x03` | Initiating Tree Join handshakes to establish parent connections; anchoring the buffer to `live_edge_segment_id` from the Stream Record (Ch4 §4.3 late-joiner sync) | `ACTIVE` (Parents connected for all $M$ slices, live edge anchored) |
 | **ACTIVE** | `0x04` | Streaming active video; decoding, verifying, and uploading symbols | `CHURN_REPAIR` (Parent timeout / packet loss) <br> `TERMINATED` (Verified `STREAM_END` gossip received) |
 | **CHURN_REPAIR**| `0x05` | Re-routing failed slices to standby candidate peers from Passive Set | `ACTIVE` (Re-route successful) <br> `DISCOVERY` (All parents lost, complete disconnect) <br> `TERMINATED` (Verified `STREAM_END` gossip received) |
 | **TERMINATED**| `0x06` | Shutting down connections, releasing sockets, broadcasting disconnect | (None) |
+
+## Adaptive JOINING Threshold
+
+The `JOINING` → `CONNECTING` transition fires when the Active Set reaches the adaptive threshold $\theta_{\text{join}}$, computed from the swarm size $N$ learned during `DISCOVERY` (the peer count returned by the stream registration lookup — no extra round-trip is required):
+
+$$\theta_{\text{join}} = \max(1, \min(4, N - 1))$$
+
+| Total peers $N$ (source + viewers) | $\theta_{\text{join}}$ | Behaviour |
+| :---: | :---: | :--- |
+| 2 | 1 | First viewer connects directly to the source |
+| 3 | 2 | |
+| 4 | 3 | |
+| $\ge 5$ | 4 | Full threshold (half of $c_a = 8$) |
+
+A fixed threshold of 4 would permanently block every stream at $N < 5$: with only $N - 1$ other peers in existence, the HyParView `FORWARD_JOIN` random walk can never populate an Active Set of 4, and every viewer would be stuck in `JOINING` before receiving a single frame. The adaptive threshold restores normal behaviour at $N \ge 5$ while making cold-start (every stream begins at $N = 2$) work.
 
 ## State Transition Diagram
 

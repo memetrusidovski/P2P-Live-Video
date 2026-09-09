@@ -13,7 +13,7 @@ REGISTER_PEER Payload Frame:
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                                                               |
 |                     S/Kademlia ID Validation Block            |
-|                           (80 bytes)                          |
+|                    (152 bytes — see Ch2 §2.2.3)               |
 |                                                               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |   Port Number (16-bit)        | Protocol Type (0x01=UDP)      |

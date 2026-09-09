@@ -1,6 +1,6 @@
 # ISSUE-011: Proof-of-Work Join Cost Is Identical at N=2 and N=1,000,000
 
-**Status:** Open  
+**Status:** Resolved  
 **Priority:** Low  
 **Component:** Chapter 2 — S/Kademlia Cryptographic Node IDs  
 **Affects:** Small streams; mobile viewers; frequent re-joins after IP change  
@@ -87,3 +87,13 @@ if is_reconnect and same_subnet(old_ip, new_ip):
 ## Effort
 
 Low-Medium. Requires the difficulty to be encoded in the `VALIDATION` frame and verified by receiving peers. The puzzle algorithm itself is unchanged — just the difficulty constant varies. The DHT registration record needs a `swarm_size` field (overlaps with ISSUE-004 work).
+
+---
+
+## Resolution
+
+Applied the proposed fix to the spec:
+
+- `protocol/chapter2/2.2_crypto_node_id/1_static_dynamic_puzzles.md` — new "Adaptive Dynamic Difficulty" section: C2 scales with the swarm size from the DHT Stream Record (8/10/12/14 at N<50/1k/100k/≥100k); the difficulty used is carried in the validation frame header, verifiers accept ≥ required tier with a ±1-tier grace band. New "Reconnect Fast Path" section: same-/24 (or /48) IP change with a signed identity-continuity challenge earns C2_effective = ceil(C2/2); subnet changes always pay full difficulty. C1=16 stays fixed at all scales.
+- `protocol/appendix_b_parameters.md` — C2 entry documents the adaptive ladder and reconnect discount.
+- Depends on the `swarm_size` Stream Record field added by ISSUE-004.

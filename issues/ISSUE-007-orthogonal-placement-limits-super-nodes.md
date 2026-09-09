@@ -1,10 +1,10 @@
 # ISSUE-007: Orthogonal Placement Rule Restricts Super Nodes to 1 of 6 Trees
 
-**Status:** Open  
+**Status:** Resolved  
 **Priority:** High  
 **Component:** Chapter 1 — Multi-Forest Overlay / Stream Slicing  
 **Affects:** High-bandwidth nodes (1 Gbps+), dedicated relay servers (10 Gbps)  
-**File:** `protocol/chapter1/1.2_multi_forest_deep_dive/1_graph_theory_and_slicing.md`
+**File:** `protocol/chapter1/1.2_multi_forest_overlays/1_graph_theory_and_slicing.md`
 
 ---
 
@@ -64,46 +64,42 @@ One server could be the backbone for the entire stream at large N, rather than n
 
 **Capacity-proportional multi-tree assignment for high-bandwidth nodes.**
 
-Replace the hard single-tree assignment with a capacity-based assignment that allows nodes with excess bandwidth to relay in multiple trees:
+Replace the hard single-tree assignment with a capacity-based assignment that allows nodes with excess bandwidth to relay in multiple trees. The number of trees a node may relay is the number of *full-stream-equivalent* loads its upload can carry (`floor(u_v / B)`), capped at M; its slots are then distributed evenly across those trees:
 
 ```python
 def compute_tree_assignments(node_id, u_v, B_m, M, B):
-    # How many full slices can this node carry simultaneously?
-    max_trees = min(M, floor(u_v / B))    # B = full stream bitrate (6 Mbps)
-    
+    # How many full-stream-equivalent loads (B = full bitrate, 6 Mbps)
+    # can this node carry? That is how many trees it may relay in.
+    max_trees = min(M, max(1, floor(u_v / B)))
+    per_tree_slots = floor(u_v / (max_trees * B_m))
+
     if max_trees == 1:
         # Standard node: original single-tree deterministic assignment
         return [(Blake3(node_id) % M) + 1]
     else:
-        # Super node: assign to multiple trees, spread by hash
+        # Super node: assign to multiple trees, spread round-robin from
+        # the hash-derived primary tree to preserve coverage dispersion
         primary = (Blake3(node_id) % M) + 1
-        assignments = [primary]
-        for i in range(1, max_trees):
-            next_tree = ((primary - 1 + i) % M) + 1   # round-robin from primary
-            assignments.append(next_tree)
-        return assignments
+        return [((primary - 1 + i) % M) + 1 for i in range(max_trees)]
 ```
 
-For a 10 Gbps node with B=6 Mbps: `max_trees = floor(10000 / 6000) = 1`. Only 1 tree.
+Worked examples (B = 6 Mbps, B_m = 1 Mbps, M = 6):
 
-Wait — that's the same result. The issue is that the per-slice capacity K_v = floor(u_v / B_m) = 10,000 but the full stream requires 6 Mbps, not 1 Mbps. If B_m = 1 Mbps and u_v = 10 Gbps, the node can relay 10 Gbps / 6 Mbps = 1666 full-stream-equivalent children, but across all 6 trees.
-
-Revised formula:
-```python
-max_trees = min(M, floor(u_v / B_m))    # how many trees can carry children in
-per_tree_slots = floor(u_v / (max_trees * B_m))  # slots distributed across trees
-```
-
-For a 10 Gbps node: `max_trees = min(6, 10000) = 6`. Per-tree slots = `floor(10000 / (6 × 1)) = 1666` children per tree. Total upload = 6 × 1666 × 1 Mbps = 9996 Mbps ≈ 10 Gbps. ✓
+| Node upload | max_trees | per_tree_slots | Total upload used |
+|---|---|---|---|
+| 10 Mbps | 1 | 10 | 10 Mbps (unchanged behaviour) |
+| 12 Mbps | 2 | 6 | 12 Mbps |
+| 36 Mbps | 6 | 6 | 36 Mbps |
+| 10 Gbps | 6 | 1666 | 6 × 1666 × 1 Mbps ≈ 10 Gbps ✓ |
 
 This means one 10 Gbps server becomes a Layer-1 relay for all 6 trees, serving 1666 children per tree. A single server now provides full stream backbone coverage.
 
-**Threshold for multi-tree eligibility:**
+**Threshold for multi-tree eligibility** (equivalent statement of `floor(u_v / B) ≥ 2`):
 ```
 u_v ≥ B × 2    (at least 2× the full stream bitrate)
 ```
 
-At B=6 Mbps, nodes with ≥12 Mbps upload get 2 trees. Nodes with ≥36 Mbps get 6 trees.
+At B=6 Mbps, nodes with ≥12 Mbps upload get 2 trees. Nodes with ≥36 Mbps get all 6 trees.
 
 The `Orthogonal Placement Rule` comment about preventing hotspots is satisfied by the per-tree slot limit — the node can't give more than `K_v / max_trees` slots to any single tree child.
 
@@ -112,3 +108,12 @@ The `Orthogonal Placement Rule` comment about preventing hotspots is satisfied b
 ## Effort
 
 Medium-High. Changes the core tree assignment algorithm, the capacity advertisement format (must advertise tree list, not single tree), and the DHT peer registration (must index peer by all assigned trees). Parent selection algorithm is unchanged — each tree still scores independently.
+
+---
+
+## Resolution
+
+Applied the capacity-proportional multi-tree assignment to the spec:
+
+- `protocol/chapter1/1.2_multi_forest_overlays/1_graph_theory_and_slicing.md` — new "Capacity-Proportional Multi-Tree Assignment (Super Nodes)" section under §1.3: `max_trees = min(M, max(1, floor(u_v / B)))` with `per_tree_slots = floor(u_v / (max_trees · B_m))`, round-robin spread from the hash-derived primary tree, per-tree slot cap preserving the anti-hotspot guarantee, DHT registration under every assigned tree, and worked examples (12 Mbps → 2 trees; 10 Gbps → all 6 trees at ~1666 children each). The single-tree Orthogonal Placement Rule is now explicitly scoped to standard nodes.
+- Builds on ISSUE-002's dynamic M (assignments recompute on `MANIFEST_UPDATE`).

@@ -1,6 +1,6 @@
 # ISSUE-006: Empty Passive Set During Early Growth Makes Churn Recovery Slow
 
-**Status:** Open  
+**Status:** Resolved  
 **Priority:** Medium  
 **Component:** Chapter 3 — HyParView Overlay Membership  
 **Affects:** Streams at N < ~35 peers  
@@ -87,3 +87,11 @@ Option A is lower effort. Option B is more architecturally correct.
 ## Effort
 
 Low (Option A). The cached DHT peer list is already in memory from DISCOVERY — this is a routing change, not a data collection change.
+
+---
+
+## Resolution
+
+Applied Option A (cached DHT peer list) to the spec:
+
+- `protocol/chapter3/3.3_churn_recovery/1_recovery_timeline.md` — new "Small-Swarm Fallback: Cached Discovery Peer List" section: when `|P| < 3`, CHURN_REPAIR uses the in-memory peer list from the most recent DISCOVERY-phase GET_PEERS query (zero round-trips) instead of a fresh 1–3 s DHT walk; full DHT re-lookup remains the final fallback. Updated pseudocode included.

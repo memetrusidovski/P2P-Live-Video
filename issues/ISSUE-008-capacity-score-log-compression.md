@@ -1,10 +1,10 @@
 # ISSUE-008: CapacityScore Log Compression Undersells High-Bandwidth Nodes in Parent Selection
 
-**Status:** Open  
+**Status:** Resolved  
 **Priority:** Low  
 **Component:** Chapter 1 — Parent Selection Algorithm  
 **Affects:** Swarms with mixed bandwidth peers; super node deployments  
-**File:** `protocol/chapter1/1.2_multi_forest_deep_dive/2_parent_selection_algorithm.md`
+**File:** `protocol/chapter1/1.2_multi_forest_overlays/2_parent_selection_algorithm.md`
 
 ---
 
@@ -101,3 +101,11 @@ Option A is simpler and more principled. The choice of sqrt vs log is a tuning p
 ## Effort
 
 Very low. Single formula change. Should be validated via the Chapter 8 simulation framework before deploying.
+
+---
+
+## Resolution
+
+Applied Option A (square-root compression) to the spec:
+
+- `protocol/chapter1/1.2_multi_forest_overlays/2_parent_selection_algorithm.md` — Component 1 is now `CapacityScore(p) = sqrt(K_avail) × R` (both the formula and the tree-join pseudocode); the design note explains why the log was too flat (3.8× advantage for a 1000× bandwidth difference) and flags the exponent as a Chapter 8 simulation-validated tuning parameter.

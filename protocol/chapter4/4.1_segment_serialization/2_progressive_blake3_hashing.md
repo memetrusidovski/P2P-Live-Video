@@ -29,3 +29,15 @@ $$h_{0,1}' = \text{Blake3}(h_0' \parallel h_1)$$
 $$H_{\text{root}}' = \text{Blake3}(h_{0,1}' \parallel h_{2,3})$$
 
 If $H_{\text{root}}' == H_{\text{root}}$ (extracted from the signed manifest), **the client validates the block and immediately forwards it to downstream children**, achieving sub-millisecond, zero-trust progressive verification.
+
+## Blocks vs. Symbols: The Verification Boundary
+
+The 16 KB Merkle block and the 1024 B RaptorQ symbol (Ch4 §4.2) are two views of the same data unit: **one RaptorQ source block per Merkle block**, encoded as $K = 16$ source symbols plus adaptive parity. The `SBN` field of every `RAPTORQ_SYMBOL` frame is the Merkle block index.
+
+The zero-trust verification boundary is the **block**, never the symbol:
+
+*   Symbols are a link-local loss-recovery encoding. They carry no Merkle proofs (per-symbol proofs would add ~19% overhead to a 1 KB payload) and are **never individually verified or forwarded raw**.
+*   An interior relay operates **decode → verify → re-encode → push**: reconstruct block $B_i$ from any $\ge 16$ received symbols, verify it against the signed manifest root using its Merkle path (delivered via the `BLOCK_PROOF` 0x13 frame on the push path, or inline in `BLOCK_TRANSMISSION` 0x10 on the pull path), and only then generate *fresh* symbols — with parity sized per downstream link (§4.2.2) — for its children.
+*   A block that fails verification is dropped, the delivering parent is flagged (Ch5 §5.3), and the block is re-pulled from an alternate neighbor.
+
+This preserves the verify-then-forward guarantee end-to-end: corrupted data can never propagate further than one hop, while loss recovery still operates at fine symbol granularity on each link. Proof-of-Upload receipts (Ch5 §5.2) are likewise issued per verified block.

@@ -8,11 +8,13 @@ This index defines the complete, granular folder structure of the protocol speci
     *   `2_propagation_latency.md`: Playout deadlines and end-to-end delay equations.
     *   `3_logarithmic_scaling.md`: Mathematical proof of $D \le c \log_k(N)$.
     *   `4_unstructured_swarm_failure.md`: Why mesh-pull flooding fails low-latency bounds.
-*   **`1.2_multi_forest_overlays/`** *(Previously 1.2_multi_forest_deep_dive)*
+    *   `5_capacity_adaptation.md`: Degraded operation when $\sum u_i < N \cdot B$ — SVC layer shedding and source reserve.
+*   **`1.2_multi_forest_overlays/`**
     *   `1_graph_theory_and_slicing.md`: Edge-disjoint spanning trees and the Orthogonal Placement Rule.
     *   `2_parent_selection_algorithm.md`: Multivariate scoring function and tree join algorithm.
     *   `3_topology_healing.md`: Sub-250ms deterministic lateral sibling election.
     *   `4_stream_slicing_architecture.md`: Graceful degradation using SVC and MDC.
+    *   `5_node_classes.md`: The `RELAY`/`LEAF`/`LEAF_PRIVATE` taxonomy and relay eligibility.
 *   **`1.3_peer_lifecycle/`**
     *   `1_transition_model.md`: State-machine definition (`BOOTSTRAP` to `TERMINATED`).
     *   `2_algorithmic_core_loop.md`: The microsecond event-driven execution loop.
@@ -99,5 +101,6 @@ This index defines the complete, granular folder structure of the protocol speci
 *   `appendix_a_sequence_diagrams.md`
 *   `appendix_b_parameters.md`
 *   `appendix_c_threat_model.md`
+*   `appendix_d_frame_registry.md` — canonical frame-type registry, transport mapping, and byte layouts
 *   `schemas/p2p_live.proto`
 *   `chapter8_simulation/README.md`

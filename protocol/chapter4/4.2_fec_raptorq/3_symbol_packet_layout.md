@@ -20,6 +20,7 @@ RAPTORQ_SYMBOL Frame (Type 0x12):
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
-*   **Source Block Number (SBN):** Maps the symbol to a specific video segment.
-*   **Encoding Symbol ID (ESI):** Identifies the specific symbol index. Values of $\text{ESI} < K$ correspond to original source symbols, while values of $\text{ESI} \ge K$ indicate generated parity symbols.
+*   **Source Block Number (SBN):** The index of the **16 KB Merkle block within the segment** (see Ch4 §4.1). One RaptorQ source block corresponds to exactly one Merkle block: $K = 16$ source symbols of 1024 bytes each ($K_{\text{block}}$, Appendix B). The segment is identified separately by the Segment Sequence Number field.
+*   **Encoding Symbol ID (ESI):** Identifies the specific symbol index. Values of $\text{ESI} < 16$ correspond to original source symbols (the block's 16 raw 1 KB slices, in order), while values of $\text{ESI} \ge 16$ indicate generated parity symbols.
 *   **Symbol Size:** Fixed to 1024 bytes to prevent IP fragmentation over standard internet MTU limits ($1500$ bytes).
+*   **Padding:** The final block of a segment is zero-padded to the full 16 KB for hashing and FEC; the true segment length travels in the `MANIFEST` frame's `SegmentByteLength` field (Appendix D §D.4.8).

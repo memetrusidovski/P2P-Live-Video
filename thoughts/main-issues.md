@@ -1,5 +1,19 @@
 # Risks, Failure Modes, and Mitigation Strategies
 
+> **⚠️ Historical risk catalogue — superseded by [`protocol/`](../protocol/) where the two disagree.**
+>
+> This document is the original threat-and-failure-mode survey. Most of its mitigations were adopted into the specification; several were not, and a few were changed. It remains useful as the *reasoning* behind the design, but is not normative.
+>
+> **Adopted into `protocol/`:** signed Merkle manifests, Blake3 verification, self-authenticating StreamIDs, S/Kademlia PoW + subnet diversity, signed short-TTL DHT records, available-capacity advertising, hybrid push-pull, FEC, multi-parent redundancy, sequence-number logical clocks, hop-count minimisation, small-world random links, sliding-window buffer eviction, Bloom-compressed bitfields, QUIC hole punching, incentivised community relays, onion privacy mode.
+>
+> **Changed by the specification:**
+> - *Risk 16 (Mobile):* the "PoW exemption" for mobile devices is **superseded**. Proof-of-Work is universal — leaf-class devices get difficulty tiering instead, and leaf-only status is priced in quality of service rather than exempted. See [`5_node_classes.md`](../protocol/chapter1/1.2_multi_forest_overlays/5_node_classes.md).
+> - *Risk 20 (Incentive Collapse):* "zero-knowledge chunks" (releasing decryption keys only against a prior PoU) is **not adopted**; the spec relies on TFT + PoU + SVC entitlement instead. Recorded as future work.
+> - *FEC overhead:* 10% here; the spec uses adaptive 5–30% per link.
+> - *DHT TTL:* "3 to 5 minutes" here; the spec fixes $\tau_{ttl} = 180$ s.
+>
+> **Not yet in `protocol/` (open future work):** Vivaldi synthetic coordinates and BGP/ASN-aware peer selection (Risk 9), active-active multi-source ingest with signed handover (Risk 7), the explicit 80/20 performance/random neighbour split (Risk 15), delta-only gossip updates (Risk 23), and routing hysteresis cool-down timers (Risk 25).
+
 ## Overview
 
 Building a decentralized live-streaming protocol capable of serving hundreds of thousands or millions of concurrent viewers introduces a variety of challenges beyond basic video transport.

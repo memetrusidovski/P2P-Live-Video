@@ -1,6 +1,6 @@
 # 3. Rarest-First Pull Heuristics and Buffer Scheduler
 
-The scheduling engine runs every $100\text{ ms}$ to evaluate buffer health and dispatch reactive pull requests. It determines chunk urgency based on the approaching playout deadline and chunk rarity based on neighbor bitfields.
+The scheduling engine runs every $\tau_{\text{sched}} = 100\text{ ms}$ to evaluate buffer health and dispatch reactive pull requests. This is deliberately faster than the $\tau_{\text{gossip}} = 1000\text{ ms}$ bitfield exchange interval: the scheduler re-evaluates urgency ten times per gossip round against the neighbor availability it already holds, so a block that becomes urgent mid-round is pulled immediately rather than waiting for fresh gossip. It determines chunk urgency based on the approaching playout deadline and chunk rarity based on neighbor bitfields.
 
 ```text
 Algorithm: Deadline-Aware Swarm Buffer Scheduler

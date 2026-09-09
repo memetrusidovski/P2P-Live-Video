@@ -1,6 +1,6 @@
 # ISSUE-001: JOINING State Machine Hard Blocks Streams With Fewer Than 5 Peers
 
-**Status:** Open  
+**Status:** Resolved  
 **Priority:** Critical  
 **Component:** Chapter 1 — Peer Lifecycle / State Machine  
 **Affects:** All streams at N < 5  
@@ -77,3 +77,12 @@ The DHT peer count (`QueryDHT_KnownPeerCount`) is already fetched during DISCOVE
 ## Effort
 
 Small. Single conditional change in the core loop. No protocol wire format changes needed.
+
+---
+
+## Resolution
+
+Applied the proposed fix to the spec:
+
+- `protocol/chapter1/1.3_peer_lifecycle/1_transition_model.md` — the `JOINING → CONNECTING` trigger is now the adaptive threshold $\theta_{\text{join}} = \max(1, \min(4, N-1))$, with a new "Adaptive JOINING Threshold" section defining the formula, the per-N behaviour table, and the rationale.
+- `protocol/chapter1/1.3_peer_lifecycle/2_algorithmic_core_loop.md` — the DISCOVERY case now caches `SwarmSize` from the DHT stream lookup (no extra round-trip), and the JOINING case computes `JoinThreshold <- Max(1, Min(4, SwarmSize - 1))` instead of comparing against the fixed `TargetActiveSize`.

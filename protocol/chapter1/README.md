@@ -4,6 +4,6 @@ This chapter establishes the core mathematical constraints, scaling bounds, and 
 
 ## Subchapters
 
-*   **[1.1 Scale and Latency Bounds of Million-Peer Swarms](1.1_scale_latency.md)**
-*   **[1.2 Mathematical Formulation of Dynamic Multi-Forest Overlays](1.2_multi_forest_overlays.md)**
-*   **[1.3 State-Machine Representation of Peer Life Cycle](1.3_peer_lifecycle.md)**
+*   **[1.1 Scale and Latency Bounds of Million-Peer Swarms](1.1_scale_latency/README.md)**
+*   **[1.2 Mathematical Formulation of Dynamic Multi-Forest Overlays](1.2_multi_forest_overlays/README.md)**
+*   **[1.3 State-Machine Representation of Peer Life Cycle](1.3_peer_lifecycle/README.md)**

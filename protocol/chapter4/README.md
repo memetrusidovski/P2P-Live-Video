@@ -4,6 +4,6 @@ This chapter introduces our hybrid push-pull video chunk transmission scheme, Ra
 
 ## Subchapters
 
-*   **[4.1 Segment Serialization and Blake3 Merkle-Tree Encoding](4.1_segment_serialization.md)**
-*   **[4.2 Forward Error Correction (FEC) Layer: RaptorQ Packetization](4.2_fec_raptorq.md)**
-*   **[4.3 Hybrid Push-Pull Scheduling Logic and Buffer State-Bitfield Formats](4.3_push_pull_scheduling.md)**
+*   **[4.1 Segment Serialization and Blake3 Merkle-Tree Encoding](4.1_segment_serialization/README.md)**
+*   **[4.2 Forward Error Correction (FEC) Layer: RaptorQ Packetization](4.2_fec_raptorq/README.md)**
+*   **[4.3 Hybrid Push-Pull Scheduling Logic and Buffer State-Bitfield Formats](4.3_hybrid_push_pull/README.md)**

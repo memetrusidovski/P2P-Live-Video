@@ -7,3 +7,4 @@ This subchapter explores the mathematical feasibility of serving one million con
 *   [2. Propagation Latency Model](2_propagation_latency.md): Playout deadlines and end-to-end hop delay equations.
 *   [3. Logarithmic Scaling Proof](3_logarithmic_scaling.md): Mathematical proof that depth scales as $D \le c \log_k(N)$.
 *   [4. Failure of Unstructured Swarms](4_unstructured_swarm_failure.md): Why traditional mesh-pull flooding fails low-latency bounds.
+*   [5. Capacity Adaptation and Degraded Operation](5_capacity_adaptation.md): What happens when $\sum u_i < N \cdot B$ — SVC layer shedding, $D_{\text{max}}$ overflow, and the source base-layer reserve.

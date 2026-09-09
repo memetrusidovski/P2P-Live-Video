@@ -26,6 +26,8 @@ Instead of chunking the video sequentially, we assign actual video layers to spe
 
 **The Benefit (Graceful Degradation):** If Tree 3 collapses due to massive churn, the peer loses Layer 2. However, because Tree 1 and Tree 2 are completely separate routing paths, the peer continues to receive $L_0$ and $L_1$ flawlessly. The viewer's video player smoothly drops from 1080p to 720p without a single frozen frame or buffering wheel. Once Tree 3 heals (250ms later), the video snaps back to 1080p.
 
+**Normative shedding order:** the `priority` value in the slicing matrix (§4.4) is not advisory — it defines the order in which trees are abandoned when the swarm lacks the capacity to sustain them. A peer sheds trees in **ascending priority** (lowest number first: the 1080p enhancement before the 720p enhancement), and **never** sheds the base-layer tree. The full saturation-detection and shed procedure, including hysteresis and the source-side base-layer reserve, is defined in [Chapter 1 §1.1.5 Capacity Adaptation](../1.1_scale_latency/5_capacity_adaptation.md).
+
 ---
 
 ## 4.3 Solution 2: Multiple Description Coding (MDC)
@@ -51,6 +53,7 @@ To allow clients to understand how the trees correspond to video layers, the ini
 ```json
 {
   "stream_id": "blake3_hash_of_pubkey",
+  "manifest_version": 4,
   "slicing_mode": "SVC_SPATIAL",
   "num_trees": 3,
   "tree_mapping": [
@@ -60,4 +63,14 @@ To allow clients to understand how the trees correspond to video layers, the ini
   ]
 }
 ```
-If a mobile client connects to the swarm and is battery-constrained, it can intentionally choose to only join Tree 1, consuming less bandwidth while still receiving a stable 480p stream.
+A battery- or data-constrained mobile client declares itself `LEAF` class (see [5. Node Classes](5_node_classes.md)) and may subscribe to Tree 1 alone, consuming less bandwidth while still receiving a stable 480p stream — a supported operating mode with defined entitlements, not an ad-hoc opt-out.
+
+## 4.5 Dynamic Forest Resizing (`MANIFEST_UPDATE`)
+
+The `num_trees` field is **dynamic**: it reflects the current forest size $M$ chosen by the source from the swarm-size ladder defined in [1. Graph-Theoretic Foundations](1_graph_theory_and_slicing.md), §1.3.1. When the source changes $M$ (typically growing it as viewers arrive), the transition is coordinated as follows:
+
+1.  **Announcement:** The source broadcasts a `MANIFEST_UPDATE` frame down all currently active trees and updates its DHT stream record. The frame carries the new manifest (including `num_trees = M_new` and the new `tree_mapping`), a monotonically increasing `manifest_version`, and the source's Ed25519 signature.
+2.  **Migration window (5 seconds):** On receipt, each peer re-computes its tree assignment $a = (\text{Blake3}(NodeID) \bmod M_{\text{new}}) + 1$ and joins its new tree(s) using the standard parent-selection algorithm. The *old* trees remain fully active during this window, so playback is uninterrupted.
+3.  **Drain and close:** Once the new trees are seeded (relays advertising capacity), the source stops emitting segments on the old tree layout. Peers drop their obsolete parent connections at the end of the window.
+
+Peers ignore any `MANIFEST_UPDATE` whose signature does not verify against the pinned $PK_{\text{Source}}$ or whose `manifest_version` is not strictly greater than the last accepted version (replay protection).

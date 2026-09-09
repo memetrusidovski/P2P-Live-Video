@@ -1,10 +1,10 @@
 # ISSUE-005: New Relay Nodes Have No Data to Relay for ~1 Second After Joining
 
-**Status:** Open  
+**Status:** Resolved  
 **Priority:** Low  
 **Component:** Chapter 1 — Multi-Forest Overlay / Chapter 4 — Media Distribution  
 **Affects:** Rapidly growing streams; peers who try to join under a freshly joined relay  
-**File:** `protocol/chapter1/1.2_multi_forest_deep_dive/2_parent_selection_algorithm.md`, `protocol/chapter4/4.1_segment_serialization/1_gop_serialization.md`
+**File:** `protocol/chapter1/1.2_multi_forest_overlays/2_parent_selection_algorithm.md`, `protocol/chapter4/4.1_segment_serialization/1_gop_serialization.md`
 
 ---
 
@@ -30,11 +30,10 @@ T=0ms   : R advertises K_avail upload slots. Parent scoring selects R as best ca
 T=0ms   : Viewer A joins under R via QUIC tree join handshake. Gets ACCEPTED.
 T=0–1000ms : R receives its first segment from its own parent. Buffering.
 T=0–1000ms : A receives NO video from R. R has empty bitfield.
-T=100ms : A sends PING_PROBE to R (no video received).
-T=200ms : A evicts R (no PONG — R is alive but has no data to push).
+T=100ms : A sends PING_PROBE to R. R responds with PONG (it is alive).
 ```
 
-Wait — R will respond to PING with PONG (it's alive), so A won't evict it via the 200ms dead-parent timeout. But A will see zero data arriving during the 1-second warm-up. The buffer scheduler will see missing blocks and attempt PULL from gossip peers. Those peers may also be new relays with empty buffers.
+Note that A will **not** evict R via the 200ms dead-parent timeout — R answers keepalives normally. Instead, A sees zero data arriving during the 1-second warm-up. The buffer scheduler will see missing blocks and attempt PULL from gossip peers. Those peers may also be new relays with empty buffers.
 
 In a burst join scenario where 10 peers join simultaneously and 2–3 of them are new relays, the PULL layer absorbs the missing data (falling back to the source or other tree branches via mesh pull). This works but creates measurable latency spikes and increased PULL traffic.
 
@@ -70,3 +69,11 @@ This adds at most 1 second of delay before a new relay appears as a valid parent
 ## Effort
 
 Very low. Single conditional change in the capacity advertisement logic. No wire format changes.
+
+---
+
+## Resolution
+
+Applied the proposed fix to the spec:
+
+- `protocol/chapter1/1.2_multi_forest_overlays/2_parent_selection_algorithm.md` — new "Warm-Up Gating" rule under Component 1: a relay MUST advertise `K_avail = 0` until it has received and Merkle-verified its first complete segment; the tree-join algorithm's existing `available_slots > 0` probe check then hides it from parent selection automatically. Rationale (keepalive-alive-but-empty-bitfield behaviour) documented inline.

@@ -32,6 +32,8 @@ Output: New Choke/Unchoke States
 23:         SendControlPacket(BadPeer, CHOKE)
 ```
 
+Peers currently held open by an optimistic unchoke slot (see [3. Optimistic Exploration](3_optimistic_exploration.md)) are exempt from the choke loop on lines 19–23 for the duration of their 2-second exploration window; the optimistic slot count itself scales with the observed join burst, up to 4 slots.
+
 The Tit-For-Tat Rule is strictly enforced:
 $$\text{Status}(B) = \begin{cases} 
   \text{Unchoked (Upload Active)} & \text{if } \text{EgressRate}(B \to A) \ge \text{Threshold} \\
