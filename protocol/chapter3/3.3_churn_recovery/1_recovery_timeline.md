@@ -3,7 +3,7 @@
 At scale, thousands of users join and leave every minute. Standard TCP timeout boundaries (which can range from 15 to 30 seconds) are catastrophic for real-time live streaming buffers. Our protocol mandates sub-second active churn recovery following a strict timeline whose detection phase scales with the path's measured round-trip time:
 
 ```text
-  T = 0                      T = tau_ping (100 ms)      T = tau_evict                 T = tau_evict + 50 ms
+  T = 0                      T = tau_ping (100 ms)      T = tau_evict                 T = tau_evict + ~2 RTT
   [ Last packet from P ]     [ PING probe sent ]        [ Parent declared dead ]      [ Standby connected ]
          |                          |                          |                            |
          v                          v                          v                            v
@@ -20,8 +20,10 @@ At scale, thousands of users join and leave every minute. Standard TCP timeout b
 *   **T = 0 ms:** Peer $i$ receives the last packet — media, heartbeat or control — from parent $P$ in tree $T_m$.
 *   **T = $\tau_{\text{ping}}$ = 100 ms:** Nothing has arrived. The peer sends an active `PING` probe over the connection's control channel to $P$.
 *   **T = $\tau_{\text{evict}}$:** No packet of any kind has arrived. The peer marks the parent as dead **for tree $T_m$**, evicts it from the Active Set $\mathcal{A}$, and demotes it to the Passive Set $\mathcal{P}$.
-*   **T = $\tau_{\text{evict}}$ + 10 ms:** Peer $i$ takes the per-tree pool $\mathcal{P}_m$ for the dead parent's tree (§3.1.1) — standbys already known to relay $T_m$ and to be reachable — selects the one with the highest reliability $R$ and advertised $K_{\text{avail}}$, and sends an urgent `NEIGHBOR(TreeID = m, Priority = HIGH)` promotion request, honouring the distinct-parent rule (Ch1 §1.2.1).
-*   **T = $\tau_{\text{evict}}$ + 50 ms:** Standby peer accepts the handshake. Sub-stream transmission resumes, restoring the slice with minimal video buffer disruption.
+*   **T = $\tau_{\text{evict}}$ + 10 ms:** Peer $i$ takes the per-tree pool $\mathcal{P}_m$ for the dead parent's tree (§3.1.1) — standbys already known to relay $T_m$ and to be reachable — selects the one with the highest reliability $R$ and advertised $K_{\text{avail}}$, opens a QUIC session to it and sends an urgent `NEIGHBOR(TreeID = m, Priority = HIGH)` promotion request, honouring the distinct-parent rule (Ch1 §1.2.1).
+*   **T = $\tau_{\text{evict}}$ + $\approx 2\,RTT$:** Standby peer accepts. Sub-stream transmission resumes, restoring the slice with minimal video buffer disruption.
+
+**Re-attachment costs round-trips, not a constant.** The standby comes from the Passive Set, to which no socket is open (§3.1.1), and `NEIGHBOR` rides a QUIC control stream (Appendix D §D.2). Re-attachment is therefore a QUIC handshake plus one request/response: $\approx 2\,RTT$ to a peer never spoken to (one for the handshake, one for `NEIGHBOR`/`ACCEPTED`), $\approx 1\,RTT$ where the peer holds a **0-RTT resumption ticket** for the standby — which it does for any standby that was demoted from its own Active Set, and does not for one learned only from gossip. Peers **must** retain resumption tickets for every peer they have held a session with, and **should** send the `NEIGHBOR` in the 0-RTT flight when a ticket exists. An earlier draft quoted a flat "$+50$ ms", which is $\approx 2\,RTT$ only at $25$ ms and a fiction on the paths the RTT-scaled eviction deadline was introduced for.
 
 ## Silence Is Not Evidence; Heartbeats Are
 
@@ -32,7 +34,15 @@ Media arrival is bursty by nature — a chunk's blocks arrive, then nothing unti
 
     $$\tau_{\text{evict}} = \max\left(200\text{ ms},\ 2\,\tau_{\text{ping}} + SRTT + 4\,RTTVAR\right)$$
 
-    — one heartbeat interval to notice, one RTT plus jitter for the probe, one more interval of slack. Typical values: $240$ ms at 20 ms RTT, $320$ ms at 80 ms, $490$ ms at 250 ms. Recovery completes about $50$ ms later. The headline is therefore **sub-300 ms on local paths and sub-600 ms on the worst intercontinental ones**, not a flat 250 ms; the flat figure was only ever true for parents within 100 ms.
+    — one heartbeat interval to notice, one RTT plus jitter for the probe, one more interval of slack. Recovery completes $\approx 2\,RTT$ after eviction (above). By path:
+
+    | RTT | $\tau_{\text{evict}}$ | Re-attach ($1$–$2$ RTT) | Repair complete | Repair $+ 2$ PULL round-trips |
+    | :---: | :---: | :---: | :---: | :---: |
+    | $20$ ms | $240$ | $20$–$40$ | $\approx 280$ | $\approx 320$ |
+    | $80$ ms | $320$ | $80$–$160$ | $\approx 480$ | $\approx 640$ |
+    | $250$ ms | $490$ | $250$–$500$ | $\approx 990$ | $\approx 1{,}490$ |
+
+    The headline is therefore **sub-300 ms on local paths and about one second on the worst intercontinental ones**, not a flat 250 ms; the flat figure was only ever true for parents within 100 ms. The last column is what the PULL zone of Ch4 §4.3.1 has to cover, and is why that zone widens with the path's RTT.
 
 The source, whose output is the whole forest's input, additionally **paces** each chunk's symbols over at most half the chunk period (§3.3.2) so that the tree carries a near-continuous flow rather than four bursts per second; this also keeps every relay's XDP token bucket (Ch7 §7.2) inside its burst allowance.
 
@@ -50,7 +60,7 @@ A thin Passive Set is therefore supplemented, not replaced, from three further s
 | :---: | :--- | :--- | :--- |
 | 1 | Per-tree pool $\mathcal{P}_m$ of the Passive Set | 0 RTT | Maintained by SHUFFLE / GOSSIP_EXCHANGE with `WantedTrees` steering |
 | 2 | Cached DISCOVERY peer list | 0 RTT | Up to $\tau_{\text{ttl}}/2 = 90\text{ s}$ stale |
-| 3 | Urgent `SHUFFLE` (0x06) with `WantedTrees = ` bit $m$ to a **surviving** active-set peer | 1 RTT (~40–80 ms) | Current |
+| 3 | **Direct shuffle request**: `SHUFFLE` (0x06) with `TTL = 0` and `WantedTrees = ` bit $m$ over the existing session to a **surviving** active-set peer, answered by `GOSSIP_EXCHANGE` (§3.2.1) | 1 RTT (~40–80 ms) | Current |
 | 4 | Fresh DHT `GET_PEERS(WantedTrees = \text{bit } m)` | 1–3 s | Current |
 
 Two properties of this ordering are load-bearing:
@@ -67,8 +77,10 @@ if Size(candidates) < 3:
     candidates += [r for r in CachedDHTPeers(StreamID) if r.relays(m) and r.reachable]
 
     # tier 3: one RTT for a current answer, dispatched CONCURRENTLY so its
-    # latency overlaps the tier-1/2 connection attempts rather than following them
-    AsyncSendShuffle(AnySurvivingActivePeer(), wanted_trees=bit(m), priority=HIGH)
+    # latency overlaps the tier-1/2 connection attempts rather than following them.
+    # TTL = 0 over an open session is a direct request; the receiver answers with a
+    # GOSSIP_EXCHANGE drawn from its pool for tree m within tau_sched (§3.2.1).
+    AsyncSendShuffle(AnySurvivingActivePeer(), ttl=0, wanted_trees=bit(m))
 
 SendNeighborRequest(BestCandidate(candidates), tree_id=m, priority=HIGH)
 

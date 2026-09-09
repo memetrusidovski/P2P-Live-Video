@@ -8,13 +8,13 @@ This index defines the complete, granular folder structure of the protocol speci
     *   `2_propagation_latency.md`: Playout deadlines and end-to-end delay equations.
     *   `3_logarithmic_scaling.md`: Mathematical proof of $D \le c \log_k(N)$.
     *   `4_unstructured_swarm_failure.md`: Why mesh-pull flooding fails low-latency bounds.
-    *   `5_capacity_adaptation.md`: Degraded operation when $\sum u_i < N \cdot B$ — SVC layer shedding and source reserve.
+    *   `5_capacity_adaptation.md`: Degraded operation when $\sum u_i < N \cdot B$ — per-tree sustainable layer set, SVC layer shedding, the publisher-side layer fold, and the source reserve.
 *   **`1.2_multi_forest_overlays/`**
     *   `1_graph_theory_and_slicing.md`: Edge-disjoint spanning trees and the Orthogonal Placement Rule.
-    *   `2_parent_selection_algorithm.md`: Multivariate scoring function and tree join algorithm.
+    *   `2_parent_selection_algorithm.md`: Multivariate scoring function, tree join algorithm, rank admission with the leaf share, and the drain path (`DRAIN_NOTICE`).
     *   `3_topology_healing.md`: Deterministic lateral sibling election over a per-tree roster.
     *   `4_stream_slicing_architecture.md`: Graceful degradation using SVC and MDC.
-    *   `5_node_classes.md`: The `RELAY`/`LEAF`/`LEAF_PRIVATE` taxonomy and relay eligibility.
+    *   `5_node_classes.md`: The `RELAY`/`LEAF`/`LEAF_PRIVATE` taxonomy, relay eligibility, the leaf-fraction bound, and the leaf share.
 *   **`1.3_peer_lifecycle/`**
     *   `1_transition_model.md`: State-machine definition (`BOOTSTRAP` to `TERMINATED`).
     *   `2_algorithmic_core_loop.md`: The microsecond event-driven execution loop.
@@ -27,12 +27,12 @@ This index defines the complete, granular folder structure of the protocol speci
     *   `3_bootstrap_sequence.md`: Hardcoded seed querying and self-lookup handshakes.
 *   **`2.2_crypto_node_id/`**
     *   `1_static_dynamic_puzzles.md`: Blake3 Proof-of-Work bound to IP addresses.
-    *   `2_sybil_defense_math.md`: What PoW actually costs, and why address-prefix caps are the Sybil bound.
+    *   `2_sybil_defense_math.md`: What PoW actually costs, and why diversity-relative address-prefix caps are the Sybil bound.
     *   `3_validation_frame.md`: Secure S/Kademlia header byte layout.
 *   **`2.3_stream_registration/`**
     *   `1_publisher_genesis_key.md`: Decoupling StreamID from human-readable names.
     *   `2_store_get_rpcs.md`: Sampled registration, tree-aware discovery, guardian eligibility, and the publisher's write path.
-    *   `3_registration_frames.md`: Peer Record, `REGISTER_PEER`, `GET_PEERS`, `STORE_RECORD`/`ACK` and Stream Record layouts.
+    *   `3_registration_frames.md`: Peer Record, `REGISTER_PEER`, `GET_PEERS`, `STORE_RECORD`/`ACK` and Stream Record layouts (with the pending matrix and `EffectiveSegmentSeq`).
 
 ## Chapter 3: Overlay Membership and Epidemic Gossip (HyParView)
 *   **`3.1_neighbor_sets/`**
@@ -43,7 +43,7 @@ This index defines the complete, granular folder structure of the protocol speci
     *   `1_shuffle_neighbor_frames.md`: Binary layouts for `NEIGHBOR`, `SHUFFLE`, `DISCONNECT`.
     *   `2_hmac_security.md`: Transient session keys and replay-sequence tracking.
 *   **`3.3_churn_recovery/`**
-    *   `1_recovery_timeline.md`: The RTT-scaled, sub-second connection drop and repair timeline.
+    *   `1_recovery_timeline.md`: The RTT-scaled connection drop and repair timeline (detection and the $\approx 2$ RTT re-attach), and the tiered candidate sources.
     *   `2_active_probing.md`: Keepalive heartbeats and immediate eviction rules.
 
 ## Chapter 4: Media Distribution and Deadline-Aware Swarming
@@ -56,7 +56,7 @@ This index defines the complete, granular folder structure of the protocol speci
     *   `2_systematic_dispersion.md`: Adaptive 5–30% parity sized per downstream link.
     *   `3_symbol_packet_layout.md`: `RAPTORQ_SYMBOL` byte alignments (SBN and ESI).
 *   **`4.3_hybrid_push_pull/`**
-    *   `1_buffer_sliding_timeline.md`: The exact boundary between the PUSH zone and PULL zone.
+    *   `1_buffer_sliding_timeline.md`: The RTT-clamped boundary between the PUSH zone and PULL zone, and late-joiner live-edge sync.
     *   `2_bitfield_frames.md`: Compressed Bloom filters and bitfield availability arrays.
     *   `3_rarest_first_heuristics.md`: The chunk-urgency algorithm for reactive pulling.
 
@@ -67,12 +67,12 @@ This index defines the complete, granular folder structure of the protocol speci
     *   `3_optimistic_exploration.md`: Bandwidth allocation for newly joined peers.
 *   **`5.2_proof_of_upload/`**
     *   `1_receipt_cryptography.md`: Non-repudiable Ed25519 PoU payload structure.
-    *   `2_exponential_decay_scoring.md`: The contribution score $\Theta_A$, the rank $\Theta^{\text{rate}}/B$, and its `RANK_PROOF` presentation.
+    *   `2_exponential_decay_scoring.md`: The contribution score $\Theta_A$, the rank $\Theta^{\text{rate}}/B$, and its `RANK_PROOF` presentation (sorted list, adjacent-pair samples).
     *   `3_pou_frame.md`: `PROOF_OF_UPLOAD` binary layout.
 *   **`5.3_reputation_auditing/`**
     *   `1_graph_collusion_auditing.md`: Catching "Mutual Backscratching" via symmetric edge analysis.
     *   `2_ip_subnet_penalties.md`: Penalizing /24 IPv4 and /48 IPv6 Sybil clusters.
-    *   `3_consensus_eviction.md`: Evidence-carrying signed accusations and local, bounded eviction.
+    *   `3_consensus_eviction.md`: Evidence-carrying signed accusations that carry the accuser's `RANK_PROOF`; local, bounded eviction.
 
 ## Chapter 6: NAT Traversal and Emergent Relays
 *   **`6.1_udp_hole_punching/`**
@@ -82,9 +82,9 @@ This index defines the complete, granular folder structure of the protocol speci
     *   `1_candidate_gathering.md`: STUN/ICE bidirectional probing loops.
     *   `2_64bit_connid_migration.md`: Seamless physical interface handovers in QUIC.
 *   **`6.3_emergent_relays/`**
-    *   `1_recruitment_criteria.md`: Uptime and symmetrical bandwidth rules for Superpeers.
+    *   `1_recruitment_criteria.md`: Uptime and bandwidth rules for emergent relays; the bridge as a tree edge charged to the tree budget.
     *   `2_3x_multiplier_economics.md`: How the system pays relays with premium stream latency.
-    *   `3_relay_frames.md`: `RELAY_PROPOSAL` and `RELAY_BIND` layouts.
+    *   `3_relay_frames.md`: `RELAY_PROPOSAL` and `RELAY_BIND` layouts; the ingress relay's slot budget.
 
 ## Chapter 7: Security Hardening & Threat Mitigation
 *   **`7.1_source_pinning/`**

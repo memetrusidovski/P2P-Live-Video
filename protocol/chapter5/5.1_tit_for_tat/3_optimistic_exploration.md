@@ -22,7 +22,7 @@ $$\text{optimistic\_slots} = \min\left(\left\lceil \frac{J_{\text{new}}}{3} \rig
 
 ### The Slot Budget Is Bounded by the PULL Reserve
 
-Unchoke slots are not free-floating: every unchoked neighbour may draw $\beta_{\text{pull}} = 0.5$ Mbps, and a node has only $\text{PullSlots} = \lfloor r_{\text{pull}} u_v / \beta_{\text{pull}} \rfloor$ of them (§2). The two consumers of that budget **may never exceed it**:
+Unchoke slots are not free-floating: every unchoked neighbour may draw $\beta_{\text{pull}} = 0.5$ Mbps, and a node has only `PullSlots` of them — the reserve $r_{\text{pull}} u_v$ less any handover in progress, in $\beta_{\text{pull}}$ units (§2; Ch1 §1.2.1 *The Two Budgets*). The two consumers of that budget **may never exceed it**:
 
 $$\underbrace{\text{optimistic\_slots}}_{\le \lfloor \text{PullSlots}/2 \rfloor} + \underbrace{\text{regular TFT slots}}_{\text{the remainder}} \le \text{PullSlots}$$
 
@@ -80,6 +80,6 @@ For each p optimistically unchoked this window do:
 
 ## The Universal Service Floor Lives in Tree Admission
 
-Leaf-class peers (Ch1 §1.2.5) — battery-constrained mobiles, onion-routed privacy nodes — cannot reciprocate uploads at all, yet the protocol guarantees them the **base layer** as a floor. That guarantee is a rule on **tree admission in the $L_0$ trees**, not on the PULL unchoker: base-layer slots are never rank-preempted, and a relay must hold at least $20\%$ of its $L_0$-tree slots open to leaf-class children before it may refuse one (Ch1 §1.2.2 *Rank Admission Rule*, Ch1 §1.1.5 §5.5). Enhancement-layer slots are **never** part of the floor: they are allocated by rank, so quality above the base layer is always earned.
+Leaf-class peers (Ch1 §1.2.5) — battery-constrained mobiles, onion-routed privacy nodes — cannot reciprocate uploads at all, yet the protocol guarantees them the **base layer** as a floor. That guarantee is a rule on **tree admission in the $L_0$ trees**, not on the PULL unchoker: base-layer slots are never rank-preempted, and a leaf share of $\lceil 0.2\,K_v(m) \rceil$ slots per relay per $L_0$ tree is enforced by displacement — a leaf-class request displaces a pure-subscriber relay child while leaves hold less than that share, and no slot is ever held idle for it (Ch1 §1.2.2 *Rank Admission Rule* item 3, Ch1 §1.2.5 §5.5). Enhancement-layer slots are **never** part of the floor: they are allocated by rank, so quality above the base layer is always earned.
 
 What the unchoker contributes to the floor is PULL *repair* for leaves: a leaf holding an $L_0$ slot still loses blocks and must be able to pull them. A leaf never reciprocates, so it relies on optimistic slots for repair; the FIFO bootstrap queue admits it like any joiner, and the $\beta_{\text{pull}}$ per-slot cap bounds what it can draw. This keeps entitlement monotone in contribution — more upload always buys better playback — while ensuring a device that physically cannot upload still gets a watchable stream rather than a spinner.

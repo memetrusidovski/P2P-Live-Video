@@ -32,9 +32,10 @@ Output: Connection Recovery Status
 22:                 RegisterParentForSlice(Candidate, SliceID)
 23:                 MoveNodeToActiveSet(Candidate)
 24:                 CandidateFound <- True
-25:             Else:
+25:             Else:                                             // DISCONNECT(TreeID=SliceID, Reason) — App D §D.4.3b
 26:                 If Ack == REJECTED_NOT_ASSIGNED then ClearTreeBit(Candidate, SliceID)  // stale bitmap: fix the pool, keep the peer
-27:                 Else RemoveFromPassiveSet(Candidate)                                  // bad peer or saturated
+27:                 Else If Ack in (REJECTED_SATURATED, REJECTED_DEPTH) then MarkFullThisRound(Candidate)  // full, not bad: keep it
+27a:                Else RemoveFromPassiveSet(Candidate)                                  // timeout or EVICTION only
 27:                 
 28:     If not CandidateFound then:
 29:         // Critical Fallback: Query DHT for relays of this slice

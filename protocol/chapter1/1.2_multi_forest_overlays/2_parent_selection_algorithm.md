@@ -32,13 +32,15 @@ def advertise_K_avail(tree_id):
 
 **Warming and saturated must be distinguishable.** Both states advertise $K_{\text{avail}} = 0$, but they mean opposite things to a joiner: a warming relay will have capacity in under a second, while a saturated one will not. Conflating them makes a growth transient look identical to a capacity shortage, and the shed rule of [§1.1.5](../1.1_scale_latency/5_capacity_adaptation.md) would then drop a quality layer for a condition that resolves on its own.
 
-No new field is required — `PROBE_RESPONSE` (0x0F) already carries `LiveEdgeSegmentSeq`, and the warm-up rule above guarantees the two states differ in it:
+`PROBE_RESPONSE` (0x0F) therefore carries a **per-tree** `TreeState` for the probed tree in `Flags` bits 5–6 (Appendix D §D.4.7), and its `LiveEdgeSegmentSeq` is the highest segment the responder has verified **in the probed tree** — not the node-level live edge of Ch4 §4.3.1. An earlier draft keyed the distinction on a node-level `LiveEdgeSegmentSeq = 0`, which classified every relay that was warming in one tree while serving another — a super node earning a new tree, a coverage-grant acceptor, every relay that moves at a resize — as *saturated*, and so fired the shed rule on precisely the growth transients the exclusion was written for.
 
-| Candidate state | $K_{\text{avail}}$ | `LiveEdgeSegmentSeq` | Joiner's response |
-| :--- | :---: | :---: | :--- |
-| **Warming up** | $0$ | $0$ (no verified segment yet) | Retry — capacity is imminent |
-| **Saturated** | $0$ | $> 0$ | Genuine shortage — counts toward the shed threshold |
-| **Available** | $> 0$ | $> 0$ | Score and join |
+| `TreeState` | Meaning | $K_{\text{avail}}$ | Joiner's response |
+| :--- | :--- | :---: | :--- |
+| `SERVING` | Has a parent and $\ge 1$ verified segment in this tree | $\ge 0$ | $> 0$: score and join. $= 0$: **saturated** — counts toward the shed threshold |
+| `WARMING` | Has a parent in this tree, no verified segment yet | $0$ | Retry — capacity is imminent; the round does **not** count |
+| `UNPARENTED` | Assigned to this tree but currently without a parent in it (§1.1.5 §5.3 item 4) | $0$ | Cannot serve; counts as a failed candidate — it is a victim of the same shortage |
+
+Segment sequence numbers start at $1$ (Appendix D §D.4.8), so `LiveEdgeSegmentSeq = 0` unambiguously means "nothing verified in this tree".
 
 ### Component 2: Latency Penalty (RTT)
 Peer $i$ pings candidate $p$ over UDP to establish the current Round Trip Time (RTT) in milliseconds. It enters the score directly, at unit weight — it *is* the millisecond scale the other two terms are calibrated against.
@@ -61,7 +63,7 @@ on every block it receives in tree $m$, and advertises that value in its own `BL
 
 Two rules follow for a node whose depth **rises**:
 
-*   At $h \ge D_{\max}$ it **stops accepting children** in that tree and drains the ones it has through the $\tau_{\text{drain}}$ path (§5.3) — they re-select, and their own scores now correctly penalise the deep branch. It also runs the upward-migration step (§2.3) immediately rather than waiting for the 5 s tick.
+*   At $h \ge D_{\max}$ it **stops accepting children** in that tree and drains the ones it has through the drain path below (`DRAIN_NOTICE`, reason `DEPTH`, scope *all children*) — they re-select, and their own scores now correctly penalise the deep branch. It also runs the upward-migration step (§2.3) immediately rather than waiting for the 5 s tick.
 *   It is *not* an error: a Deputy that re-attaches under a passive-set candidate at $h = 6$ has done the right thing for the next 250 ms; the depth rule then unwinds the branch over the following seconds instead of leaving it there forever.
 
 ## 2.1.1 Weight Calibration
@@ -145,14 +147,17 @@ def execute_tree_join(node_i, target_tree_m, dht_interface, passive_pool):
     scored_candidates.sort(key=lambda x: x["score"], reverse=True)
     
     for best_candidate in scored_candidates:
-        # Send formal join request via QUIC
+        # Send formal join request via QUIC: NEIGHBOR(TreeID = m). Answered within tau_sched by
+        # ACCEPTED or by DISCONNECT(TreeID = m, Reason in REJECTED_*) — App D §D.4.3b. Never silence.
         join_ack = send_quic_join_request(best_candidate["peer"], target_tree_m)
 
         if join_ack == ACCEPTED:
             register_active_parent(best_candidate["peer"], target_tree_m)
             return SUCCESS
         if join_ack == REJECTED_NOT_ASSIGNED:
-            passive_pool.clear_tree_bit(best_candidate["peer"], target_tree_m)   # stale record
+            passive_pool.clear_tree_bit(best_candidate["peer"], target_tree_m)   # stale record; keep the peer
+        # REJECTED_SATURATED / REJECTED_DEPTH: the candidate is full, not bad — keep its record,
+        # count it toward this round's failure. TIMEOUT: unreachable — drop the record.
 
     # If all candidates rejected (e.g., they filled their slots during probing).
     # The retry re-issues get_peers(): every GET_PEERS draws a fresh random sample.
@@ -161,22 +166,37 @@ def execute_tree_join(node_i, target_tree_m, dht_interface, passive_pool):
 
 ### Depth Admission Rule
 
-A parent **must reject** any join request that would place the child deeper than $D_{\text{max}} = 8$ hops from the source — that is, a candidate advertising $h_p \ge D_{\text{max}}$ is not a legal parent. A saturated forest may never resolve pressure by growing deeper than its latency budget allows.
+A parent **must reject** any join request that would place the child deeper than $D_{\text{max}} = 8$ hops from the source — that is, a candidate advertising $h_p \ge D_{\text{max}}$ is not a legal parent. A saturated forest may never resolve pressure by growing deeper than its latency budget allows. The refusal is `DISCONNECT(TreeID = m, REJECTED_DEPTH)` (Appendix D §D.4.3b).
+
+**A refusal is a frame, not a silence.** Every outcome below that reads `REJECTED` is sent as `DISCONNECT` carrying the request's `TreeID` and a refusal reason: `REJECTED_SATURATED` for cases 3–5 of the Rank Admission Rule, `REJECTED_NOT_ASSIGNED` when the responder does not relay $T_m$ (a stale `AssignedTrees` bit somewhere — the requester corrects its record and keeps the peer), `REJECTED_DEPTH` for the rule above. The joiner acts on the reason: saturated and depth refusals count toward the shed threshold and keep the candidate's record, since the peer is full rather than bad; only a timeout drops it. An earlier draft returned the values `REJECTED` and `REJECTED_NOT_ASSIGNED` from this algorithm and defined no frame that produced them, so a refusal was indistinguishable from a dead peer and cost a full probe timeout per candidate.
 
 ### Rank Admission Rule
 
 The protocol's core axiom is that contribution buys placement and quality. Tree slots are where placement and quality are decided, so this is the rule that implements the axiom; without it a 10 Gbps super node's slots go to whoever probes first and nothing ever moves a free-rider out of the way of a contributor.
 
-A `NEIGHBOR(TreeID = m)` join request may be followed on the same QUIC stream by a `RANK_PROOF` (Ch5 §5.2.2) establishing the joiner's rank $r_{\text{new}} = \Theta^{\text{rate}} / B$ — full-stream-equivalents the joiner is currently delivering to others. A request with no proof, or from a leaf-class node, has $r_{\text{new}} = 0$. The parent decides:
+A `NEIGHBOR(TreeID = m)` join request carries the joiner's `NodeClass` and `AssignedTrees` (Appendix D §D.4.3) and may be followed on the same QUIC stream by a `RANK_PROOF` (Ch5 §5.2.2) establishing the joiner's rank $r_{\text{new}} = \Theta^{\text{rate}} / B$ — full-stream-equivalents the joiner is currently delivering to others. A request with no proof, or from a leaf-class node, has $r_{\text{new}} = 0$. The parent decides:
 
-1.  **Free slot in $T_m$** (respecting the depth rule above): `ACCEPTED`. For an $L_0$ tree, a relay must keep at least $20\%$ of its $L_0$ slots available to **leaf-class** children — the universal service floor (Ch1 §1.1.5 §5.5) — so it may not fill the last of those with a relay while a leaf's request is pending, and leaves beyond the $20\%$ wait for genuine surplus.
-2.  **No free slot, $T_m$ carries an enhancement layer, and $r_{\text{new}} > 1.25 \cdot r_{\min}$** where $r_{\min}$ is the rank of the parent's lowest-ranked current child in $T_m$: `ACCEPTED`, and the parent **preempts** that child — it keeps serving it for the drain window $\tau_{\text{drain}}$ or until it has re-attached elsewhere, then sends `DISCONNECT` (reason `0x04 PREEMPTED`). At most one preemption may be in progress per tree, and the one extra slot it costs for $\le 5$ s is taken from the parent's PULL reserve, which is throttled for the duration. Leaves and newcomers rank $0$, so any contributor preempts them; a $1.25\times$ margin stops two near-equal contributors from swapping a slot back and forth.
-3.  **No free slot, $T_m$ carries $L_0$**: `REJECTED` — base-layer slots are **never** rank-preempted. The joiner's next step is the retry path below and, at the margin, the source's base-layer reserve.
-4.  **Otherwise**: `REJECTED`.
+1.  **Free slot in $T_m$** (respecting the depth rule above): `ACCEPTED`.
+2.  **No free slot, $T_m$ carries an enhancement layer, and $r_{\text{new}} > 1.25 \cdot r_{\min}$** where $r_{\min}$ is the rank of the parent's lowest-ranked current child in $T_m$: `ACCEPTED`, and the parent **preempts** that child through the drain path below (reason `PREEMPTED`). At most one preemption may be in progress per tree. Leaves and newcomers rank $0$, so any contributor preempts them; a $1.25\times$ margin stops two near-equal contributors from swapping a slot back and forth.
+3.  **No free slot, $T_m$ carries $L_0$, the requester is leaf-class, and leaf-class children hold fewer than the leaf share $R_{\text{leaf}}(m) = \lceil 0.2\,K_v(m) \rceil$ of the parent's slots in $T_m$**: `ACCEPTED`, and the parent **displaces** its lowest-ranked relay-class child in $T_m$ *that does not relay $T_m$* (bit $m-1$ of its `AssignedTrees` clear — a pure subscriber with no children in this tree, so nobody is orphaned), through the drain path (reason `DISPLACED`). Ties by most recent admission. A child that relays $T_m$ is never displaced. This is the universal service floor of Ch1 §1.1.5 §5.5 and §1.2.5 §5.5 — the one bounded exception to the rule that base-layer slots are never taken from a sitting child, scoped to leaf requesters and to the leaf share. If every relay-class child relays $T_m$, or the leaf share is already held by leaves: `REJECTED`.
+4.  **No free slot, $T_m$ carries $L_0$, otherwise**: `REJECTED` — base-layer slots are **never** rank-preempted. The joiner's next step is the retry path below and, at the margin, the source's base-layer reserve.
+5.  **Otherwise**: `REJECTED`.
 
 Two properties follow. **Bootstrapping is through the base layer**: a new relay ranks $0$, obtains an $L_0$ slot wherever one is free (the ladder and the source reserve make that the common case), relays $L_0$ to children, earns receipts, and within a minute has the rank to preempt into enhancement trees. **Shallower placement emerges** from the migration loop (§2.3) plus preemption: a high-rank node's scoring prefers shallow parents, it requests them, and it displaces a lower-ranked child there — so contributors drift toward the source and free-riders toward the leaves, which is what "contribution buys placement" means concretely.
 
-A preempted child treats the event as an ordinary parent loss for $T_m$ (Ch3 §3.3, per-tree repair); if every candidate is saturated it counts toward the shed rule like any failed round.
+### The Drain Path
+
+Five rules release a child without dropping it: preemption and displacement (above), a relay moving at a forest resize (§4.5), a `RELAY` → `LEAF` demotion (§5.3), a slot count $K_v(m)$ that falls when parity rises or the mapping changes (§1.3), and a node whose depth reaches $D_{\max}$ (*Depth Propagation*). All five use one mechanism:
+
+1.  The parent sends **`DRAIN_NOTICE`** (0x1E, Appendix D §D.4.19) on the tree's QUIC stream: `TreeID`, a `Reason` from the `DISCONNECT` code space, a `Scope` (*this child only* or *every child in this tree*) and a `DeadlineSegmentSeq` — the current segment plus $\tau_{\text{drain}} = 5$ segments, or `EffectiveSegmentSeq` for a resize. It **keeps serving** the child.
+2.  The child immediately runs the Ch3 §3.3 promotion for tree $m$ **with its current parent still delivering** — a *warm* repair, with no eviction timeout and no gap. With scope *every child*, the children run the Deputy election of §3.2 over their most recent `ROSTER` exactly as they would for a dead parent, using the notice as the trigger; a child alone in scope promotes directly.
+3.  When the new parent begins delivering, the child sends `DISCONNECT_CHOKE` to the old parent, which frees the slot. The parent sends `DISCONNECT(Reason)` at the deadline to any child that has not left.
+
+The notice is what makes the drain window worth having. Without it the child learns of its release only at `DISCONNECT`, after the window, and then repairs with exactly the gap the window was meant to avoid; an earlier draft said the parent "announces" the change and defined no frame that did so.
+
+**Handover budget.** A preemption or displacement means the parent serves one child beyond $K_v(m)$ until the drained child leaves. That transient slot is charged to the parent's PULL reserve under the owning expression of §1.3 — $B_m \Omega_v$ per handover in progress — and PULL slots are re-computed from the remainder at the next Tit-for-Tat cycle. If the reserve cannot hold $B_m \Omega_v$ even with every PULL slot choked (any relay below $10\,B_m\Omega$: a $10$ Mbps relay in a $1.5$ Mbps tree), the handover is **sequential**: the parent answers `ACCEPTED` with `AcceptFlags.PENDING` (Appendix D §D.4.4) and begins pushing to the joiner only when the drained child's slot is released; the joiner keeps any parent it already has meanwhile. An earlier draft charged the overlap to the reserve unconditionally, which on the reference $10$ Mbps relay meant a link at $107\%$ for five seconds on every preemption in a $1.5$ Mbps tree, and $125\%$ in a $3.0$ Mbps tree.
+
+A preempted or displaced child that finds every candidate saturated counts the round toward the shed rule like any failed round.
 
 ### On `FAILURE_RETRY_BACKOFF`
 
@@ -188,7 +208,12 @@ Parent selection is not a one-time event. Trees degrade over time due to churn. 
 
 1. Node $i$ currently has parent $P_{\text{current}}$ with $\text{Score}(P_{\text{current}})$.
 2. Through the gossip layer (HyParView Passive Set), node $i$ learns of a new node $P_{\text{new}}$.
-3. If $\text{Score}(P_{\text{new}}) > \text{Score}(P_{\text{current}}) + \text{HysteresisMargin}$, with $\text{HysteresisMargin} = 30\text{ ms}$ (Appendix B) — enough to absorb RTT jitter, small enough that one hop of depth (at least $\approx 55$ ms of hop penalty at $h \le 3$) always wins:
+3. If $\text{Score}(P_{\text{new}}) > \text{Score}(P_{\text{current}}) + \text{Margin}$, where
+
+    $$\text{Margin} = \begin{cases} \min\left(30\text{ ms},\ \tfrac{1}{2}\,\Delta_h(h_{\text{new}})\right) & \text{if } h_{\text{new}} < h_{\text{current}} \text{ (the candidate is shallower)} \\ 30\text{ ms} & \text{otherwise} \end{cases}
+    \qquad \Delta_h(h) = w_h \left(e^{\lambda (h+1)} - e^{\lambda h}\right)$$
+
+    with $\text{HysteresisMargin} = 30$ ms (Appendix B) and $\Delta_h(h)$ the score value of one hop of depth at depth $h$: $13.0$ ms for $1 \to 0$, $21.4$ for $2 \to 1$, $35.3$ for $3 \to 2$, $58.1$ for $4 \to 3$. An earlier draft justified a flat 30 ms as "small enough that one hop of depth (at least $\approx 55$ ms at $h \le 3$) always wins"; $55$ ms is the *largest* one-hop swing at $h \le 3$, not the smallest, and under a flat margin a node at depth $2$ never moved to an otherwise-equal parent at depth $1$ — the levels with the most fan-out leverage were the ones the migration loop could not lift. Halving the depth gain for the shallower direction means one hop always wins on its own, while the full 30 ms is still required to move *back* to the deeper parent, so RTT jitter cannot flap a node between two depths:
     * Node $i$ connects to $P_{\text{new}}$.
     * Once $P_{\text{new}}$ begins delivering chunks, node $i$ sends a `DISCONNECT_CHOKE` frame to $P_{\text{current}}$.
     * Node $i$ has successfully migrated upward to a faster/shallower branch without dropping a single video frame. The margin prevents nodes from oscillating back and forth rapidly between two similar parents; the depth-propagation rule above means the score is evaluated on current depths, so a migration also lifts the whole subtree beneath $i$ within about a second.

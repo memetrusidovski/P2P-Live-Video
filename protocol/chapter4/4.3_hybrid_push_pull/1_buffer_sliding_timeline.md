@@ -14,8 +14,12 @@ To balance propagation speed with network-loss resilience, a peer's playout buff
 
 The playout deadline sits $\Delta_{\text{buffer}} = 3.0\text{ s}$ behind the received live edge (Appendix B). This is the largest single term in the glass-to-glass budget (Ch1 §1.1.3), so it is set to the smallest value that leaves the PULL zone its full width; an earlier draft used $4.0$ s and, with the chunk barrier and encoder latency it omitted, overshot the 5 s objective.
 
-1.  **PUSH Zone (Live Edge to $1.5\text{ s}$ before the deadline):** Blocks are proactively pushed down the pre-configured Multi-Forest tree paths. No explicit request messages are sent, achieving propagation speeds close to IP multicast.
-2.  **PULL Zone (the final $1.5\text{ s}$ before the Playout Deadline):** If a child detects missing blocks due to UDP packet drops, it switches to reactive mesh-pull mode, requesting missing symbols from its active neighbor set. $1.5$ s covers a sibling-election repair ($\le 0.5$ s, Ch3 §3.3) plus two PULL round-trips with margin.
+1.  **PUSH Zone (Live Edge to $W_{\text{pull}}$ before the deadline):** Blocks are proactively pushed down the pre-configured Multi-Forest tree paths. No explicit request messages are sent, achieving propagation speeds close to IP multicast.
+2.  **PULL Zone (the final $W_{\text{pull}}$ before the Playout Deadline):** If a child detects missing blocks due to UDP packet drops, it switches to reactive mesh-pull mode, requesting missing symbols from its active neighbor set. The zone must cover one parent repair — detection plus re-attachment, both RTT-scaled (Ch3 §3.3.1) — plus two PULL round-trips. It is therefore sized from the peer's own paths:
+
+    $$W_{\text{pull}} = \text{clamp}\left(\tau_{\text{evict}}^{\max} + 6\,SRTT^{\max},\ 1.5\text{ s},\ 2.0\text{ s}\right)$$
+
+    over the peer's current parents: $1.5$ s (the floor) for every path up to $\approx 150$ ms RTT, $2.0$ s on a $250$ ms path, where a repair alone takes $\approx 1.0$ s and two PULL round-trips another $0.5$. An earlier draft fixed the zone at $1.5$ s on the assumption that a repair took $\le 0.5$ s; at $250$ ms RTT the sum was $1.49$ s with the Deputy path succeeding and $\approx 1.9$ s when it failed first — no margin, then none at all, on exactly the paths the RTT-scaled deadline was introduced for. Widening the PULL zone does not change $\Delta_{\text{buffer}}$; it starts pulling a missing block earlier, at the cost of occasionally requesting a block the push path would still have delivered.
 
 **Wire units per zone:** on the push path, each 16 KB block travels as a `BLOCK_PROOF` (0x13) frame on the tree's QUIC stream followed by the block's `RAPTORQ_SYMBOL` (0x12) datagrams. On the pull path the unit is the block: a `PULL_REQUEST` (0x16) with `MissingSymbolCount = 0` is answered by a `BLOCK_TRANSMISSION` (0x10) carrying the block plus its inline Merkle proof, while a non-zero count requests just that many repair symbols for a partially received block (see Ch4 §4.1–4.2 and Appendix D).
 
@@ -27,7 +31,7 @@ A peer joining mid-stream must anchor this timeline before either zone can opera
 
 1.  Read `live_edge_segment_id = X` from the Stream Record (at most 1 segment stale, since the publisher republishes every second).
 2.  Initialize the local buffer head to segment $X$; the playout deadline is set $\Delta_{\text{buffer}} = 3.0\text{ s}$ behind the live edge as usual.
-3.  Obtain the signed manifests for the chunks of segment $X$ (and of any earlier segment the peer intends to backfill) from the first connected parent with `MANIFEST_REQUEST` (0x1D, Appendix D §D.4.16) — the push path delivers only manifests signed *after* the peer connected, so backfill needs an explicit fetch.
+3.  Obtain the signed manifests for the chunks of segment $X$ (and of any earlier segment the peer intends to backfill) **and the `STREAM_DESCRIPTOR`** whose version and hash the Stream Record named (Ch2 §2.3.3) from the first connected parent with `MANIFEST_REQUEST` (0x1D, Appendix D §D.4.16; `ChunkIndex = 0xFD` for the descriptor) — the push path delivers only manifests signed *after* the peer connected, so backfill needs an explicit fetch, and the decoder cannot consume a single verified block until it holds the descriptor's initialisation data (Ch4 §4.1.1). Both ride one request, so the descriptor adds no round-trip to Startup Join Latency.
 4.  Enter ACTIVE: receive PUSH delivery from segment $X{+}1$ onward through the tree parents.
 5.  PULL any blocks of segment $X$ (and any gaps) from active-set neighbors to fill the initial buffer.
 

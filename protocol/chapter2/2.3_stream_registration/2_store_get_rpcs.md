@@ -32,12 +32,13 @@ To register as an active peer for a specific stream:
     $$\text{Payload} = K_s \parallel \text{NodeID} \parallel \text{Port} \parallel \text{NodeClass} \parallel \text{AssignedTrees} \parallel \text{Flags} \parallel \text{Timestamp}$$
     $$\text{Sig} = \text{Sign}_{SK_{\text{node}}}(\text{Payload})$$
 3.  The DHT guardian nodes closest to $K_s$ receive the packet, verify the S/Kademlia Proof-of-Work **against the observed source address**, validate both signatures, and store the peer's record under that observed address.
-4.  The peer refreshes its registration every $\tau_{\text{ttl}}/2 = 90$ s, and **immediately** whenever `NodeClass`, `AssignedTrees` or `Flags` change. A registration counts as **active** for $135$ s after its last refresh and is servable until $\tau_{\text{ttl}} = 180$ s; only active registrations are counted or returned.
+4.  The peer refreshes its registration every $\tau_{\text{ttl}}/2 = 90$ s, and **immediately** whenever `NodeClass`, `AssignedTrees` or `Flags` change. A registration counts as **active** for $135$ s after its last refresh; only active registrations are counted **and only active registrations are returned** by `GET_PEERS`. The guardian *retains* an inactive registration until $\tau_{\text{ttl}} = 180$ s so that a late refresh re-activates it without a fresh identity check; a retained-but-inactive registration is neither counted nor served. (An earlier draft called the $135$–$180$ s band "servable", which contradicted "only active registrations are returned"; nothing is served from it.)
+5.  **A `CONE` registrant keeps its guardian mappings alive.** A guardian forwards `PUNCH_REQUEST`s to a `CONE` relay (Appendix D §D.4.14) through the UDP mapping that relay's own traffic to the guardian opened. Restricted and port-restricted NATs expire idle UDP mappings well inside the 90 s refresh interval on many deployments — RFC 4787 asks for $\ge 2$ min but common consumer and carrier NATs use $30$–$60$ s — so a mapping refreshed only by registration is dead for most of every refresh period, and every punch through it fails silently. A `CONE` relay therefore sends a `PING` (§D.4.1) to each guardian it registered with every $\tau_{\text{nat}} = 25$ s. Cost at $N = 10^6$, $s = 7$: roughly $7{,}800 \times 0.6$ (the `CONE` share) $\times 20 / 25 \approx 3{,}700$ pps swarm-wide, under $200$ pps per guardian — inside the guardian's unknown-source budget (Ch7 §7.2.1) and a small fraction of its registration and query load. `PUBLIC` registrants need no keepalive; out-of-sample peers are referred by gossip neighbours, who hold an open session to them.
 
 **Why the frame carries two signatures.** The 152-byte validation block already contains an Ed25519 packet signature, so the separate registration signature looks redundant — it is not, and an implementation must not strip it. They have different lifetimes:
 
 *   The **validation-block signature** authenticates *this datagram*, covering the timestamp for replay protection. It is meaningful only to the guardian that received the packet, at the moment it arrives.
-*   The **registration signature** authenticates a *durable statement* — including the class and tree bitmap — that the guardian stores and later re-serves to other peers inside Peer Records. It lets a third party verify that the peer genuinely registered with those attributes, without having witnessed the original packet — the same stand-alone-verifiability property that puts the downloader's NodeID inside a PoU receipt (Ch5 §5.2.3).
+*   The **registration signature** authenticates a *durable statement* — including the class and tree bitmap — that the guardian stores for the registration's lifetime. Its consumer is the **guardian**, which can later prove to a third party what the peer declared: two registration statements signed by one key with the same timestamp and different class or trees are the `EQUIVOCATION` evidence of Ch5 §5.3.3. The Peer Record the guardian re-serves is *not* signed — it carries the guardian's observation of the address and 42–54 bytes of the peer's declaration, and a reader trusts it exactly as far as it trusts the guardian or gossiper that sent it. An earlier draft claimed the record itself let third parties verify the registration; no frame carried the signature to them, and adding it would put a 20-record IPv6 `GET_PEERS` response over the MTU.
 
 ### Sampled Registration
 
@@ -72,14 +73,16 @@ Three properties of this design are load-bearing:
 
 ## The Publisher's Write Path (`STORE_RECORD`)
 
-The publisher stores its Stream Record on the guardians of $K_s$ once per segment with `STORE_RECORD` (§2.3.3), signed by $SK_{\text{Publisher}}$; a guardian accepts it iff the signature verifies against the key hashing to $K_s$ and the record is not older than the one it holds. The **`STORE_RECORD_ACK`** returns the guardian's raw counts — active registrations, relay registrations, relays per tree, and starved-tree indications from the last 10 s of queries. The publisher takes the median across responding guardians, scales by $2^{s}$, and from that single input drives:
+The publisher stores its Stream Record on the guardians of $K_s$ once per segment with `STORE_RECORD` (§2.3.3), signed by $SK_{\text{Publisher}}$; a guardian accepts it iff the signature verifies against the key hashing to $K_s$ and the record is not older than the one it holds. The **`STORE_RECORD_ACK`** returns the guardian's raw counts — active registrations, relay registrations, relays per tree, distinct `GET_PEERS` senders in the last 10 s, and starved-tree indications from those queries. The publisher takes the median across responding guardians and from that single input drives:
 
 | Consumer | Input |
 | :--- | :--- |
 | Forest ladder $M$ (Ch1 §1.2.1 §1.4) | `RelayCount` $\cdot 2^{s}$ |
 | Adaptive JOINING threshold (Ch1 §1.3), PoW tier (Ch2 §2.2) | `ActiveCount` $\cdot 2^{s}$, published as `SwarmSize` |
-| Base-layer source reserve (Ch1 §1.1.5 §5.4) | `StarvedCount[m]` for the $L_0$ trees |
-| Coverage monitoring | `PerTreeRelayCount[m]` — a persistently empty tree that grants have not covered is a signal to fold its layer into a covered tree via `MANIFEST_UPDATE` |
+| Layer fold (Ch1 §1.1.5 §5.6) and base-layer source reserve (§5.4) | $\hat{s}_m = (k/\alpha) \cdot \text{StarvedCount}[m] / (\text{ActiveCount} \cdot 2^{s})$ — **`StarvedCount` is not scaled**: queries are not sampled, registrations are |
+| Coverage monitoring | `PerTreeRelayCount[m]` $\cdot 2^{s}$ — a persistently empty tree that grants have not covered is a signal to fold its layer (Ch1 §1.1.5 §5.6) |
+
+Only the three registration counts are scaled by $2^{s}$. An earlier draft scaled every count, which at $N = 10^6$ read starvation $128\times$ too high.
 
 Guardians know the publisher only by its key, so they never initiate contact; the counts ride on the acknowledgement of a write the publisher makes anyway. One round-trip, once per segment, resolves every "guardians report to the publisher" dependency in the specification.
 

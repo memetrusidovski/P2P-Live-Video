@@ -34,26 +34,31 @@ Output: Execution Status
 25:                 State <- CONNECTING
 26:                 
 27:         case CONNECTING:
-28:             Parents <- ExecuteMultiForestJoin(SubscribedTrees)  // NOT all M — see 1_transition_model.md
-29:             If Size(Parents) == Size(SubscribedTrees) then:
-30:                 State <- ACTIVE
-31:                 
-32:         case ACTIVE:
-33:             // Streaming never pauses for a repair: every tree with a parent is
-34:             // received, verified, forwarded and PULL-served on every iteration.
-35:             ProcessStreamingBuffers(SubscribedTrees \ Repairing)
-36:             ServePullRequests(); SendRostersIfDue(); IssueReceiptsIfDue()
-37:             EvaluateNeighborScores()
-38:             For each m in SubscribedTrees:
-39:                 If ParentTimeoutDetected(m, Timestamp) then:      // RTT-scaled, Ch3 §3.3
-40:                     Repairing <- Repairing ∪ {m}                  // per-tree CHURN_REPAIR
-41:             For each m in Repairing:
-42:                 If TriggerParentReRoute(m) == RESTORED then:       // Ch3 §3.3, tree m only
-43:                     Repairing <- Repairing \ {m}
-44:             If Size(Parents) == 0 then:
-45:                 State <- DISCOVERY                                  // every parent lost
-44:                 
-45:     // Handle OS signals and low-latency network packet arrivals
-46:     PollNetworkSockets()
-47:     SleepMicroseconds(500) // Yield CPU
+28:             JoinTrees <- SubscribedTrees ∪ AssignedTrees          // a relay always joins its own trees
+29:             Parents <- ExecuteMultiForestJoin(JoinTrees)          // NOT all M — see 1_transition_model.md
+30:             If HasParent(Parents, m) for every m in SubscribedTrees then:
+31:                 State <- ACTIVE                                   // gated on SubscribedTrees only
+32:                 
+33:         case ACTIVE:
+34:             // Streaming never pauses for a repair: every tree with a parent is
+35:             // received, verified, forwarded and PULL-served on every iteration.
+36:             ProcessStreamingBuffers(JoinTrees \ Repairing)        // forward assigned trees even if not rendered
+37:             ServePullRequests(); SendRostersIfDue(); IssueReceiptsIfDue()
+38:             EvaluateNeighborScores()
+39:             For each m in JoinTrees:
+40:                 If ParentTimeoutDetected(m, Timestamp) then:      // RTT-scaled, Ch3 §3.3
+41:                     Repairing <- Repairing ∪ {m}                  // per-tree CHURN_REPAIR
+42:                 If DrainNoticeReceived(m) then:                    // parent is releasing us, App D §D.4.19
+43:                     Repairing <- Repairing ∪ {m}                  // warm repair: old parent still delivering
+44:             For each m in Repairing:
+45:                 If TriggerParentReRoute(m) == RESTORED then:       // Ch3 §3.3, tree m only
+46:                     Repairing <- Repairing \ {m}
+47:             For each m in AssignedTrees \ ParentsOf(Parents):
+48:                 RetryJoinAtMigrationCadence(m)                      // unparented assigned tree, Ch1 §1.1.5 §5.3
+49:             If Size(Parents) == 0 then:
+50:                 State <- DISCOVERY                                  // every parent lost
+51:                 
+52:     // Handle OS signals and low-latency network packet arrivals
+53:     PollNetworkSockets()
+54:     SleepMicroseconds(500) // Yield CPU
 ```

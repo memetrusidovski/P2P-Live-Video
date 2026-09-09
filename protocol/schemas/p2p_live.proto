@@ -7,21 +7,15 @@ syntax = "proto3";
 // encoding is the binary frame layouts defined in the protocol chapters and
 // indexed by Appendix D (appendix_d_frame_registry.md): a 4-byte header
 // (Version u8 | Type u8 | PayloadLength u16) followed by the typed payload,
-// carried over plain UDP (pre-session DHT frames) or QUIC streams/datagrams.
-// There is no gRPC/HTTP2 transport in this protocol; DHT RPCs are plain-UDP
-// frames because they precede any QUIC session.
+// carried over plain UDP (pre-session DHT frames), QUIC control streams, or
+// QUIC datagrams. There is no gRPC/HTTP2 transport in this protocol.
 //
-// STATUS (2026-09): this schema LAGS Appendix D. The resolution of ISSUE-019..039
-// changed or added the following frames, none of which are reflected here yet:
-// PeerRecord, REGISTER_PEER, GET_PEERS, STORE_RECORD/STORE_RECORD_ACK (0x1A/0x1B),
-// Stream Record layout, ROSTER (0x18), RANK_PROOF (0x19), PUNCH_REQUEST (0x1C),
-// MANIFEST_REQUEST (0x1D), MANIFEST/MANIFEST_UPDATE (chunk fields, slicing matrix),
-// PROOF_OF_UPLOAD (per-segment bitmap), REPUTATION_AUDIT_GOSSIP (evidence), PULL_REQUEST
-// (Flags), BLOCK_PROOF (SenderHopDepth), PROBE_RESPONSE (Flags/AssignedTrees),
-// SHUFFLE, GOSSIP_EXCHANGE, FORWARD_JOIN, DISCONNECT (reason 0x04). Regenerate from
-// the registry before relying on any message below. Appendix D is normative; this is not.
-//
-// Protocol version lives in the frame header — messages do not repeat it.
+// STATUS (2026-09-09): regenerated against Appendix D as of SOLUTION-060.
+// Every message below names the frame code it mirrors and the section that owns
+// its byte layout. Where the two disagree, Appendix D wins. Regenerate after any
+// registry change. Protocol version lives in the frame header — messages do not
+// repeat it. All multi-byte integers on the wire are big-endian; NodeIDs, keys,
+// hashes and signatures are fixed-length byte strings (32/32/32/64).
 // ============================================================================
 
 package p2p.live.v1;
@@ -30,238 +24,481 @@ option go_package = "p2p/live/v1;livev1";
 option java_multiple_files = true;
 option java_package = "com.p2p.live.v1";
 
-// Chapter 2: Peer Discovery and Stream Registration (S/Kademlia, plain UDP)
+// ----------------------------------------------------------------------------
+// Shared structures
+// ----------------------------------------------------------------------------
 
-// S/Kademlia ID Validation Block (152 bytes on the wire, Appendix D / Ch2 2.2.3).
-// Carried only on pre-session plain-UDP frames; post-handshake frames ride
-// authenticated QUIC and do not repeat it. The dynamic PoW is verified against
-// the OBSERVED UDP source address — the peer never self-declares its IP.
+enum NodeClass {                 // Ch1 §1.2.5
+  RELAY = 0;
+  LEAF = 1;
+  LEAF_PRIVATE = 2;
+}
+
+enum Reachability {              // Peer Record Flags bits 0–1, Ch2 §2.3.3
+  PUBLIC = 0;                    // no NAT / full cone
+  CONE = 1;                      // restricted or port-restricted; probed after PUNCH_REQUEST
+  SYMMETRIC = 2;                 // symmetric / CGNAT; never probed, never RELAY
+}
+
+// One byte of Flags in the Peer Record and PROBE_RESPONSE (Ch2 §2.3.3, App D §D.4.7).
+message PeerFlags {
+  Reachability reachability = 1; // bits 0–1
+  bool relay_capable = 2;        // bit 2: meets Ch6 §6.3.1 and accepts RELAY_BIND
+  bool source = 3;               // bit 3: the broadcaster
+  bool source_ingress = 4;       // bit 4: ingress relay bound by a NAT-blocked source
+  // bits 5–6 are TreeState in PROBE_RESPONSE only (see ProbeResponse); bit 7 reserved.
+}
+
+// Peer Record (42 B IPv4 / 54 B IPv6), Ch2 §2.3.3. The address is always the
+// SENDER's observation of the peer, never the peer's own claim.
+message PeerRecord {
+  bytes node_id = 1;             // 32 B
+  NodeClass node_class = 2;
+  uint32 assigned_trees = 3;     // bitmap, bit m-1 = relays tree m (rendezvous + coverage grant); 0 for leaves
+  PeerFlags flags = 4;
+  bytes ip_address = 5;          // 4 or 16 B, per AddrFamily 0x04 / 0x06
+  uint32 port = 6;
+}
+
+// S/Kademlia ID Validation Block (152 B), Ch2 §2.2.3. Pre-session plain-UDP
+// frames only. Dynamic PoW is verified against the OBSERVED UDP source address.
 message SKademliaIdentity {
-  bytes node_id = 1;          // 32-byte secure node ID
-  bytes public_key = 2;       // 32-byte Ed25519 node public key
-  uint64 static_nonce = 3;    // Static proof-of-work nonce (C1)
-  uint64 dynamic_nonce = 4;   // Dynamic proof-of-work nonce bound to observed IP
-                              // (C2 is adaptive; verifiers check against the tier
-                              //  required for the observed swarm size — Ch2 2.2)
-  uint64 timestamp = 5;       // Microsecond timestamp to prevent replays
-  bytes signature = 6;        // 64-byte Ed25519 signature of the header fields
+  bytes node_id = 1;             // 32 B
+  bytes public_key = 2;          // 32 B Ed25519
+  uint64 static_nonce = 3;       // C1 = 16
+  uint64 dynamic_nonce = 4;      // adaptive C2 tier, floored at 8 (Ch2 §2.2.1)
+  uint64 timestamp_us = 5;
+  bytes signature = 6;           // 64 B over payload hash and timestamp
 }
 
-message RegisterPeerRequest {          // Frame 0x0A
-  bytes stream_id = 1;                 // 32-byte stream key (hash of publisher's pubkey)
-  SKademliaIdentity identity = 2;      // Identity proofs of the registering node
-  uint32 port = 3;                     // Listening UDP port
-  uint32 protocol_type = 4;            // Protocol code (1 = UDP/QUIC)
-  repeated uint32 assigned_trees = 5;  // Trees this node relays (multi-tree super nodes, Ch1 1.2 1.3)
+// Slicing matrix entry (7 B), Ch1 §1.2.4 §4.2.1, App D §D.4.8.
+message TreeMapping {
+  uint32 tree_id = 1;
+  uint32 layer = 2;
+  uint32 stripe_index = 3;
+  uint32 stripe_count = 4;
+  uint32 priority = 5;           // equal within a layer; lower is shed first; layer-0 trees never shed
+  uint32 bitrate_kbps = 6;       // the tree's declared bitrate — the value every slot computation uses
 }
 
-message RegisterPeerResponse {
-  uint32 status_code = 1;    // Standard status code (e.g., 200 OK, 400 Bad Proof)
-  string message = 2;        // Status description
+// Publisher Stream Record, canonical layout Ch2 §2.3.3. Fixed part 96 B.
+message StreamRecord {
+  bytes publisher_pubkey = 1;    // 32 B; stream_id = Blake3(publisher_pubkey), not carried
+  uint32 manifest_version = 2;
+  uint32 slicing_mode = 3;       // 0x01 SVC_SPATIAL, 0x02 MDC
+  uint32 num_trees = 4;          // M in force
+  uint32 register_sample_log2 = 5;   // s: peers register iff Blake3(NodeID)[0:2] mod 2^s == 0
+  uint32 num_trees_next = 6;     // 0 unless a MANIFEST_UPDATE is pending
+  uint32 swarm_size = 7;         // already scaled by 2^s
+  uint32 relay_count = 8;        // already scaled by 2^s; drives the forest ladder
+  uint32 live_edge_segment_id = 9;
+  bytes live_edge_manifest_hash = 10;   // 32 B
+  uint64 live_edge_timestamp_us = 11;   // coarse staleness only, never for playback sync
+  uint32 effective_segment_seq = 12;    // 0 unless a MANIFEST_UPDATE is pending
+  uint32 descriptor_version = 13;       // STREAM_DESCRIPTOR in force (App D §D.4.20)
+  bytes descriptor_hash = 14;           // 32 B Blake3 of that descriptor
+  repeated TreeMapping tree_mapping = 15;        // × num_trees — the matrix in force
+  repeated TreeMapping tree_mapping_next = 16;   // × num_trees_next — the pending matrix
+  bytes publisher_signature = 17;                // 64 B over every preceding byte
 }
 
-message GetPeersRequest {              // Frame 0x0B
-  bytes stream_id = 1;                 // Target stream key
-  SKademliaIdentity requester = 2;     // Identity of the node querying the list
-  uint32 tree_id = 3;                  // Optional: restrict to relays of one tree (0 = any)
+// ----------------------------------------------------------------------------
+// Chapter 2: DHT frames (plain UDP, each carries SKademliaIdentity)
+// ----------------------------------------------------------------------------
+
+message Ping {                   // 0x01, App D §D.4.1
+  SKademliaIdentity identity = 1;
+  bytes stream_id = 2;           // 32 B, zero if generic
+}
+
+message Pong {                   // 0x02, App D §D.4.1 — STUN-lite reflection
+  SKademliaIdentity identity = 1;
+  bytes reflected_ip = 2;        // 4 or 16 B, the OBSERVED source of the PING
+  uint32 reflected_port = 3;
+}
+
+message Join {                   // 0x03, App D §D.4.2 — HyParView join, UDP → QUIC upgrade
+  SKademliaIdentity identity = 1;
+  bytes stream_id = 2;
+  NodeClass node_class = 3;
+}
+
+message FindNodeRequest {        // 0x0C / 0x0D, App D §D.4.6
+  SKademliaIdentity identity = 1;
+  bytes target_key = 2;          // 32 B
+}
+
+message FindNodeResponse {
+  bytes guardian_node_id = 1;
+  uint32 result_kind = 2;        // 0 = closer nodes, 1 = value
+  repeated PeerRecord nodes = 3;
+  StreamRecord value = 4;        // when result_kind == 1 and the key is K_s
+}
+
+message RegisterPeer {           // 0x0A, Ch2 §2.3.3
+  bytes stream_key = 1;          // K_s, 32 B
+  SKademliaIdentity identity = 2;
+  uint32 port = 3;
+  uint32 protocol_type = 4;      // 0x01 = UDP
+  NodeClass node_class = 5;
+  uint32 assigned_trees = 6;     // bitmap
+  PeerFlags flags = 7;
+  bytes registration_signature = 8;  // 64 B over K_s‖NodeID‖Port‖NodeClass‖AssignedTrees‖Flags‖Timestamp
+  // The guardian binds the record to the OBSERVED source address. Only sampled
+  // peers register (Ch2 §2.3.2); CONE registrants PING each guardian every 25 s.
+}
+
+message GetPeersRequest {        // 0x0B, Ch2 §2.3.3
+  SKademliaIdentity identity = 1;
+  bytes stream_key = 2;
+  uint32 starved_trees = 3;      // bitmap: "I failed to obtain a parent in tree m"
+  uint32 wanted_trees = 4;       // bitmap; 0 = membership query
+  uint32 req_flags = 5;          // bit 0 WANT_RELAY_CAPABLE
 }
 
 message GetPeersResponse {
-  uint32 status_code = 1;
-  repeated PeerAddress peers = 2;      // Compact list of active peers returned
-  StreamRecord stream_record = 3;      // Publisher's current signed stream record (live-edge anchor)
+  bytes guardian_node_id = 1;
+  uint32 count = 2;              // ≤ 20, uniformly random per query, stratified over wanted trees
+  uint32 resp_flags = 3;         // bit 0 SAMPLED
+  repeated PeerRecord peers = 4;
+  StreamRecord stream_record = 5;    // absent (length 0) if the guardian holds none
 }
 
-message PeerAddress {
-  bytes ip_address = 1;      // 4-byte IPv4 or 16-byte IPv6
-  uint32 port = 2;           // Active UDP port
-  bytes node_id = 3;         // S/Kademlia NodeID of target peer
+message StoreRecord {            // 0x1A, publisher → guardian, once per segment
+  SKademliaIdentity identity = 1;
+  StreamRecord record = 2;
 }
 
-// Publisher-signed authoritative record stored at K_s = Blake3(StreamID).
-// Re-signed and republished by the broadcaster every 1.0s (once per segment)
-// so live_edge_segment_id is never more than one segment stale.
-message StreamRecord {
-  bytes stream_id = 1;               // 32-byte Blake3(publisher public key)
-  bytes publisher_pubkey = 2;        // 32-byte Ed25519 publisher key
-  uint32 manifest_version = 3;       // Monotonic; peers reject non-increasing versions
-  uint32 slicing_mode = 4;           // e.g. 1 = SVC_SPATIAL, 2 = MDC
-  uint32 num_trees = 5;              // Current dynamic forest size M (1..6)
-  uint32 swarm_size = 6;             // Publisher's current registered-peer count
-  uint32 live_edge_segment_id = 7;   // Newest segment sequence number
-  bytes live_edge_manifest_hash = 8; // 32-byte Blake3 Merkle root of that segment
-  uint64 live_edge_timestamp = 9;    // Microsecond UTC creation time (staleness checks only)
-  repeated TreeMapping tree_mapping = 10;
-  bytes publisher_signature = 11;    // 64-byte Ed25519 signature over fields 1-10
+message StoreRecordAck {         // 0x1B, guardian → publisher — the only guardian → publisher path
+  bytes guardian_node_id = 1;
+  bool accepted = 2;
+  uint32 resp_flags = 3;
+  uint32 query_count = 4;        // distinct GET_PEERS senders in the last 10 s — NOT scaled by 2^s
+  uint32 active_count = 5;       // active registrations (refreshed within 135 s) — publisher scales by 2^s
+  uint32 relay_count = 6;        // of those, NodeClass = RELAY — scaled by 2^s
+  repeated uint32 per_tree_relay_count = 7;  // [1..6], scaled by 2^s
+  repeated uint32 starved_count = 8;         // [1..6], distinct senders with the starved bit — NOT scaled
 }
 
-message TreeMapping {
-  uint32 tree_id = 1;
-  uint32 layer = 2;                  // 0 = BASE, 1 = ENHANCE_1, 2 = ENHANCE_2, ...
-  string resolution = 3;             // e.g. "480p"
-  uint32 priority = 4;
+// PUNCH_REQUEST 0x1C, App D §D.4.14. Request form to the referrer; forward form to the target.
+message PunchRequest {
+  SKademliaIdentity identity = 1;        // present only on plain UDP
+  bytes target_node_id = 2;              // request form
+  PeerRecord requester = 3;              // forward form — built by the referrer from the OBSERVED address
+  bytes stream_id = 4;
 }
 
-// Parent-selection capacity probe (Frames 0x0E / 0x0F, Appendix D 4.7)
-message ProbeRequest {
-  bytes stream_id = 1;
-  uint32 tree_id = 2;
+// ----------------------------------------------------------------------------
+// Chapter 1 §1.2.2: parent probing (plain UDP)
+// ----------------------------------------------------------------------------
+
+message Probe {                  // 0x0E, App D §D.4.7
+  SKademliaIdentity identity = 1;
+  bytes stream_id = 2;
+  uint32 tree_id = 3;            // every per-tree field of the response refers to this tree
 }
 
-message ProbeResponse {
+enum TreeState {                 // PROBE_RESPONSE Flags bits 5–6
+  SERVING = 0;                   // has a parent and ≥ 1 verified segment in the probed tree
+  WARMING = 1;                   // has a parent, no verified segment yet — exempts a round from the shed rule
+  UNPARENTED = 2;                // assigned to the tree, currently without a parent in it
+}
+
+message ProbeResponse {          // 0x0F, App D §D.4.7
   bytes node_id = 1;
-  uint32 k_avail = 2;                // Remaining upload slots (0 during warm-up, Ch1 1.2 2.1)
-  uint32 reliability = 3;            // Fixed-point on-time delivery ratio (/65535)
-  uint32 hop_count = 4;              // Distance from source in the probed tree
-  uint32 node_class = 5;             // 0 = RELAY, 1 = LEAF, 2 = LEAF_PRIVATE
-  repeated uint32 assigned_trees = 6;
-  uint32 live_edge_segment_seq = 7;
+  uint32 k_avail = 2;            // free slots IN THE PROBED TREE, against its declared bitrate
+  uint32 reliability_q16 = 3;    // fixed-point /65535
+  uint32 hop_count = 4;          // current depth from the source in the probed tree (Ch1 §1.2.2 Depth Propagation)
+  NodeClass node_class = 5;
+  PeerFlags flags = 6;
+  TreeState tree_state = 7;      // Flags bits 5–6
+  uint32 assigned_trees = 8;
+  uint32 live_edge_segment_seq = 9;  // highest segment VERIFIED IN THE PROBED TREE; 0 = none (segments start at 1)
 }
 
-// Chapter 3: Overlay Membership and Epidemic Gossip (HyParView, QUIC control)
+// ----------------------------------------------------------------------------
+// Chapter 3: HyParView membership (QUIC control stream)
+// ----------------------------------------------------------------------------
 
-message GossipExchange {               // Frame 0x14
-  uint32 sequence_number = 1;          // Monotonic replay counter (Ch3 3.2.2)
-  bytes sender_node_id = 2;
-  repeated PeerAddress neighbors = 3;
-  bytes hmac_signature = 4;            // Blake3-HMAC with the DH-derived session key
-}
-
-message NeighborRequest {              // Frame 0x05
+message Neighbor {               // 0x05, Ch3 §3.2.1 + App D §D.4.3
   bytes sender_node_id = 1;
-  enum Priority {
-    PRIORITY_UNSPECIFIED = 0;
-    PRIORITY_HIGH = 1;                 // Active parent reconnection / RELAY_JOIN_REQUEST
-    PRIORITY_LOW = 2;                  // Standard mesh expansion
-  }
-  Priority priority = 2;
-  uint32 tree_id = 3;                  // 0 = membership only; m > 0 requests a slot in tree m
+  uint32 priority = 2;           // 0x01 HIGH, 0x02 LOW
+  uint32 tree_id = 3;            // 0 = membership only; m > 0 = parent slot in tree m (RELAY_JOIN_REQUEST when HIGH)
+  NodeClass node_class = 4;      // read by the Rank Admission Rule (leaf share, displacement exclusion)
+  uint32 assigned_trees = 5;
+  // May be followed on the same stream by a RankProof (Ch1 §1.2.2).
 }
 
-message Accepted {                     // Frame 0x08
+message Accepted {               // 0x08, App D §D.4.4
   bytes sender_node_id = 1;
-  uint32 accepted_type = 2;            // 0x03 = JOIN, 0x05 = NEIGHBOR
+  uint32 accepted_type = 2;      // 0x03 JOIN | 0x05 NEIGHBOR
   uint32 tree_id = 3;
-  uint32 hop_depth = 4;                // Acceptor's depth; joiner becomes hop_depth + 1
+  uint32 hop_depth = 4;          // acceptor's depth; joiner starts at hop_depth + 1, then follows BLOCK_PROOF
+  bool pending = 5;              // AcceptFlags bit 0: slot still held by a draining child; push starts on release
 }
 
-message DisconnectNotification {       // Frame 0x07
-  bytes sender_node_id = 1;
-  enum DisconnectReason {
-    DISCONNECT_REASON_UNSPECIFIED = 0;
-    DISCONNECT_REASON_CHOKE = 1;       // "DISCONNECT_CHOKE"
-    DISCONNECT_REASON_QUIT = 2;
-    DISCONNECT_REASON_EVICTION = 3;
-  }
-  DisconnectReason reason = 2;
-}
-
-message ShuffleRequest {               // Frame 0x06
+message Shuffle {                // 0x06, Ch3 §3.2.1
   bytes original_sender_id = 1;
-  uint32 ttl = 2;
-  repeated PeerAddress nodes_to_shuffle = 3;
+  uint32 ttl = 2;                // > 0: random walk, no reply. == 0 over an open session: direct request,
+                                 // answered by GossipExchange within tau_sched (Ch3 §3.3.1 tier 3)
+  uint32 count = 3;
+  uint32 wanted_trees = 4;       // trees the sender is short of relays for
+  repeated PeerRecord records = 5;
 }
 
-message ForwardJoin {                  // Frame 0x09
-  bytes origin_node_id = 1;
-  PeerAddress origin_address = 2;
-  uint32 ttl = 3;
-  uint32 pr_gossip = 4;
+enum DisconnectReason {          // shared by DISCONNECT and DRAIN_NOTICE, App D §D.3
+  REASON_UNSPECIFIED = 0;
+  CHOKE = 1;                     // DISCONNECT_CHOKE: the child has migrated
+  QUIT = 2;
+  EVICTION = 3;                  // three unreceipted segments
+  PREEMPTED = 4;                 // rank admission
+  DISPLACED = 5;                 // leaf share
+  REASSIGNED = 6;                // parent moves at a forest resize
+  DEMOTED = 7;                   // RELAY → LEAF
+  CAPACITY = 8;                  // K_v(m) fell
+  DEPTH = 9;                     // h ≥ D_max
+  // Refusals of a NEIGHBOR (App D §D.4.3b) — every NEIGHBOR is answered within tau_sched:
+  REJECTED_SATURATED = 10;       // no free slot, no admission rule applied; keep the record, count toward shed
+  REJECTED_NOT_ASSIGNED = 11;    // responder does not relay TreeID; clear the record's tree bit, keep the peer
+  REJECTED_DEPTH = 12;           // responder at ≥ D_max − 1; count toward shed, prefer shallower next round
 }
 
-// Chapter 4: Media Distribution Frames
-
-message Manifest {                     // Frames 0x11 (MANIFEST) / 0x17 (MANIFEST_UPDATE)
-  bytes stream_id = 1;
-  uint32 segment_sequence_number = 2;
-  uint64 timestamp = 3;                // Microseconds
-  bytes merkle_root = 4;               // 32-byte Blake3 root of the segment's block tree
-  uint32 block_count = 5;
-  uint32 segment_byte_length = 6;      // True length (last block is zero-padded to 16 KB)
-  uint32 slicing_matrix_version = 7;   // MANIFEST_UPDATE: must strictly increase
-  repeated TreeMapping tree_mapping = 8; // MANIFEST_UPDATE only
-  bytes source_signature = 9;          // 64-byte Ed25519
-}
-
-message BlockTransmission {            // Frame 0x10 (pull path)
-  uint32 segment_sequence_number = 1;
-  uint32 block_index = 2;
-  repeated bytes merkle_proof_path = 3; // Sibling hashes up to the signed root
-  bytes block_payload = 4;              // 16 KB block data
-}
-
-message BlockProof {                   // Frame 0x13 (push path, precedes a block's symbols)
-  uint32 segment_sequence_number = 1;
-  uint32 block_index = 2;
-  repeated bytes merkle_proof_path = 3;
-}
-
-// One RaptorQ source block per 16 KB Merkle block: K = 16 source symbols of
-// 1024 bytes. source_block_number IS the Merkle block index within the
-// segment; ESI < 16 = source symbol, ESI >= 16 = repair symbol. (Ch4 4.2)
-message RaptorQSymbol {                // Frame 0x12 (QUIC datagram)
-  uint32 segment_sequence_number = 1;
-  uint32 source_block_number = 2;      // SBN = Merkle block index
-  uint32 encoding_symbol_id = 3;       // ESI
-  bytes symbol_payload = 4;            // Fixed 1024-byte payload
-}
-
-message BufferStateBitfield {          // Frame 0x15
-  uint32 segment_sequence_number = 1;
-  uint32 starting_block_index = 2;
-  bytes bitfield_data = 3;             // Packed bitfield (optionally Bloom-compressed)
-}
-
-message PullRequest {                  // Frame 0x16
-  uint32 segment_sequence_number = 1;
-  uint32 block_index = 2;
-  uint32 missing_symbol_count = 3;     // 0 = whole block; n > 0 = n repair symbols
-  uint32 urgency_ms = 4;               // Requester's time to playout deadline
-}
-
-// Chapter 5: Economic Incentives & Reputation
-
-message ProofOfUpload {                // Frame 0x20
-  uint32 segment_sequence_number = 1;
-  uint32 block_index = 2;
-  bytes stream_id = 3;
-  bytes uploader_node_id = 4;
-  bytes downloader_node_id = 5;        // Signer identity — receipts are third-party auditable (Ch5 5.3)
-  uint64 timestamp = 6;                // Microseconds
-  bytes downloader_signature = 7;      // 64-byte Ed25519 from the receiver
-}
-
-message ChokeState {                   // Frame 0x21
-  uint32 state = 1;                    // 0 = CHOKE, 1 = UNCHOKE, 2 = UNCHOKE_OPTIMISTIC
-}
-
-message ReputationAuditGossip {        // Frame 0x22
+message Disconnect {             // 0x07, Ch3 §3.2.1 + App D §D.4.3b
   bytes sender_node_id = 1;
-  repeated SuspectRecord suspects = 2;
+  DisconnectReason reason = 2;
+  uint32 tree_id = 3;            // 0 = the whole connection; m > 0 = only the tree-m relationship or request
 }
 
-message SuspectRecord {
+message DrainNotice {            // 0x1E, App D §D.4.19 — parent → child: re-select now, I keep serving until the deadline
+  uint32 tree_id = 1;
+  DisconnectReason reason = 2;
+  uint32 scope = 3;              // 0x00 this child; 0x01 every child in tree_id (triggers the roster election)
+  uint32 deadline_segment_seq = 4;   // now + tau_drain, or EffectiveSegmentSeq at a resize
+}
+
+message ForwardJoin {            // 0x09, App D §D.4.5
+  PeerRecord origin = 1;
+  uint32 ttl = 2;
+  uint32 pr_gossip = 3;
+}
+
+message GossipExchange {         // 0x14, App D §D.4.10 — HMAC-authenticated
+  bytes sender_node_id = 1;
+  uint32 sequence_number = 2;    // monotonic per session (Ch3 §3.2.2)
+  uint32 neighbor_count = 3;
+  uint32 wanted_trees = 4;
+  repeated PeerRecord neighbors = 5;
+  bytes hmac_blake3 = 6;         // 32 B, DH-derived session key
+}
+
+message RosterEntry {            // App D §D.4.15
   bytes node_id = 1;
-  float penalty_score = 2;             // Multiplier scoring deduction (0.0 to 1.0)
+  uint32 k_avail = 2;            // in this tree, from the child's latest PROOF_OF_UPLOAD advertisement
+  NodeClass node_class = 3;
+  PeerFlags flags = 4;           // parent's OBSERVED reachability
+  bytes ip_address = 5;          // parent's OBSERVED address
+  uint32 port = 6;
 }
 
-// Chapter 1/7: Stream lifecycle
+message Roster {                 // 0x18, App D §D.4.15 — per tree, every tau_roster, on the tree stream
+  uint32 tree_id = 1;
+  uint32 roster_seq = 2;
+  uint32 child_count = 3;        // k in the election formulas
+  repeated RosterEntry entries = 4;  // top R_roster = 8 children that relay tree_id, by k_avail desc, NodeID asc
+}
 
-message StreamEnd {                    // Frame 0x04
+// ----------------------------------------------------------------------------
+// Chapter 4 / Chapter 7: media plane
+// ----------------------------------------------------------------------------
+
+message LayerExtent {            // App D §D.4.8
+  uint32 layer_block_count = 1;  // 16 KB blocks of this layer in the chunk
+  uint32 layer_byte_length = 2;  // exact payload bytes; the layer's last block is zero-padded beyond this
+}
+
+message Manifest {               // 0x11 MANIFEST and 0x17 MANIFEST_UPDATE, App D §D.4.8
   bytes stream_id = 1;
-  uint32 final_segment_sequence_number = 2;
-  uint64 timestamp = 3;                // Microseconds
-  bytes source_signature = 4;          // 64-byte Ed25519
+  uint32 segment_seq = 2;        // segments start at 1
+  uint32 chunk_index = 3;        // 0..3, 250 ms chunks
+  uint32 chunk_count = 4;        // 4
+  uint64 timestamp_us = 5;       // signed, carried; never an admission criterion (Ch7 §7.1.2)
+  bytes merkle_root = 6;         // 32 B, this chunk's Blake3 Merkle root
+  uint32 block_count = 7;
+  uint32 chunk_byte_length = 8;
+  uint32 slicing_matrix_version = 9;   // strictly increasing across MANIFEST_UPDATEs
+  uint32 layer_count = 10;
+  repeated LayerExtent layers = 11;         // per layer, lowest first: blocks and exact byte length
+  // MANIFEST_UPDATE only:
+  uint32 effective_segment_seq = 12;        // first segment on the new layout; S_now + 5
+  uint32 num_trees = 13;
+  repeated TreeMapping tree_mapping = 14;
+  bytes source_signature = 15;   // 64 B over every preceding byte after the header
 }
 
-// Chapter 6: NAT Traversal Relays
-
-message RelayProposal {                // Frame 0x30
-  bytes target_node_id = 1;
-  uint32 target_port_number = 2;
+message ManifestRequest {        // 0x1D, App D §D.4.16
+  uint32 segment_seq = 1;
+  uint32 chunk_index = 2;        // 0xFF = every chunk; 0xFE = pending MANIFEST_UPDATE; 0xFD = STREAM_DESCRIPTOR(s)
 }
 
-message RelayBind {                    // Frame 0x31
+enum ContentType {               // App D §D.4.20
+  CONTENT_UNSPECIFIED = 0;
+  VIDEO_CMAF = 1;                // fMP4/CMAF media segments; init_data = ftyp + moov
+  VIDEO_ANNEXB = 2;              // Annex-B NAL units; init_data = parameter sets (may be empty if in-band)
+  AUDIO = 3;
+  OPAQUE = 127;                  // application-defined; codec_tag is the application's
+}
+
+enum LayerMode {                 // how the decoder combines layers; the forest ignores this
+  LAYER_MODE_UNSPECIFIED = 0;
+  SVC_SPATIAL = 1;
+  SVC_TEMPORAL = 2;
+  SIMULCAST = 3;                 // independent renditions; the highest received is decoded, switch at a segment boundary
+  INDEPENDENT = 4;               // unrelated streams (e.g. video + audio)
+}
+
+message DescriptorLayer {        // layer l here is layer l of the slicing matrix
+  bytes codec_tag = 1;           // 4 B FourCC: 'av01', 'vp09', 'avc1', 'opus', ...
+  uint32 width = 2;
+  uint32 height = 3;
+  uint32 frame_rate_milli = 4;
+  uint32 bitrate_kbps = 5;
+  bytes init_data = 6;           // ≤ 4096 B container / codec initialisation data
+}
+
+message StreamDescriptor {       // 0x1F, App D §D.4.20 — source-signed, pinned like a manifest
+  bytes stream_id = 1;
+  uint32 descriptor_version = 2; // strictly increasing
+  uint32 effective_segment_seq = 3;  // first segment this descriptor applies to; announced ≥ 5 segments ahead
+  ContentType content_type = 4;
+  LayerMode layer_mode = 5;
+  uint32 layer_count = 6;
+  repeated DescriptorLayer layers = 7;
+  bytes source_signature = 8;    // 64 B over every preceding byte after the header
+}
+
+message BlockProof {             // 0x13, App D §D.4.9 — precedes a block's symbols on the tree stream
+  uint32 segment_seq = 1;
+  uint32 block_index = 2;        // ChunkIndex << 12 | j
+  uint32 proof_depth = 3;
+  uint32 sender_hop_depth = 4;   // receiver sets its own depth to sender_hop_depth + 1
+  repeated bytes sibling_hashes = 5;  // 32 B × proof_depth
+}
+
+message RaptorQSymbol {          // 0x12, Ch4 §4.2.3 — QUIC datagram
+  uint32 segment_seq = 1;
+  uint32 sbn = 2;                // = global block index
+  uint32 esi = 3;                // < 16 source, ≥ 16 parity; repair symbols start at the responder's derived base
+  bytes payload = 4;             // 1024 B
+}
+
+message BlockTransmission {      // 0x10, Ch4 §4.1.3 — pull path
+  uint32 segment_seq = 1;
+  uint32 block_index = 2;
+  uint32 proof_path_length = 3;
+  repeated bytes merkle_proof = 4;   // 32 B × proof_path_length
+  bytes block_data = 5;          // 16 KB
+}
+
+message BufferStateBitfield {    // 0x15, Ch4 §4.3.2
+  uint32 segment_seq = 1;
+  uint32 starting_block_index = 2;
+  bytes bitfield = 3;            // 1 = available; optionally Bloom-compressed
+}
+
+message PullRequest {            // 0x16, App D §D.4.11
+  uint32 segment_seq = 1;
+  uint32 block_index = 2;
+  uint32 missing_symbol_count = 3;   // 0 = whole block (BLOCK_TRANSMISSION); n = n repair symbols
+  uint32 urgency_ms = 4;
+  bool broadcast_want = 5;       // Flags bit 0: the rarity signal, one per missing block per tau_sched
+}
+
+message StreamEnd {              // 0x04, Ch1 §1.3.1
+  bytes stream_key = 1;          // K_s
+  uint32 final_segment_seq = 2;
+  uint64 timestamp_us = 3;
+  bytes source_signature = 4;    // 64 B
+}
+
+// ----------------------------------------------------------------------------
+// Chapter 5: incentives
+// ----------------------------------------------------------------------------
+
+message ChokeState {             // 0x21, App D §D.4.13 — PULL service only; never touches tree slots
+  uint32 state = 1;              // 0 CHOKE, 1 UNCHOKE, 2 UNCHOKE_OPTIMISTIC
+}
+
+// PROOF_OF_UPLOAD 0x20, Ch5 §5.2.3 — one per segment per tree, downloader → uploader. 184 + L bytes.
+message ProofOfUpload {
+  uint32 segment_seq = 1;
+  uint32 tree_id = 2;            // 0 with rx_pull for PULL-served blocks
+  bool rx_relayed = 3;           // RxFlags bit 0: issued to an emergent relay, weighted 3×
+  bool rx_pull = 4;              // RxFlags bit 1
+  uint32 loss_rate_q8 = 5;       // floor(255 ρ) over the trailing 2 s — input to adaptive parity and Ω_v
+  bytes block_bitmap = 6;        // ≤ 64 B; bit ChunkIndex*128 + j = delivered by the uploader on this tree and verified
+  uint32 k_avail = 7;            // child advertisement: free slots in tree_id
+  uint32 assigned_trees = 8;     // child advertisement
+  NodeClass node_class = 9;      // child advertisement
+  bytes stream_key = 10;         // K_s, 32 B
+  bytes uploader_node_id = 11;
+  bytes downloader_node_id = 12; // embedded so a third party can verify stand-alone
+  uint64 timestamp_us = 13;
+  bytes downloader_signature = 14;   // 64 B over every byte after the header
+}
+
+// RANK_PROOF 0x19, App D §D.4.17 / Ch5 §5.2.2 — commit-then-sample over a list sorted by
+// (SegmentSeq, TreeID, RxFlags, Downloader); samples are adjacent pairs so duplicates are caught.
+message RankProofPair {
+  ProofOfUpload left = 1;        // leaf 2p
+  ProofOfUpload right = 2;       // leaf 2p+1; absent (RightLength = 0) only for the last pair of an odd count
+  repeated bytes merkle_path = 3;    // 32 B × (ceil(log2 ReceiptCount) − 1), from the pair's parent node
+}
+
+message RankProof {
+  uint32 receipt_count = 1;      // bound to DISTINCT receipts by the pair-order check; no TotalBytes field
+  uint32 commit_segment_seq = 2;
+  bytes receipt_list_root = 3;   // 32 B
+  bytes prover_node_id = 4;
+  bytes prover_signature = 5;    // 64 B over (receipt_count ‖ commit_segment_seq ‖ receipt_list_root ‖ prover_node_id)
+  uint32 nonce_segment_seq = 6;  // > commit_segment_seq; nonce = that chunk's MANIFEST.MerkleRoot
+  uint32 nonce_chunk_index = 7;
+  uint32 pair_count = 8;         // 8
+  repeated RankProofPair pairs = 9;
+  // Verifier: rank = receipt_count × mean(min(bytes, cap)) × 8 / 60 s over the 16 sampled receipts.
+}
+
+message Accusation {             // per-accusation body of REPUTATION_AUDIT_GOSSIP, App D §D.4.18
+  bytes suspect_node_id = 1;
+  uint32 evidence_type = 2;      // 0x01 SYMMETRIC_TREE_PAIR (two PoU bodies), 0x02 EQUIVOCATION
+  bytes evidence = 3;
+  uint64 timestamp_us = 4;
+  bytes accuser_signature = 5;   // 64 B over the accusation's preceding bytes
+}
+
+message ReputationAuditGossip {  // 0x22, App D §D.4.18
+  bytes accuser_node_id = 1;
+  uint32 count = 2;              // ≤ 2
+  RankProof accuser_rank_proof = 3;  // the accuser's own proof; may be omitted only toward a current tree parent/child
+  repeated Accusation accusations = 4;
+  // Receivers re-verify evidence, count only accusers they can rank, forward only what they counted.
+}
+
+// ----------------------------------------------------------------------------
+// Chapter 6: emergent relays
+// ----------------------------------------------------------------------------
+
+message RelayProposal {          // 0x30, Ch6 §6.3.3 — NAT-blocked A → RELAY_CAPABLE R
+  bytes target_node_id = 1;      // parent B that A could not reach; all-zero = let R choose
+  uint32 target_port = 2;
+  uint32 tree_id = 3;            // 0 = PULL service only
+  uint32 bind_flags = 4;         // bit 0 SOURCE_INGRESS (signed with SK_Source inside the session)
+}
+
+message RelayBind {              // 0x31, Ch6 §6.3.3 — R → A once R holds a slot at B for tree_id
   bytes client_a_id = 1;
-  bytes client_b_id = 2;
+  bytes client_b_id = 2;         // the parent actually obtained
+  uint32 tree_id = 3;
+  uint32 bind_flags = 4;         // bit 0 SOURCE_INGRESS; bit 1 REJECTED
+  // R is B's child in tree_id (ordinary receipts to B); A is R's child (RELAYED receipts to R).
+  // Bridged children are charged to R's tree budget, at most half of it (Ch1 §1.2.1 The Two Budgets).
 }

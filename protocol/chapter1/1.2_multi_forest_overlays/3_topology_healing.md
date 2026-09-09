@@ -13,7 +13,9 @@ To heal a branch within one detection window plus a single handshake — about $
 ### The Child Roster (Election Input)
 Deterministic election requires that all siblings compute from the *same data*. To guarantee this, every relay parent sends each of its children, **per tree**, a `ROSTER` frame (0x18, Appendix D §D.4.15) every $\tau_{\text{roster}} = 1000\text{ ms}$: a sequence-numbered list of `(Child NodeID, K_avail in this tree, NodeClass, Flags, address)` entries plus the parent's total child count $k$ in that tree. Because every sibling holds the same roster snapshot (identified by its sequence number), they can each run the election locally and reach identical results **without exchanging a single election message**.
 
-A roster older than $5\text{ s}$ is considered stale and must not be used for election.
+**Where the parent gets the entries.** A child's `K_avail` in this tree, its `AssignedTrees` and its `NodeClass` arrive in the child's own `PROOF_OF_UPLOAD` for the tree once per segment — the **child advertisement** (Ch5 §5.2.1, Appendix D §D.4.12) — and, at admission, in its `NEIGHBOR` (§D.4.3); the child's reachability `Flags` and address are what the parent *observes* on the session. An earlier draft defined the roster's contents and no frame that delivered them: the join request carried no class or bitmap and the receipt no slot count, so a parent could build the list only by probing its own children every second — $8{,}700$ signed plain-UDP probes per second at a super node — or by guessing. A child whose advertisement is more than two segments old is dropped from the roster.
+
+A roster older than $5\text{ s}$ is considered stale and must not be used for election. The same roster is also the input when a *live* parent releases all of its children at once — a resize move, a demotion, or a depth overflow — announced by `DRAIN_NOTICE` with scope *every child* (§2.2 *The Drain Path*): the children run exactly the election below, with the notice as the trigger in place of the eviction timeout, and the old parent keeps delivering until they have moved.
 
 #### The Roster Lists Relays of This Tree Only
 

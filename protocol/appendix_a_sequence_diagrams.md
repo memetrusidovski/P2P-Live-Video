@@ -48,7 +48,7 @@ sequenceDiagram
 
 ## A.2 Sub-Second Churn Recovery and Local Parent Re-Routing
 
-This diagram demonstrates how a node detects a dead parent in one tree and promotes a standby from that tree's candidate pool to resume data flow — about $250$–$300$ ms on a local path, RTT-scaled elsewhere (Ch3 §3.3) — while every other tree keeps streaming.
+This diagram demonstrates how a node detects a dead parent in one tree and promotes a standby from that tree's candidate pool to resume data flow — about $280$ ms on a local path, $\approx 1$ s on a $250$ ms path, since both detection and the re-attach handshake scale with RTT (Ch3 §3.3) — while every other tree keeps streaming.
 
 ```mermaid
 %%{init: {'theme': 'dark'}}%%
@@ -68,13 +68,14 @@ sequenceDiagram
     Child->>Child: Select best relay of Slice 2 from per-tree pool P_2
     
     Note over Child: T = τ_evict + 10 ms (Standby selected)
-    Child->>Active: NEIGHBOR Request (Type 0x05) [Priority=HIGH, Slice=2]
+    Child->>Active: QUIC handshake (1 RTT; 0-RTT with a resumption ticket)
+    Child->>Active: NEIGHBOR Request (Type 0x05) [Priority=HIGH, Slice=2, NodeClass, AssignedTrees]
     activate Active
     Active->>Active: Check Slot Capacity
-    Active-->>Child: ACCEPTED (Type 0x08)
+    Active-->>Child: ACCEPTED (Type 0x08) — or DISCONNECT(TreeID=2, REJECTED_SATURATED | REJECTED_NOT_ASSIGNED | REJECTED_DEPTH), never silence
     deactivate Active
     
-    Note over Child: T = τ_evict + 50 ms (Re-route complete)<br/>Tree 2 back to streaming
+    Note over Child: T = τ_evict + ~2 RTT (Re-route complete)<br/>Tree 2 back to streaming
     Active->>Child: RaptorQ Symbols (Slice 2)
 ```
 

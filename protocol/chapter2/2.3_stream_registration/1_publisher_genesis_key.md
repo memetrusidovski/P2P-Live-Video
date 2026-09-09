@@ -23,9 +23,14 @@ Alongside the per-peer registrations, the publisher maintains a single authorita
   "live_edge_segment_id": 3847,
   "live_edge_manifest_hash": "<Blake3 Merkle root of segment 3847>",
   "live_edge_timestamp": 1750123456000000,
+  "effective_segment_seq": 0,
+  "descriptor_version": 2,
+  "descriptor_hash": "<Blake3 of the STREAM_DESCRIPTOR in force>",
   "tree_mapping": [ {"tree_id": 1, "layer": 0, "stripe": 0, "stripe_count": 2, "priority": 100, "bitrate_kbps": 750}, ... ]
 }
 ```
+
+*   **`descriptor_version` / `descriptor_hash`:** name the `STREAM_DESCRIPTOR` (Appendix D §D.4.20) that tells a decoder what the verified bytes are — codec, container, layer combination mode and initialisation data. The record carries only the pointer; the body comes from the first parent (Ch4 §4.3.1).
 
 *   **Republish cadence:** The publisher re-signs and re-publishes this record every $1.0\text{ s}$ — once per segment — so `live_edge_segment_id` is never more than one segment stale. The $\tau_{\text{ttl}} = 180\text{ s}$ record TTL (Appendix B) provides ample margin.
 *   **`swarm_size` / `relay_count`:** The publisher's current count of **active** registered peers, and of those the `RELAY`-class ones, as reported by the DHT guardians (§2.3.2; a registration is active if refreshed within 135 s, Appendix B). `swarm_size` drives the adaptive JOINING threshold (Ch1 §1.3) and the adaptive Proof-of-Work difficulty (Ch2 §2.2); `relay_count` drives the dynamic forest ladder (Ch1 §1.2.1 §1.4), which must not be keyed on a count that includes peers unable to relay.

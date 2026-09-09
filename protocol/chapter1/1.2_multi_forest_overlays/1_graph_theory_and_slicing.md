@@ -36,7 +36,21 @@ where:
 *   $B_m$ is tree $m$'s declared bitrate;
 *   $\Omega_v$ is the **overhead factor**: $\bar{E}_v$ is the mean number of RaptorQ parity symbols per $K = 16$-symbol block currently sent to the node's children (Ch4 §4.2.2; initialised to $E_{\min} = 1$ before any child exists), and $f_{\text{frame}} = 0.085$ is the fixed per-symbol framing overhead — the 12-byte `RAPTORQ_SYMBOL` header, QUIC datagram frame and short header, AEAD tag and UDP/IPv4 headers ($\approx 70$ bytes per 1024-byte symbol, $6.8\%$) plus one `BLOCK_PROOF` per 16 KB block ($\approx 1.5\%$).
 
-$\Omega_v$ is $1.15$ at the clean-link parity floor and $1.42$ at the $30\%$ parity ceiling. It is recomputed once per segment, when parity is; a $K_v(m)$ that **falls** is honoured by releasing children through the drain path (§5.3), never by dropping them. Because a rise in loss now *reduces* the slot count rather than only raising egress, the parity loop is damped: oversubscription → loss → more parity → fewer slots → less egress, instead of the positive feedback an overhead-blind count produces.
+$\Omega_v$ is $1.15$ at the clean-link parity floor and $1.42$ at the $30\%$ parity ceiling. It is recomputed once per segment, when parity is; a $K_v(m)$ that **falls** is honoured by releasing children through the drain path (§2.2 *The Drain Path*, `DRAIN_NOTICE` reason `CAPACITY`), never by dropping them. Because a rise in loss now *reduces* the slot count rather than only raising egress, the parity loop is damped: oversubscription → loss → more parity → fewer slots → less egress, instead of the positive feedback an overhead-blind count produces.
+
+### The Two Budgets, Each Owned by One Expression
+
+A relay's upload is split once, into a **tree budget** $(1 - r_{\text{pull}})\,u_v$ and a **PULL reserve** $r_{\text{pull}}\,u_v$. Each has several consumers in several chapters, and each has exactly one expression that owns its total:
+
+$$\underbrace{\sum_{m \in \mathcal{T}_{\text{assigned}}} \text{children}_v(m)\, B_m \Omega_v}_{\text{tree slots, Ch1}} \;+\; \underbrace{U_{\text{bridge}}}_{\text{bridged children, Ch6 §6.3}} \;\le\; (1 - r_{\text{pull}})\, u_v, \qquad U_{\text{bridge}} = \sum_{\text{bridged}} B_m \Omega_v \;\le\; \tfrac{1}{2}(1 - r_{\text{pull}})\, u_v$$
+
+$$\underbrace{\beta_{\text{pull}} \cdot \text{PullSlots}_v}_{\text{Tit-for-Tat unchoke, Ch5 §5.1}} \;+\; \underbrace{\sum_{\text{handovers in progress}} B_m \Omega_v}_{\text{preemption / displacement overlap, §2.2}} \;\le\; r_{\text{pull}}\, u_v$$
+
+`PullSlots` is therefore **not** $\lfloor r_{\text{pull}} u_v / \beta_{\text{pull}} \rfloor$ unconditionally; it is recomputed at every Tit-for-Tat cycle from whatever the handovers in progress leave, and a handover that would not fit even with every PULL slot choked is made sequential rather than overlapped (§2.2). A relay that carries bridged children (Ch6 §6.3) computes its assigned-tree slots with $U_{\text{bridge}}$ removed from the numerator:
+
+$$K_v(m) = \left\lfloor \frac{(1 - r_{\text{pull}})\, u_v - U_{\text{bridge}}}{t_v \cdot B_m \cdot \Omega_v} \right\rfloor$$
+
+An earlier draft spent the PULL reserve three times — the unchoker took all of it as slots, a preemption charged "one extra slot" to it, and every emergent-relay bridge charged $B_m \Omega$ to it — with no expression owning the total. On the reference $10$ Mbps relay the reserve is $1.0$ Mbps, which cannot hold even one preempted $1.5$ Mbps slot ($1.73$ Mbps with overhead), so an implementer had to choose between a link at $107\%$ and a rank rule that never fired. Bridges are moved to the tree budget because a bridged child *is* a subscriber served — capacity spent on it is not capacity lost to the forest — and a $10\%$ reserve could not hold a single $3.0$ Mbps bridge on the $20$ Mbps node the relay criteria admit, i.e. no bridge at all at $M \le 3$, where the home broadcaster behind NAT (Ch6 §6.3.3) actually lives. The half-budget cap keeps a relay from becoming a pure bridge and abandoning its assigned tree, and bounds the $3\times$ receipt multiplier (Ch6 §6.3.2) to at most $2\times$ over pure tree relaying.
 
 *(Worked values on the $M = 6$ reference mapping of §4.2.1, $\Omega_v = 1.15$: a $u_v = 10$ Mbps single-tree node holds $K_v = 10$ slots if assigned a $0.75$ Mbps $L_0$ or $L_1$ stripe and $5$ on a $1.5$ Mbps $L_2$ stripe. The same node under the overhead-blind $\lfloor u_v / B_m \rfloor$ would claim $13$ and $6$ — and deliver every child $13$–$15\%$ below the rate it needs.)*
 
@@ -47,6 +61,8 @@ To ensure fairness, a *standard* node $v$ acts as an **Interior Node** (a relay 
 Let $\text{out-degree}(v, T_m)$ be the number of children node $v$ has in tree $T_m$. The constraint for a standard node is:
 $$\exists! \ a \in [1, M] \text{ such that } \text{out-degree}(v, T_a) \le K_v(a)$$
 $$\forall b \ne a, \quad \text{out-degree}(v, T_b) = 0$$
+
+One bounded exception exists: an emergent relay bridging a NAT-blocked leaf (Ch6 §6.3) holds out-degree $1$ per bridged child in a tree it is not assigned to. Bridged children are charged to the tree budget as $U_{\text{bridge}}$ above, are never listed in the relay's `AssignedTrees`, and never make it a Deputy candidate for that tree; the exception changes the accounting, not the placement rule's purpose.
 
 ### Deterministic Tree Assignment (Rendezvous Ranking)
 
@@ -102,7 +118,7 @@ This costs the super node nothing. A 10 Gbps server assigned to all six trees st
 
 Where the rule cannot be satisfied — a small swarm with too few relays to offer $M$ distinct parents — the peer accepts the duplication but **marks the affected trees as correlated**. Churn recovery (Ch3 §3.3) treats a correlated set as a single failure domain: losing that parent is expected to orphan every tree in the set at once, so the peer pre-selects replacements for all of them rather than repairing one tree at a time.
 
-Node-level distinctness is the floor, not the ceiling. Two NodeIDs in the same $/24$ (or behind one datacenter ASN) are also correlated, and the existing subnet-diversity limits of Ch5 §5.3.2 and the eclipse-resistance prefix caps apply to parent sets as well as to receipt bundles.
+Node-level distinctness is the floor, not the ceiling. Two NodeIDs in the same $/24$ (or behind one datacenter ASN) are also correlated, and the **prefix cap** of Ch2 §2.2.2 applies to a peer's parent set and to a relay's child slots as well as to its k-buckets and Active Set: at most $c_p(K) = \max\left(1, \lceil K / \min(P_{\text{obs}}, 20) \rceil\right)$ of a slot set of size $K$ from one $/24$ or $/48$, where $P_{\text{obs}}$ is the number of distinct prefixes the node has itself observed. The cap is $1$ of $M \le 6$ parents and $\lceil K_v(m)/20 \rceil$ children per tree once the node has seen twenty prefixes, and it relaxes to no limit in a swarm that genuinely contains only one — the same-$/24$ dorm or office stream, which under an unconditional $5\%$ rule could not form a forest at all (Ch2 §2.2.2).
 
 #### Multi-Tree Eligibility Must Be Earned, Not Declared
 
@@ -115,6 +131,8 @@ $$\text{max\_trees}^{\text{eff}}(v) = \min\left(\text{max\_trees}(v),\ 1 + \left
 where $\Theta^{\text{rate}}_v$ is the node's PoU-verified delivered throughput over the trailing $60\text{ s}$ (Ch5 §5.2) — receipts signed by the children it actually served, not a number it asserts about itself.
 
 Every node therefore starts at one tree and earns each additional one by having already delivered a full stream's worth of bitrate. A genuine 10 Gbps server reaches all six trees within a couple of minutes of joining; a node that claims 10 Gbps and forwards nothing never leaves its first tree. This keeps super-node placement consistent with the protocol's core axiom — standing follows contribution — rather than making capacity the one claim taken on trust.
+
+The gate is a **cost**, not a proof. Receipts are signed by downloaders, and a downloader identity costs $\approx 10$ ms (Ch2 §2.2.1); an uploader that controls leaf-class Sybil downloaders can have them sign receipts for blocks it never sent, and no verifier can resolve a leaf-class signer's address to apply the subnet penalty (Ch5 §5.3.2). What the gate raises the price of forging multi-tree standing *to* is $S$ distinct identities per minute — from nothing. The blast radius of a node that forges its way into every tree is bounded elsewhere: by the prefix cap on how many of the forest's children one prefix may hold (Ch2 §2.2.2), and by its children observing non-delivery within one segment, scoring it down on $R$, and leaving. An earlier version of this section claimed the gate made standing unforgeable; it makes it *unforgeable for free*, which is the weaker and true statement.
 
 ## 1.4 Dynamic Forest Sizing
 
@@ -183,11 +201,11 @@ Because "second-ranked" is a deterministic function of NodeID, every joiner faci
 
 ### Shrinking the Forest
 
-A shrink runs the §4.5 migration in reverse and is otherwise identical: the source publishes a `MANIFEST_UPDATE` with the smaller `num_trees`, the new `tree_mapping` and an `EffectiveSegmentSeq`; the relays of the closed tree — and only they — drain their children through the sibling-election path and re-attach in their next-ranked tree; at the switch the closed tree stops receiving data.
+A shrink runs the §4.5 migration in reverse and is otherwise identical: the source publishes a `MANIFEST_UPDATE` with the smaller `num_trees`, the new `tree_mapping` and an `EffectiveSegmentSeq`; the relays of the closed tree — and only they — release their children with `DRAIN_NOTICE` (reason `REASSIGNED`, scope *all children*, §2.2 *The Drain Path*), keep serving them through the sibling election that notice triggers, and re-attach in their next-ranked tree; at the switch the closed tree stops receiving data.
 
 Two consequences are worth stating explicitly, because they are the ones an implementation gets wrong:
 
-*   **Per-tree bitrates change for everyone.** $B_m$ is read from the new mapping, and generally rises on a shrink (Tree 3 carries $0.75$ Mbps at $M = 6$ and $1.5$ Mbps at $M = 5$), so a relay's slot count $K_v(m)$ **drops** at the transition. Relays must shed children down to the new $K_v(m)$ *before* the switch, releasing them through the standard sibling-election path (§3) rather than dropping them, exactly as a `RELAY`→`LEAF` downgrade does (§5.3).
+*   **Per-tree bitrates change for everyone.** $B_m$ is read from the new mapping, and generally rises on a shrink (Tree 3 carries $0.75$ Mbps at $M = 6$ and $1.5$ Mbps at $M = 5$), so a relay's slot count $K_v(m)$ **drops** at the transition. Relays must shed children down to the new $K_v(m)$ *before* the switch, releasing them with `DRAIN_NOTICE` (reason `CAPACITY`, deadline `EffectiveSegmentSeq`) rather than dropping them, exactly as a `RELAY`→`LEAF` downgrade does (§5.3).
 *   **Peers never derive the layer mapping.** A peer recomputes only its own relay assignment by rendezvous rank over $M_{\text{new}}$. Which layer each tree carries is read from the signed `tree_mapping` in the `MANIFEST_UPDATE` itself (Appendix D §D.4.8) — never inferred — so a shrink cannot leave two peers disagreeing about what tree $T_2$ contains.
 
 ## 1.5 Visualizing the 3-Node, 3-Slice Graph

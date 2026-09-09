@@ -107,7 +107,7 @@ Response (plain UDP):
 *   **`Count`** $\le 20$. **`RespFlags`:** bit 0 `SAMPLED` — the guardian holds only a registration sample (see *Sampled Registration* in §2.3.2) and `SwarmSize` in the record is an estimate.
 *   **`StreamRecordLength (L)`:** the publisher's signed Stream Record (layout below) is appended to every response, so a joining peer obtains the live-edge anchor, `swarm_size`, `relay_count` and the current slicing matrix in the same round-trip (Ch2 §2.3.1, Ch4 §4.3.1). $L = 0$ means the guardian holds no current record — the joiner must then treat swarm-global values as unknown rather than assuming defaults.
 
-At 20 IPv6 records plus a 6-tree Stream Record the response is $\approx 1{,}330$ bytes, inside a 1500-byte MTU.
+At 20 IPv6 records plus a 6-tree Stream Record carrying a pending 6-tree matrix and the descriptor hash the response is $\approx 1{,}400$ bytes, inside a 1500-byte MTU.
 
 ## `STORE_RECORD` (0x1A) / `STORE_RECORD_ACK` (0x1B)
 
@@ -123,7 +123,7 @@ STORE_RECORD_ACK (plain UDP, guardian → publisher):
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                      S/Kademlia Guardian ID (32 bytes)        |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|   Accepted    |  RespFlags    |          Reserved (0)         |
+|   Accepted    |  RespFlags    |      QueryCount (2 bytes)     |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                     ActiveCount (4 bytes)                     |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -140,7 +140,7 @@ STORE_RECORD_ACK (plain UDP, guardian → publisher):
 ```
 
 *   A guardian accepts a `STORE_RECORD` only if the record's signature verifies against the key that hashes to $K_s$ and its `ManifestVersion`/`LiveEdgeSegmentId` are not lower than the record it holds (`Accepted = 0x01`); otherwise `0x00`.
-*   **`ActiveCount` / `RelayCount`** are the guardian's raw counts of *active* registrations (refreshed within 135 s, Appendix B) and of those with `NodeClass = RELAY`. **`PerTreeRelayCount[m]`** is the number of active relay registrations with bit $m - 1$ set. **`StarvedCount[m]`** is the number of distinct NodeIDs whose `GET_PEERS` in the last 10 s set bit $m - 1$. All counts are raw; when registration is sampled (§2.3.2) the publisher scales them by $2^{s}$.
+*   **`ActiveCount` / `RelayCount`** are the guardian's raw counts of *active* registrations (refreshed within 135 s, Appendix B) and of those with `NodeClass = RELAY`. **`PerTreeRelayCount[m]`** is the number of active relay registrations with bit $m - 1$ set. **`QueryCount`** is the number of distinct NodeIDs that sent this guardian a `GET_PEERS` in the last 10 s, and **`StarvedCount[m]`** the number of those whose request set `StarvedTrees` bit $m - 1$. All counts are raw. When registration is sampled (§2.3.2) the publisher scales the three **registration** counts by $2^{s}$; `QueryCount` and `StarvedCount` count queries, which every peer sends regardless of the sample, and are **never** scaled.
 *   The publisher takes the **median** over the guardians that answer, so one stale or hostile guardian cannot move the forest ladder, the JOINING threshold or the PoW tier.
 
 ## The Stream Record — Canonical Layout
@@ -149,14 +149,18 @@ The Stream Record is signed and re-served by third parties, so it needs one byte
 
 ```text
 [PublisherPubKey 32B][ManifestVersion 4B][SlicingMode 1B][NumTrees 1B]
-[RegisterSampleLog2 1B][Reserved 1B][SwarmSize 4B][RelayCount 4B]
-[LiveEdgeSegmentId 4B][LiveEdgeManifestHash 32B][LiveEdgeTimestamp 8B µs]
-[TreeID 1B][Layer 1B][StripeIndex 1B][StripeCount 1B][Priority 1B][BitrateKbps 2B]  × NumTrees
+[RegisterSampleLog2 1B][NumTreesNext 1B][SwarmSize 4B][RelayCount 4B]
+[LiveEdgeSegmentId 4B][LiveEdgeManifestHash 32B][LiveEdgeTimestamp 8B µs][EffectiveSegmentSeq 4B]
+[DescriptorVersion 4B][DescriptorHash 32B]
+[TreeID 1B][Layer 1B][StripeIndex 1B][StripeCount 1B][Priority 1B][BitrateKbps 2B]  × NumTrees      (matrix in force)
+[TreeID 1B][Layer 1B][StripeIndex 1B][StripeCount 1B][Priority 1B][BitrateKbps 2B]  × NumTreesNext  (pending matrix)
 [Ed25519 Publisher Signature 64B]
 ```
 
-*   Fixed part 92 bytes; $\le 198$ bytes at $M = 6$. `stream_id` is not carried — it is $\text{Blake3}(\text{PublisherPubKey})$, and a verifier derives it.
-*   **`SlicingMode`:** `0x01` `SVC_SPATIAL`, `0x02` `MDC`. The per-tree entries are the current slicing matrix, identical to the one in `MANIFEST_UPDATE` (Appendix D §D.4.8).
+*   Fixed part 132 bytes; $\le 280$ bytes at $M = 6$ with a pending 6-tree matrix, $\le 238$ with none. `stream_id` is not carried — it is $\text{Blake3}(\text{PublisherPubKey})$, and a verifier derives it.
+*   **`DescriptorVersion` / `DescriptorHash`:** the version and Blake3 hash of the `STREAM_DESCRIPTOR` (Appendix D §D.4.20) in force — the codec, container and initialisation data a decoder needs before it can use a single verified block. The joiner learns *which* descriptor it needs in the round-trip that anchors it and fetches the body from its first parent with `MANIFEST_REQUEST(0xFD)`, in the same request as its segment-$X$ manifests (Ch4 §4.3.1). A descriptor change is announced five segments ahead like a matrix change; the record points at the version in force and peers hold the pending one too.
+*   **`SlicingMode`:** `0x01` `SVC_SPATIAL`, `0x02` `MDC`. The first per-tree block is the slicing matrix **in force** — the one every `MANIFEST` currently on the wire refers to.
+*   **`EffectiveSegmentSeq` / `NumTreesNext`:** while a `MANIFEST_UPDATE` is pending (Ch1 §1.2.4 §4.5), `EffectiveSegmentSeq` is its switch segment and the second per-tree block is the matrix that takes effect there; otherwise both are $0$ and the second block is empty. A peer joining inside the migration window thereby holds *both* matrices — without the one in force it could not map a missing block of the manifests it is receiving to a tree, and without the pending one it would be surprised at the switch. The signed frame itself is available on request as `MANIFEST_REQUEST(ChunkIndex = 0xFE)` (Appendix D §D.4.16).
 *   **`RegisterSampleLog2` ($s$):** peers register only if their NodeID falls in a $2^{-s}$ sample (§2.3.2). `SwarmSize` and `RelayCount` are already scaled by the publisher.
 *   The signature covers every preceding byte. Guardians and clients reject a record whose signature does not verify against `PublisherPubKey`, or whose `PublisherPubKey` does not hash to the $K_s$ it was stored under.
 

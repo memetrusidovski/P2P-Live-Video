@@ -6,9 +6,9 @@ Tit-for-Tat governs **PULL service** — the reactive, mesh-side traffic of Ch4 
 
 The budget it allocates is the PULL reserve of Ch1 §1.2.1, $u_{\text{pull}} = r_{\text{pull}} \cdot u_v$ with $r_{\text{pull}} = 0.10$, divided into slots of $\beta_{\text{pull}} = 0.5$ Mbps each:
 
-$$\text{PullSlots} = \left\lfloor \frac{r_{\text{pull}} \cdot u_v}{\beta_{\text{pull}}} \right\rfloor$$
+$$\text{PullSlots} = \left\lfloor \frac{r_{\text{pull}} \cdot u_v - \sum_{\text{handovers in progress}} B_m \Omega_v}{\beta_{\text{pull}}} \right\rfloor$$
 
-— two slots on a 10 Mbps uploader, twenty on 100 Mbps, two thousand on 10 Gbps. An unchoked neighbour may draw up to $\beta_{\text{pull}}$ sustained from this node; a joiner backfilling its buffer draws from several unchoked neighbours in parallel.
+— two slots on a 10 Mbps uploader, twenty on 100 Mbps, two thousand on 10 Gbps, when no handover is in progress. The subtraction is the other consumer of the reserve: a preemption or displacement in an assigned tree (Ch1 §1.2.2 *The Drain Path*) serves one child beyond $K_v(m)$ until the drained child leaves, and that transient slot is paid for here — the owning expression is in Ch1 §1.2.1 *The Two Budgets*. `PullSlots` is recomputed at every cycle, so a handover chokes a PULL neighbour for its duration and releases the slot when it ends. An unchoked neighbour may draw up to $\beta_{\text{pull}}$ sustained from this node; a joiner backfilling its buffer draws from several unchoked neighbours in parallel.
 
 ## The Loop
 
