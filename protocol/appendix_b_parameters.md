@@ -7,37 +7,73 @@ To ensure uniform behavior across different implementations, the protocol define
 ### B.1.1 Timeouts & Intervals
 | Parameter | Default Value | Unit | Description |
 | :--- | :---: | :---: | :--- |
-| $\tau_{\text{ping}}$ | $100$ | ms | Heartbeat ping interval over active QUIC streams |
-| $\tau_{\text{evict}}$ | $200$ | ms | Active parent eviction timeout (2 missed pings) |
+| $\tau_{\text{ping}}$ | $100$ | ms | A parent sends a heartbeat whenever it has sent nothing to a child for this long; a child probes after this much silence (Ch3 §3.3) |
+| $\tau_{\text{evict}}$ | $\max(200,\ 2\tau_{\text{ping}} + SRTT + 4\,RTTVAR)$ | ms | Parent declared dead after this much total silence, from the connection's QUIC RTT estimator; $240$ ms at 20 ms RTT, $320$ at 80, $490$ at 250 (Ch3 §3.3) |
+| Source pacing | $\le 1/2$ | chunk period | A chunk's symbols leave the source spread over at most half the 250 ms chunk period (Ch3 §3.3.2) |
+| Receipt deadline | $1$ | segment | A child's receipt for segment $k$, tree $m$ is due before the parent sends the first block of segment $k+2$; choke at the next TFT cycle, evict after 3 consecutive unreceipted segments (Ch5 §5.2.1) |
 | $\tau_{\text{tft}}$ | $500$ | ms | Tit-for-Tat unchoking evaluation cycle |
 | $\tau_{\text{gossip}}$ | $1000$ | ms | Buffer state bitfield gossip interval (peer-to-peer exchange) |
 | $\tau_{\text{sched}}$ | $100$ | ms | Buffer scheduler / reactive PULL evaluation cycle (Ch4 §4.3.3) — distinct from $\tau_{\text{gossip}}$ |
 | $\tau_{\text{roster}}$ | $1000$ | ms | Child-roster distribution interval for sibling election (Ch1 §1.2.3); rosters stale after $5$ s |
+| $R_{\text{roster}}$ | $8$ | entries | Child-roster size: top-$R$ children by $K_v$, bounding roster cost to $O(k)$ rather than $O(k^2)$ (Ch1 §1.2.3) |
 | $\tau_{\text{deputy}}$ | $45$ | ms | Orphan's Deputy-response timer before independent passive-set fallback (Ch1 §1.2.3) |
-| $\tau_{\text{ttl}}$ | $180$ | s | Time-to-Live for dynamic S/Kademlia peer registrations |
+| $\tau_{\text{forest}}$ | $30$ | s | Minimum dwell between forest-size ($M$) changes; flash-crowd growth may pre-empt it (Ch1 §1.2.1 §1.4) |
+| Migration window | $5$ | segments | `MANIFEST_UPDATE.EffectiveSegmentSeq` $= S_{\text{now}} + 5$: segments between a forest-resize announcement and the switch to the new layout (Ch1 §1.2.4 §4.5) |
+| $\tau_{\text{ttl}}$ | $180$ | s | Time-to-Live for dynamic S/Kademlia peer registrations; refreshed every $\tau_{\text{ttl}}/2$ |
+| Starved-count window | $10$ | s | Guardian window for counting distinct `GET_PEERS` senders per starved tree (Ch2 §2.3.3) |
+| Pool re-query interval | $30$ | s | Minimum interval between `GET_PEERS` re-queries for one thin per-tree pool (Ch2 §2.3.2) |
+| Punch validity | $1$ | s | Window after a `PUNCH_REQUEST` in which the requester's `PROBE` is expected (App D §D.4.14) |
 
 ### B.1.2 Overlay Size Constraints
 | Parameter | Default Value | Unit | Description |
 | :--- | :---: | :---: | :--- |
-| $c_a$ | $8$ | nodes | Target size of HyParView Active Set $\mathcal{A}$; relays with $K_v > 2 c_a$ scale to $c_a^{\text{eff}} = \min(64, \lfloor K_v/10 \rfloor)$ (Ch3 §3.1) |
+| $c_a$ | $8$ | nodes | Target size of HyParView Active Set $\mathcal{A}$; relays scale to $c_a^{\text{eff}} = \min(64, \max(c_a, \lfloor K_v/10 \rfloor))$ — flat at 8 until $K_v = 80$, capped at 64 from $K_v = 640$ (Ch3 §3.1) |
 | $c_p$ | $32$ | nodes | Target size of HyParView Passive Set $\mathcal{P}$ |
+| Per-tree pool floor | $3$ | relays | Minimum known relays with $K_{\text{avail}} > 0$ per subscribed tree in the Passive Set before the peer re-queries (Ch3 §3.1.1) |
+| $N_0$ | $10^4$ | peers | Registration sample target: `RegisterSampleLog2` $= \max(0, \lceil \log_2(N/N_0) \rceil)$ (Ch2 §2.3.2) |
 | $k$ | $20$ | nodes | S/Kademlia k-bucket capacity |
-| $M_{\text{max}}$ | $6$ | trees | Maximum number of independent sub-stream slices; the active forest size $M$ is dynamic, scaling with swarm size $N$ on the ladder defined in Ch1 §1.3.1 ($M{=}1$ at $N{<}6$ up to $M{=}6$ at $N{\ge}30$) |
+| $M_{\text{max}}$ | $6$ | trees | Maximum number of trees; the active forest size $M$ is dynamic, scaling with the **relay** count $N_{\text{relay}}$ on the ladder of Ch1 §1.2.1 §1.4 ($M{=}2$ at $N_{\text{relay}}{<}12$ up to $M{=}6$ at $N_{\text{relay}}{\ge}30$); there is no $M{=}1$ rung |
+| $M_{\text{min}}$ | $2$ | trees | Smallest forest; $M{=}1$ excludes sub-$7$ Mbps uploaders and gives every peer a single point of failure (Ch1 §1.2.1 §1.4) |
+| $\Omega$ | $(1 + \bar{E}/K)(1 + f_{\text{frame}})$ | factor | Per-slice overhead factor entering every slot and sustainability computation: $1.15$ at the parity floor, $1.42$ at the ceiling (Ch1 §1.2.1) |
+| $f_{\text{frame}}$ | $0.085$ | factor | Fixed framing overhead per pushed byte: ~70 B of headers per 1024 B symbol plus one `BLOCK_PROOF` per 16 KB block (Ch1 §1.2.1) |
+| $r_{\text{pull}}$ | $0.10$ | share | Fraction of a node's upload reserved for PULL service (repair, late-joiner backfill); never available to tree slots (Ch1 §1.2.1, Ch5 §5.1.3) |
+| Coverage grant | $1$ | tree | Maximum trees a relay may hold beyond its ranked assignment to cover an otherwise empty tree; accepted only if $(1-r_{\text{pull}})u_v \ge 2\,\Omega B_m$ (Ch1 §1.2.1 §1.4) |
+| Active registration | $135$ | s | A registration counts toward $N$, $N_{\text{relay}}$ and per-tree relay counts only if refreshed within $1.5 \cdot \tau_{\text{ttl}}/2$; it remains servable until $\tau_{\text{ttl}}$ (Ch1 §1.2.1 §1.4) |
 | $D_{\text{max}}$ | $8$ | hops | Maximum permitted routing depth from source |
 | $N_{\text{collusion}}$ | $20$ | nodes | Minimum swarm size before collusion/subnet reputation heuristics activate (Ch5 §5.3) |
-| $\sigma_{\text{target}}$ | $1.33$ | ratio | Capacity ratio at which the $D \le 7$ depth proof holds (mean upload $\ge 8$ Mbps) (Ch1 §1.1.5) |
-| Shed rounds | $2$ | rounds | Consecutive failed tree-join rounds before shedding an SVC layer (Ch1 §1.1.5) |
-| Shed hysteresis | $10$ | s | Cool-down before a shed tree is retried (Ch1 §1.1.5) |
-| Source reserve | $3 \cdot B_1$ | Mbps | Broadcaster upload held back as the Tree-1 base-layer emergency pool (Ch1 §1.1.5) |
+| $\sigma_{\text{target}}$ | $1.70$ | ratio | Capacity ratio at which the $D \le 7$ depth proof holds: fan-out 8 at the nominal 1 Mbps slice including overhead, mean upload $\ge 10.2$ Mbps (Ch1 §1.1.5) |
+| $\sigma_{\text{full}}$ | $1.28$ | ratio | $\Omega/(1-r_{\text{pull}})$ — capacity ratio below which full bitrate is not deliverable and layer shedding applies, mean upload $< 7.7$ Mbps (Ch1 §1.1.5) |
+| Shed rounds | $2$ | rounds | Consecutive failed join rounds in any tree of a layer before shedding that layer and all above it (Ch1 §1.1.5) |
+| Shed hysteresis | $10$ | s | Cool-down before a shed layer's trees are retried (Ch1 §1.1.5) |
+| Source reserve | $3 \cdot b_0 \cdot \Omega$ | Mbps | Broadcaster upload held back as the base-layer emergency pool ($\approx 5.2$ Mbps at the reference ladder) (Ch1 §1.1.5) |
 | NodeClass | `0x00`/`0x01`/`0x02` | code | `RELAY` / `LEAF` / `LEAF_PRIVATE` (Ch1 §1.2.5) |
-| Leaf live-edge offset | $5$–$10$ | s | How far behind the live edge leaf-class peers join (Ch1 §1.2.5) |
-| Service floor cap | $20\%$ | percent | Maximum share of a node's upload slots committed to base-layer delivery for non-contributing peers (Ch5 §5.1) |
+| $\Delta_{\text{buffer}}$ | $3.0$ | s | Playout deadline behind the received live edge; PUSH zone is the newer $1.5$ s, PULL zone the older $1.5$ s (Ch4 §4.3.1) |
+| $\tau_{\text{retain}}$ | $8$ | s | Verified segments and manifests a peer retains to bootstrap late joiners (Ch4 §4.3.1); also the manifest acceptance window below the live edge (Ch7 §7.1.2) |
+| Manifest lookahead | $2$ | segments | Manifests claiming a segment further ahead of the observed live edge are dropped (Ch7 §7.1.2) |
+| $\tau_{\text{ban}}$ | $10$ | min | Local ban of a peer that delivered a frame with a forged source signature; doubles on repeat, capped at 24 h; never gossiped (Ch7 §7.1.1) |
+| $w_c$ | $12$ | ms/unit | Parent-score capacity credit per unit of $\sqrt{K_{\text{avail}}}$ (Ch1 §1.2.2.1) |
+| $w_h$ | $20$ | ms/unit | Parent-score hop penalty per unit of $e^{\lambda h}-1$, $\lambda=0.5$ (Ch1 §1.2.2.1) |
+| $K_{\text{ref}}$ | $256$ | slots | Capacity credit saturates here; caps the term at $192$ ms (Ch1 §1.2.2.1) |
+| HysteresisMargin | $30$ | ms | Score improvement a new parent must show before a peer migrates (Ch1 §1.2.2 §2.3) |
+| Service floor | $20\%$ | of $L_0$ slots | Share of a relay's base-layer tree slots it must keep available to leaf-class children before refusing one; $L_0$ slots are never rank-preempted (Ch1 §1.2.2) |
+| $\beta_{\text{pull}}$ | $0.5$ | Mbps | Sustained draw permitted per unchoked PULL slot; $\text{PullSlots} = \lfloor r_{\text{pull}} u_v / \beta_{\text{pull}} \rfloor$ (Ch5 §5.1.2) |
+| Preemption margin | $1.25$ | ratio | A joiner's rank must exceed $1.25\times$ the lowest child's to preempt it in an enhancement tree; one preemption in progress per tree (Ch1 §1.2.2) |
+| PULL credit cap | $\beta_{\text{pull}} \times 1$ s | per counterparty per segment | Maximum `PULL`-receipt bytes credited to $\Theta$ from one peer per segment (Ch5 §5.2.2) |
+| $\lambda$ | $0.005$ | s$^{-1}$ | Receipt age decay in $\Theta$ (Ch5 §5.2.2) |
+| Rank sample | $8$ | receipts | Receipts sampled in a `RANK_PROOF`; undetected inflation by a fraction $f$ survives with probability $(1-f)^8$ (Ch5 §5.2.2) |
+| $r_{\text{accuser}}$ | $0.25$ | rank | Minimum $\Theta^{\text{rate}}/B$ for an accuser to be counted (Ch5 §5.3.3) |
+| Eviction threshold | $3$ accusers, $3$ prefixes | — | Distinct verified accusers from distinct `/24`/`/48` prefixes within $\tau_{\text{accuse}}$ (Ch5 §5.3.3) |
+| $\tau_{\text{accuse}}$ | $10$ | min | Window over which accusations against one suspect are counted; also the first eviction duration (doubling, capped 24 h) (Ch5 §5.3.3) |
+| Accusation rate | $4$ | per accuser per minute | Accusations accepted from one accuser; the rest are discarded unread (Ch5 §5.3.3) |
+| Prefix cap | $5\%$ | of slots | Maximum share of k-bucket, Active Set, parent-set and child slots from one `/24` or `/48` (Ch2 §2.2.2, App C) |
+| $\tau_{\text{drain}}$ | $5$ | s | Bounded window a node demoting `RELAY`→`LEAF` must keep serving its children (Ch1 §1.2.5) |
 
 ### B.1.3 Cryptographic & Encoding Puzzles
 | Parameter | Default Value | Unit | Description |
 | :--- | :---: | :---: | :--- |
 | $C_1$ | $16$ | bits | S/Kademlia static Proof-of-Work prefix requirement |
-| $C_2$ | $12$ | bits | S/Kademlia dynamic Proof-of-Work (IP-bound) requirement — adaptive by swarm size: $8/10/12/14$ at $N < 50 / 10^3 / 10^5 / \ge 10^5$ (Ch2 §2.2); halved on same-subnet reconnect |
+| $C_2$ | $12$ | bits | S/Kademlia dynamic Proof-of-Work (IP-bound) requirement — adaptive by swarm size: $8/10/12/14$ at $N < 50 / 10^3 / 10^5 / \ge 10^5$ (Ch2 §2.2); halved on same-subnet reconnect. Discounts are alternatives, never cumulative, and are floored at $C_2^{\min} = 8$ |
+| Chunk | $250$ | ms | Signing unit: 4 chunks per 1 s segment, one `MANIFEST` and one Merkle tree each; `BlockIndex = ChunkIndex << 12 \| j` (Ch4 §4.1.1) |
 | $\text{Size}_{\text{block}}$| $16$ | KB | Size of individual data blocks in Merkle trees; equals one RaptorQ source block (Ch4 §4.2) |
 | $T_{\text{symbol}}$ | $1024$ | bytes | RaptorQ symbol size (fixed, anti-fragmentation) |
 | $K_{\text{block}}$ | $16$ | symbols | Source symbols per 16 KB block; SBN = Merkle block index |
@@ -49,8 +85,9 @@ To ensure uniform behavior across different implementations, the protocol define
 | :--- | :---: | :---: | :--- |
 | `RATE_PPS_PEER` | $2000$ | pps | Token-bucket rate for allowlisted peers (~750 pps steady state + PULL/FEC headroom) |
 | `BURST_PEER` | $1000$ | packets | Bucket capacity for allowlisted peers (absorbs QUIC bursts) |
-| `RATE_PPS_UNKNOWN` | $10$ | pps | Per-source budget for un-allowlisted first contact |
-| `GLOBAL_NEW_PPS` | $5000$ | pps | Global ceiling on new-connection work from all unknown sources |
+| `RATE_PPS_UNKNOWN` | $50$ | pps | Per-source budget for un-allowlisted first contact; sized for a CGNAT address shared by many viewers (Ch7 §7.2.1) |
+| `BURST_UNKNOWN` | $100$ | packets | Bucket capacity for un-allowlisted sources |
+| `GLOBAL_NEW_PPS` | $5000$ | pps | Aggregate ceiling on new-connection work from all unknown sources. Held in a percpu map: user space loads $\text{GLOBAL\_NEW\_PPS} / \text{num\_online\_cpus}$ per CPU, **not** the whole value (Ch7 §7.2.2) |
 | `MAX_PEERS` | $65536$ | entries | Allowlist map size (super node neighbor set + churn headroom) |
 | `MAX_UNKNOWN` | $16384$ | entries | LRU map size for unknown-source budgets |
 

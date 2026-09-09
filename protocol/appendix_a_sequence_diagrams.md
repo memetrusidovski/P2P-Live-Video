@@ -31,9 +31,9 @@ sequenceDiagram
     deactivate DHT
 
     Note over User: State: JOINING<br/>Lookup Stream Publisher IP
-    User->>DHT: GET_PEERS (K_s = Blake3(StreamID))
+    User->>DHT: GET_PEERS (K_s, WantedTrees)
     activate DHT
-    DHT-->>User: Compacted list of active peers (up to 20)
+    DHT-->>User: Up to 20 Peer Records (NodeID, class, trees, reachability, addr) + Stream Record
     deactivate DHT
 
     Note over User: State: CONNECTING
@@ -46,9 +46,9 @@ sequenceDiagram
 
 ---
 
-## A.2 250ms Churn Recovery and Local Parent Re-Routing
+## A.2 Sub-Second Churn Recovery and Local Parent Re-Routing
 
-This diagram demonstrates how a node detects a dead connection and promotes a candidate standby peer from its local Passive Set to resume data flow in less than $250\text{ ms}$.
+This diagram demonstrates how a node detects a dead parent in one tree and promotes a standby from that tree's candidate pool to resume data flow — about $250$–$300$ ms on a local path, RTT-scaled elsewhere (Ch3 §3.3) — while every other tree keeps streaming.
 
 ```mermaid
 %%{init: {'theme': 'dark'}}%%
@@ -63,18 +63,18 @@ sequenceDiagram
     Note over Child: T = 0ms (Timer starts)
     Note over Child: T = 100ms (Gap detected)
     Child->>Dead: UDP PING (Type 0x01)
-    Note over Child: T = 200ms (Probe times out)
-    Note over Child: State: CHURN_REPAIR<br/>Evict Dead Parent
-    Child->>Child: Select Best Reputation from Passive Set
+    Note over Child: T = τ_evict (probe times out; RTT-scaled, ≥ 200 ms)
+    Note over Child: Tree 2 enters CHURN_REPAIR<br/>Other trees keep streaming; evict dead parent for tree 2
+    Child->>Child: Select best relay of Slice 2 from per-tree pool P_2
     
-    Note over Child: T = 210ms (Standby selected)
+    Note over Child: T = τ_evict + 10 ms (Standby selected)
     Child->>Active: NEIGHBOR Request (Type 0x05) [Priority=HIGH, Slice=2]
     activate Active
     Active->>Active: Check Slot Capacity
     Active-->>Child: ACCEPTED (Type 0x08)
     deactivate Active
     
-    Note over Child: T = 250ms (Re-route complete)<br/>State: ACTIVE
+    Note over Child: T = τ_evict + 50 ms (Re-route complete)<br/>Tree 2 back to streaming
     Active->>Child: RaptorQ Symbols (Slice 2)
 ```
 
@@ -93,11 +93,11 @@ sequenceDiagram
     participant Mesh as Mesh Neighbor
 
     Note over Parent, Child: Push Phase (Live Edge)
-    Parent->>Child: PUSH BLOCK (Type 0x10) [Carry Merkle Proofs]
+    Parent->>Child: BLOCK_PROOF (0x13) + RAPTORQ_SYMBOL (0x12) datagrams, per block
     activate Child
-    Child->>Child: Verify Blake3 Merkle Root Hash
-    Note over Child: Block Validated!
-    Child->>Parent: PROOF_OF_UPLOAD (Type 0x20) [Signed with SK_Child]
+    Child->>Child: Verify each block against the chunk MANIFEST root
+    Note over Child: Segment k complete in this tree
+    Child->>Parent: PROOF_OF_UPLOAD (0x20) [segment k, tree m, block bitmap, loss rate; signed SK_Child]
     deactivate Child
 
     Note over Child, Mesh: Pull Phase (Buffer Repair)
@@ -109,7 +109,7 @@ sequenceDiagram
     deactivate Mesh
     activate Child
     Child->>Child: Verify Blake3 Merkle Root
-    Child->>Mesh: PROOF_OF_UPLOAD (Type 0x20) [Signed with SK_Child]
+    Child->>Mesh: PROOF_OF_UPLOAD (0x20) at segment end [RxFlags.PULL, bitmap of pulled blocks]
     deactivate Child
 ```
 

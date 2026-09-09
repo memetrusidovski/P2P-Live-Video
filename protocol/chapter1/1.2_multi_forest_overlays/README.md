@@ -10,6 +10,6 @@ Please review the following sub-documents for the exact mathematical models, par
 
 *   **[1. Graph-Theoretic Foundations & Slice Assignment](1_graph_theory_and_slicing.md):** Defines the directed graph $G=(V, E)$, the Orthogonal Placement Rule capacity constraints, and edge-disjoint spanning trees.
 *   **[2. The Parent Selection & Scoring Algorithm](2_parent_selection_algorithm.md):** The multivariate capacity/latency/hop-count scoring formula and the algorithmic pseudocode for querying and joining a tree.
-*   **[3. Topology Healing (Sub-250ms Sibling Election)](3_topology_healing.md):** The exact millisecond-by-millisecond timeline and deterministic lateral election logic used to repair a broken tree branch without querying the DHT.
+*   **[3. Topology Healing (Deterministic Sibling Election)](3_topology_healing.md):** The exact millisecond-by-millisecond timeline and deterministic lateral election logic used to repair a broken tree branch without querying the DHT.
 *   **[4. Stream Slicing Architecture (MDC & SVC)](4_stream_slicing_architecture.md):** How the video bytes are actually divided across trees using Scalable Video Coding (SVC) or Multiple Description Coding (MDC) to ensure graceful degradation (dropping resolution) instead of playback freezing during network failures.
 *   **[5. Node Classes and Relay Eligibility](5_node_classes.md):** The `RELAY` / `LEAF` / `LEAF_PRIVATE` taxonomy — who bears relay duty, why Proof-of-Work is universal, and how leaf-only status is priced in quality of service rather than exempted from the incentive system.

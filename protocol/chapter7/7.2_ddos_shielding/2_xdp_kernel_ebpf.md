@@ -17,8 +17,9 @@ The filter enforces the two-tier budget of §1: a real token bucket for allowlis
 
 #define RATE_PPS_PEER      2000    /* ~750 pps steady state + PULL/FEC headroom (see 1) */
 #define BURST_PEER         1000    /* QUIC is bursty; bucket must absorb a full burst   */
-#define RATE_PPS_UNKNOWN   10      /* enough for a handshake / pre-session DHT frames   */
-#define BURST_UNKNOWN      20
+#define RATE_PPS_UNKNOWN   50      /* handshakes + pre-session DHT frames; keyed by IPv4,
+                                    * so sized for a CGNAT address shared by many (see 1) */
+#define BURST_UNKNOWN      100
 #define GLOBAL_NEW_PPS     5000    /* ceiling on total handshake work from all sources  */
 
 #define NS_PER_SEC         1000000000ULL
@@ -49,7 +50,19 @@ struct {
     __uint(max_entries, MAX_UNKNOWN);
 } unknown_budget SEC(".maps");
 
-/* Global ceiling on new-connection work, independent of source diversity. */
+/* Ceiling on new-connection work, independent of source diversity.
+ *
+ * PERCPU_ARRAY is used to keep the hot path lock-free, which means each CPU
+ * holds its OWN bucket: the aggregate ceiling is (per-CPU rate x online CPUs),
+ * not the per-CPU rate. User space therefore MUST populate this map with
+ *     rate = GLOBAL_NEW_PPS / num_online_cpus()
+ * at load time. Writing GLOBAL_NEW_PPS directly into each CPU's bucket — the
+ * obvious reading of the constant — yields a ceiling N_cpu times higher than
+ * intended (160,000 pps on a 32-core host, not 5,000).
+ *
+ * The trade-off accepted here: RX-queue hashing may load CPUs unevenly, so one
+ * CPU can exhaust its share while others idle. The alternative, a single shared
+ * atomic counter, costs a cross-CPU cacheline bounce on every packet. */
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __type(key, __u32);
@@ -58,13 +71,32 @@ struct {
 } global_new SEC(".maps");
 
 /* Classic token bucket: refill by elapsed time, cap at burst, spend one token.
- * Returns 1 if the packet may pass, 0 if it must be dropped. */
+ * Returns 1 if the packet may pass, 0 if it must be dropped.
+ *
+ * Concurrency: XDP runs simultaneously on every RX queue, so two CPUs may
+ * read-modify-write the same bucket. The accounting is therefore approximate
+ * by design (a per-CPU-locked bucket would cost a cacheline bounce per packet,
+ * which is exactly what XDP exists to avoid) — but it must never become
+ * *unbounded*, which is what the two clamps below prevent. */
 static __always_inline int bucket_allow(struct bucket *b, __u64 now)
 {
-    __u64 delta = now - b->last_refill_ns;
-    __u64 cap   = (__u64)b->burst * NS_PER_SEC;
+    __u64 cap = (__u64)b->burst * NS_PER_SEC;
+    __u32 rate = b->rate ? b->rate : 1;
 
-    b->tokens += delta * b->rate;
+    /* Clamp 1 — unsigned underflow. Another CPU may already have advanced
+     * last_refill_ns past `now`. Plain subtraction would wrap to ~2^64,
+     * refill the bucket to cap on every packet, and silently disable the
+     * limiter for precisely the multi-queue flood it is meant to stop. */
+    __u64 delta = (now > b->last_refill_ns) ? (now - b->last_refill_ns) : 0;
+
+    /* Clamp 2 — multiplication overflow. A long-idle entry can accumulate a
+     * delta large enough that delta*rate exceeds u64; clamping to the delta
+     * that already fills the bucket is both safe and exact. */
+    __u64 max_delta = cap / rate;
+    if (delta > max_delta)
+        delta = max_delta;
+
+    b->tokens += delta * rate;
     if (b->tokens > cap)
         b->tokens = cap;
     b->last_refill_ns = now;
@@ -98,7 +130,22 @@ int xdp_ratelimit_filter(struct xdp_md *ctx)
     if (ip->protocol != IPPROTO_UDP)
         return XDP_PASS;           /* not ours — do not filter unrelated traffic */
 
-    struct udphdr *udp = (void *)ip + sizeof(*ip);
+    /* Non-first fragments carry no UDP header, so they cannot be classified by
+     * port. The protocol never fragments (symbols are sized to fit the MTU),
+     * so a fragment on this path is either an attack or misconfiguration. */
+    if (ip->frag_off & bpf_htons(0x1FFF))
+        return XDP_DROP;
+
+    /* The UDP header sits at ihl*4, NOT at a fixed 20 bytes. Assuming 20
+     * misparses any packet carrying IP options: the port check then reads
+     * payload bytes, so an attacker can dodge the filter (or trip it against
+     * unrelated traffic) simply by setting an option. Bounds are explicit so
+     * the verifier can prove the access. */
+    __u32 ihl_bytes = ip->ihl * 4;
+    if (ihl_bytes < sizeof(*ip) || ihl_bytes > 60)
+        return XDP_DROP;
+
+    struct udphdr *udp = (void *)ip + ihl_bytes;
     if ((void *)udp + sizeof(*udp) > data_end)
         return XDP_PASS;
 
@@ -125,7 +172,9 @@ int xdp_ratelimit_filter(struct xdp_md *ctx)
     struct bucket *u = bpf_map_lookup_elem(&unknown_budget, &peer_ip);
     if (!u) {
         struct bucket fresh = {
-            .tokens         = (__u64)BURST_UNKNOWN * NS_PER_SEC,
+            /* Spend a token for THIS packet as the bucket is created, or a
+             * source that is seen once gets burst+1 rather than burst. */
+            .tokens         = (__u64)(BURST_UNKNOWN - 1) * NS_PER_SEC,
             .last_refill_ns = now,
             .rate           = RATE_PPS_UNKNOWN,
             .burst          = BURST_UNKNOWN,

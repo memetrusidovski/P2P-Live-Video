@@ -20,3 +20,5 @@ BLOCK_TRANSMISSION Frame (Type 0x10):
 |                                                               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
+
+*   **Block Index** is the global index of §1: the upper 4 bits name the chunk, the lower 12 the block within it, so the receiver knows which chunk `MANIFEST` root to verify the proof against. **Proof Path Length** is the chunk tree's depth ($\approx 4$ at 6 Mbps).

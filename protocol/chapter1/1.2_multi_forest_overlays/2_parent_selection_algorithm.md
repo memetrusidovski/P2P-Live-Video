@@ -2,34 +2,96 @@
 
 ## 2.1 The Multivariate Scoring Function
 
-When a peer $i$ wishes to join tree $T_m$ as a child, it must select the best possible parent from a pool of candidates discovered via the S/Kademlia DHT. Selecting a random parent leads to high latency and geographic inefficiency. Selecting only based on bandwidth creates hotspot bottlenecks.
+When a peer $i$ wishes to join tree $T_m$ as a child, it must select the best possible parent from a pool of candidates discovered via the S/Kademlia DHT (`GET_PEERS` with `WantedTrees` naming $m$, Ch2 §2.3.2) and its own per-tree passive pool $\mathcal{P}_m$ (Ch3 §3.1.1). Both sources deliver Peer Records, so every candidate is known to relay $T_m$ and to be reachable before it is probed. Selecting a random parent leads to high latency and geographic inefficiency. Selecting only based on bandwidth creates hotspot bottlenecks.
 
 To solve this, peer $i$ evaluates every candidate parent $p$ using a continuous **Multivariate Scoring Function**:
-$$\text{Score}(p, i) = \left( w_1 \cdot \text{CapacityScore}(p) \right) - \left( w_2 \cdot \text{LatencyPenalty}(p, i) \right) - \left( w_3 \cdot \text{HopPenalty}(p) \right)$$
+$$\text{Score}(p, i) = w_c \cdot \text{CapacityCredit}(p) \;-\; \text{RTT}(p, i) \;-\; w_h \cdot \text{HopPenalty}(p)$$
+
+All three terms are expressed in **milliseconds of effective penalty**, so they are directly comparable and the score reads as "how much better than a 0 ms, hop-0, zero-capacity parent is this candidate." Keeping the terms commensurable is not cosmetic: see [§2.1.1 Weight Calibration](#211-weight-calibration) for what goes wrong when they are not.
 
 ### Component 1: Capacity Score
 The parent $p$ gossips its available remaining upload slots ($K_{\text{avail}}$) and historical reliability ($R \in [0, 1]$, representing the percentage of chunks delivered on time).
-$$\text{CapacityScore}(p) = \sqrt{K_{\text{avail}}} \cdot R$$
+$$\text{CapacityCredit}(p) = \min\left(\sqrt{K_{\text{avail}}},\ \sqrt{K_{\text{ref}}}\right) \cdot R, \qquad K_{\text{ref}} = 256$$
 *We use square-root compression so that a peer with more slots is scored higher, but not proportionally higher, encouraging load distribution. An earlier draft used $\ln(1 + K_{\text{avail}})$, but the log is too flat at the top end: it gave a 10 Gbps server (10,000 slots) only a 3.8× advantage over a 10 Mbps node — so nearby mid-tier peers routinely outscored available backbone capacity. The square root yields a 31.6× advantage in that comparison: strong enough to route toward super nodes, still far from the raw 1000× that would cause monopolisation. The exponent is a tuning parameter to be validated in simulation (Chapter 8) before deployment.*
 
 **Warm-Up Gating:** A freshly joined relay has no data to forward until it has received and Merkle-verified its first complete segment (~1 second of buffering). During this window it MUST advertise $K_{\text{avail}} = 0$, which removes it from parent selection entirely (probes are skipped by the `available_slots > 0` check below). Without this rule, a new relay's high capacity score attracts children who then receive nothing for a full second — the relay answers keepalives (so it is never evicted as dead) while its empty bitfield forces every child into mesh-PULL fallback, compounding into latency spikes during rapid-growth phases when many relays are warming up at once.
 
+**Warm-up is per tree, not per node.** A multi-tree super node (§1.3) may hold verified segments for $T_1$ while still warming up in $T_4$. It advertises its real slot count in the trees it can serve and zero in the trees it cannot, so one warming assignment never hides its whole capacity from the forest.
+
 ```python
-# Capacity gossip advertisement:
-if len(verified_segment_buffer) == 0:
-    advertise_K_avail = 0                  # warm-up: hidden from parent selection
-else:
-    advertise_K_avail = floor(u_v / B_m)   # normal advertisement
+# Capacity gossip advertisement, evaluated per assigned tree:
+def advertise_K_avail(tree_id):
+    if len(verified_segment_buffer[tree_id]) == 0:
+        return 0                                    # warm-up: hidden from selection
+    B_m = tree_mapping[tree_id].bitrate             # the tree's OWN declared bitrate (§4.2.1)
+    K_v = floor((1 - R_PULL) * u_v / (t_v * B_m * omega_v))   # per-tree slot count (§1.3)
+    return K_v - current_children[tree_id]
 ```
 
+`K_avail` is always computed against the tree's declared bitrate from the slicing matrix, never against the nominal $B/M$: on the reference $M = 6$ mapping a $1.5$ Mbps $L_2$ stripe holds half the slots of a $0.75$ Mbps $L_0$ stripe on the same node.
+
+**Warming and saturated must be distinguishable.** Both states advertise $K_{\text{avail}} = 0$, but they mean opposite things to a joiner: a warming relay will have capacity in under a second, while a saturated one will not. Conflating them makes a growth transient look identical to a capacity shortage, and the shed rule of [§1.1.5](../1.1_scale_latency/5_capacity_adaptation.md) would then drop a quality layer for a condition that resolves on its own.
+
+No new field is required — `PROBE_RESPONSE` (0x0F) already carries `LiveEdgeSegmentSeq`, and the warm-up rule above guarantees the two states differ in it:
+
+| Candidate state | $K_{\text{avail}}$ | `LiveEdgeSegmentSeq` | Joiner's response |
+| :--- | :---: | :---: | :--- |
+| **Warming up** | $0$ | $0$ (no verified segment yet) | Retry — capacity is imminent |
+| **Saturated** | $0$ | $> 0$ | Genuine shortage — counts toward the shed threshold |
+| **Available** | $> 0$ | $> 0$ | Score and join |
+
 ### Component 2: Latency Penalty (RTT)
-Peer $i$ pings candidate $p$ over UDP to establish the current Round Trip Time (RTT) in milliseconds.
+Peer $i$ pings candidate $p$ over UDP to establish the current Round Trip Time (RTT) in milliseconds. It enters the score directly, at unit weight — it *is* the millisecond scale the other two terms are calibrated against.
 $$\text{LatencyPenalty}(p, i) = \text{RTT}(p, i)$$
 
 ### Component 3: Hop Penalty (Layer Depth)
 To prevent the tree from becoming too deep, parent $p$ advertises its hop-distance $h_p$ from the source in tree $T_m$.
-$$\text{HopPenalty}(p) = e^{\lambda \cdot h_p}$$
-*The exponential penalty ensures that joining deeply nested nodes (e.g., Hop 10) is heavily penalized compared to joining a node at Hop 2, aggressively keeping the tree shallow.*
+$$\text{HopPenalty}(p) = e^{\lambda \cdot h_p} - 1, \qquad \lambda = 0.5$$
+*The exponential penalty ensures that joining deeply nested nodes (e.g., Hop 10) is heavily penalized compared to joining a node at Hop 2, aggressively keeping the tree shallow. The $-1$ makes the penalty zero at $h_p = 0$ (the source itself), so the term measures added depth rather than carrying a constant offset.*
+
+### Depth Propagation
+
+$h_p$ must be the parent's **current** depth, not the depth it had when it joined. Three mechanisms move whole subtrees after join — greedy upward migration every 5 s (§2.3), Deputy re-attachment after a parent dies (§3.3), and forest resize (§4.5) — and at $N = 10^6$ with every node running the migration loop, depth change is the steady state. A node that learned its depth once, as `ACCEPTED.HopDepth + 1`, and never again would advertise a stale value to every joiner that probes it: stale-*high* after an ancestor migrated up (honest parents look saturated, joiners shed a layer for no reason), stale-*low* after a Deputy re-attached deeper (the forest silently exceeds $D_{\max}$).
+
+Depth therefore rides on the frame every parent already sends every child several times per second. `BLOCK_PROOF` (Appendix D §D.4.9) carries `SenderHopDepth`; a node sets
+
+$$h_{\text{self}}(m) = \text{SenderHopDepth}_{\text{latest}}(m) + 1$$
+
+on every block it receives in tree $m$, and advertises that value in its own `BLOCK_PROOF`s, `PROBE_RESPONSE`s and `ACCEPTED`s from then on. A depth change at depth $d$ reaches depth $D_{\max}$ within one block interval per level — under $1.5$ s on the slowest reference tree ($0.75$ Mbps, one block per $\approx 170$ ms). `ACCEPTED.HopDepth` remains the *initial* value; the block stream is the authority.
+
+Two rules follow for a node whose depth **rises**:
+
+*   At $h \ge D_{\max}$ it **stops accepting children** in that tree and drains the ones it has through the $\tau_{\text{drain}}$ path (§5.3) — they re-select, and their own scores now correctly penalise the deep branch. It also runs the upward-migration step (§2.3) immediately rather than waiting for the 5 s tick.
+*   It is *not* an error: a Deputy that re-attaches under a passive-set candidate at $h = 6$ has done the right thing for the next 250 ms; the depth rule then unwinds the branch over the following seconds instead of leaving it there forever.
+
+## 2.1.1 Weight Calibration
+
+| Weight | Value | Meaning |
+| :--- | :---: | :--- |
+| $w_c$ | $12$ | ms of credit per unit of $\sqrt{K_{\text{avail}}}$ |
+| $w_h$ | $20$ | ms per unit of exponential depth penalty |
+| $K_{\text{ref}}$ | $256$ | slot count at which capacity credit saturates ($192$ ms max) |
+
+**The weights are a function of the compression curve and must be re-derived whenever it changes.** The earlier draft paired the weights $(1000, 1, 50)$ with $\ln(1 + K_{\text{avail}})$, whose output spans only $2.4 \to 9.2$ across the entire plausible range of $K_{\text{avail}}$ — a $3.8\times$ spread, comparable to the hop term, which is what made those weights balanced. Substituting $\sqrt{\cdot}$ widened that span to $3.2 \to 100$, a $31.6\times$ spread, while leaving the weights untouched.
+
+The consequence is not subtle. Under $(1000, 1, 50)$ with $\sqrt{\cdot}$, a 10 Gbps server on another continent scores $\sqrt{10^4} \cdot 1000 - 300 - 50e^{0.5} \approx 99{,}618$, against $\approx 3{,}070$ for an excellent peer in the same city. Capacity outweighs latency by more than thirty to one, so **every** peer in the world routes to the super node until it saturates — and it has 10,000 slots, so it takes a long time to saturate. The forest becomes globally scattered, and the $RTT_{\text{avg}} = 80\text{ ms}$ assumption underpinning the latency proof of §1.1.3 no longer holds. Fixing the flatness of the log by widening the range, without rebalancing, replaced under-use of backbone capacity with latency-blind monopolisation of it.
+
+Two changes restore balance:
+
+*   **Capacity saturates.** Beyond $K_{\text{ref}} = 256$ free slots, more slots do not make a parent better *for this child* — they make it better for the swarm, which is realised by it accepting many children, not by it outscoring every alternative for each one. Credit is capped at $12 \cdot 16 = 192\text{ ms}$.
+*   **Everything is in milliseconds.** Each term's contribution is legible and boundable rather than an arbitrary product of dimensionless weights.
+
+Worked comparisons at $R = 1$:
+
+| Candidate | RTT | $h_p$ | $K_{\text{avail}}$ | Score | Outcome |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| Local mid-tier peer | 20 | 3 | 10 | $38 - 20 - 70 = -52$ | preferred |
+| Distant super node | 250 | 1 | 10,000 | $192 - 250 - 13 = -71$ | not worth the RTT |
+| **Local** super node | 20 | 1 | 10,000 | $192 - 20 - 13 = +159$ | strongly preferred |
+| Nearly-saturated local peer | 20 | 3 | 1 | $12 - 20 - 70 = -78$ | avoided |
+| Deep local peer | 20 | 7 | 10 | $38 - 20 - 643 = -625$ | strongly avoided |
+
+Backbone capacity now wins when it is *reachable*, loses to a good local peer when it is not, and the depth term still dominates everything — which is what keeps the tree shallow. All three weights remain tuning parameters to be validated in simulation (Chapter 8) before deployment.
 
 ---
 
@@ -40,27 +102,42 @@ The following sequence dictates exactly how a node connects to the network upon 
 ```python
 import time
 
-def execute_tree_join(node_i, target_slice_m, dht_interface):
-    # Step 1: Discover Candidates
-    # Query the DHT specifically for peers assigned to relay slice 'm'
-    candidate_list = dht_interface.get_peers(stream_id, slice=target_slice_m)
-    
+def execute_tree_join(node_i, target_tree_m, dht_interface, passive_pool):
+    # Step 1: Discover Candidates — Peer Records known to relay tree m (Ch2 §2.3.3)
+    records = passive_pool[target_tree_m] \
+            + dht_interface.get_peers(stream_id, wanted_trees=bit(target_tree_m))
+    candidate_list = [r for r in records
+                      if r.node_class == RELAY
+                      and r.assigned_trees.has(target_tree_m)
+                      and r.reachability != SYMMETRIC
+                      and r.node_id not in node_i.current_parents]      # distinct-parent rule (§1.3)
+
+    if not candidate_list:
+        # Coverage grant (§1.4): no relay is assigned to m — ask a relay whose
+        # SECOND-ranked rendezvous tree is m, before falling back to the source.
+        candidate_list = [r for r in records if rendezvous_rank(r.node_id, M)[1] == target_tree_m]
+        candidate_list.append(source_record)
+
     scored_candidates = []
-    
+
     # Step 2: Parallel Probing
     for p in candidate_list:
+        if p.reachability == CONE:
+            send_punch_request(referrer_of(p), target=p.node_id)      # App D §D.4.14, +1 RTT
         # Send lightweight UDP probe to measure RTT and fetch current Hop Count/Capacity
-        probe_response = send_udp_probe(target=p.ip, timeout_ms=200)
+        probe_response = send_udp_probe(target=p.ip, tree=target_tree_m, timeout_ms=200)
         
         if probe_response.success and probe_response.available_slots > 0:
             # Step 3: Execute Scoring Function
-            w1, w2, w3 = 1000.0, 1.0, 50.0  # Tuning weights
-            
-            cap_score = math.sqrt(probe_response.available_slots) * probe_response.reliability
+            W_C, W_H, K_REF = 12.0, 20.0, 256   # ms/unit, ms/unit, slot cap (§2.1.1)
+
+            cap_credit  = min(math.sqrt(probe_response.available_slots),
+                              math.sqrt(K_REF)) * probe_response.reliability
             lat_penalty = probe_response.rtt_ms
-            hop_penalty = math.exp(0.5 * probe_response.hop_count)
-            
-            final_score = (w1 * cap_score) - (w2 * lat_penalty) - (w3 * hop_penalty)
+            hop_penalty = math.exp(0.5 * probe_response.hop_count) - 1.0
+
+            # All three terms are in milliseconds and directly comparable
+            final_score = (W_C * cap_credit) - lat_penalty - (W_H * hop_penalty)
             scored_candidates.append( {"peer": p, "score": final_score} )
 
     # Step 4: Sort and Dispatch
@@ -69,19 +146,37 @@ def execute_tree_join(node_i, target_slice_m, dht_interface):
     
     for best_candidate in scored_candidates:
         # Send formal join request via QUIC
-        join_ack = send_quic_join_request(best_candidate["peer"], target_slice_m)
-        
+        join_ack = send_quic_join_request(best_candidate["peer"], target_tree_m)
+
         if join_ack == ACCEPTED:
-            register_active_parent(best_candidate["peer"], target_slice_m)
+            register_active_parent(best_candidate["peer"], target_tree_m)
             return SUCCESS
-            
-    # If all candidates rejected (e.g., they filled their slots during probing)
+        if join_ack == REJECTED_NOT_ASSIGNED:
+            passive_pool.clear_tree_bit(best_candidate["peer"], target_tree_m)   # stale record
+
+    # If all candidates rejected (e.g., they filled their slots during probing).
+    # The retry re-issues get_peers(): every GET_PEERS draws a fresh random sample.
     return FAILURE_RETRY_BACKOFF
 ```
 
 ### Depth Admission Rule
 
 A parent **must reject** any join request that would place the child deeper than $D_{\text{max}} = 8$ hops from the source — that is, a candidate advertising $h_p \ge D_{\text{max}}$ is not a legal parent. A saturated forest may never resolve pressure by growing deeper than its latency budget allows.
+
+### Rank Admission Rule
+
+The protocol's core axiom is that contribution buys placement and quality. Tree slots are where placement and quality are decided, so this is the rule that implements the axiom; without it a 10 Gbps super node's slots go to whoever probes first and nothing ever moves a free-rider out of the way of a contributor.
+
+A `NEIGHBOR(TreeID = m)` join request may be followed on the same QUIC stream by a `RANK_PROOF` (Ch5 §5.2.2) establishing the joiner's rank $r_{\text{new}} = \Theta^{\text{rate}} / B$ — full-stream-equivalents the joiner is currently delivering to others. A request with no proof, or from a leaf-class node, has $r_{\text{new}} = 0$. The parent decides:
+
+1.  **Free slot in $T_m$** (respecting the depth rule above): `ACCEPTED`. For an $L_0$ tree, a relay must keep at least $20\%$ of its $L_0$ slots available to **leaf-class** children — the universal service floor (Ch1 §1.1.5 §5.5) — so it may not fill the last of those with a relay while a leaf's request is pending, and leaves beyond the $20\%$ wait for genuine surplus.
+2.  **No free slot, $T_m$ carries an enhancement layer, and $r_{\text{new}} > 1.25 \cdot r_{\min}$** where $r_{\min}$ is the rank of the parent's lowest-ranked current child in $T_m$: `ACCEPTED`, and the parent **preempts** that child — it keeps serving it for the drain window $\tau_{\text{drain}}$ or until it has re-attached elsewhere, then sends `DISCONNECT` (reason `0x04 PREEMPTED`). At most one preemption may be in progress per tree, and the one extra slot it costs for $\le 5$ s is taken from the parent's PULL reserve, which is throttled for the duration. Leaves and newcomers rank $0$, so any contributor preempts them; a $1.25\times$ margin stops two near-equal contributors from swapping a slot back and forth.
+3.  **No free slot, $T_m$ carries $L_0$**: `REJECTED` — base-layer slots are **never** rank-preempted. The joiner's next step is the retry path below and, at the margin, the source's base-layer reserve.
+4.  **Otherwise**: `REJECTED`.
+
+Two properties follow. **Bootstrapping is through the base layer**: a new relay ranks $0$, obtains an $L_0$ slot wherever one is free (the ladder and the source reserve make that the common case), relays $L_0$ to children, earns receipts, and within a minute has the rank to preempt into enhancement trees. **Shallower placement emerges** from the migration loop (§2.3) plus preemption: a high-rank node's scoring prefers shallow parents, it requests them, and it displaces a lower-ranked child there — so contributors drift toward the source and free-riders toward the leaves, which is what "contribution buys placement" means concretely.
+
+A preempted child treats the event as an ordinary parent loss for $T_m$ (Ch3 §3.3, per-tree repair); if every candidate is saturated it counts toward the shed rule like any failed round.
 
 ### On `FAILURE_RETRY_BACKOFF`
 
@@ -93,7 +188,7 @@ Parent selection is not a one-time event. Trees degrade over time due to churn. 
 
 1. Node $i$ currently has parent $P_{\text{current}}$ with $\text{Score}(P_{\text{current}})$.
 2. Through the gossip layer (HyParView Passive Set), node $i$ learns of a new node $P_{\text{new}}$.
-3. If $\text{Score}(P_{\text{new}}) > \text{Score}(P_{\text{current}}) + HysteresisMargin$:
+3. If $\text{Score}(P_{\text{new}}) > \text{Score}(P_{\text{current}}) + \text{HysteresisMargin}$, with $\text{HysteresisMargin} = 30\text{ ms}$ (Appendix B) — enough to absorb RTT jitter, small enough that one hop of depth (at least $\approx 55$ ms of hop penalty at $h \le 3$) always wins:
     * Node $i$ connects to $P_{\text{new}}$.
     * Once $P_{\text{new}}$ begins delivering chunks, node $i$ sends a `DISCONNECT_CHOKE` frame to $P_{\text{current}}$.
-    * Node $i$ has successfully migrated upward to a faster/shallower branch without dropping a single video frame. The $HysteresisMargin$ prevents nodes from oscillating back and forth rapidly between two similar parents.
+    * Node $i$ has successfully migrated upward to a faster/shallower branch without dropping a single video frame. The margin prevents nodes from oscillating back and forth rapidly between two similar parents; the depth-propagation rule above means the score is evaluated on current depths, so a migration also lifts the whole subtree beneath $i$ within about a second.

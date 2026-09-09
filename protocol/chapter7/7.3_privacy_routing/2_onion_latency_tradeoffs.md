@@ -8,7 +8,7 @@ While onion routing guarantees strong anonymity, it introduces significant netwo
 2.  **Throughput Overhead:** Nested 16-byte Poly1305 authentication tags increase the packet header size, slightly decreasing transmission efficiency.
 3.  **Leaf Constraint:** Because onion-routed nodes cannot receive incoming UDP connections directly, they operate in the **`LEAF_PRIVATE` (0x02)** node class (Ch1 §1.2.5). This is not an exemption from the protocol's incentive rules — it is a defined class with a defined price:
     *   The node is a leaf in all $M$ trees and is never elected Deputy or recruited as an emergent relay.
-    *   It receives the **base layer by right** through the universal service floor, but enhancement layers only from genuine surplus, and it joins $5$–$10\text{ s}$ behind the live edge — on top of the $150$–$400\text{ ms}$ onion penalty above.
+    *   It receives the **base layer by right** through the universal service floor, but enhancement layers only from genuine surplus — it is the first child preempted when an enhancement tree is contended — and it pays the $150$–$400\text{ ms}$ onion penalty above on every hop.
     *   Proof-of-Work is still required (Ch2 §2.2); no class is PoW-exempt.
     *   A privacy peer that wishes to improve its standing **may** serve `PULL_REQUEST`s through its own circuit, earning ordinary Tit-for-Tat / PoU credit despite being unreachable for tree pushes.
 

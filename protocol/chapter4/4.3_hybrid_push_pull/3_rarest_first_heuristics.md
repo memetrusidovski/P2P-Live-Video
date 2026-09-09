@@ -28,6 +28,6 @@ Output: Pull Requests Dispatched
 19:         SendPULLRequest(BestProvider, SegmentID, block_index, urgency=Urgency)
 20:         RegisterPendingRequest(SegmentID, block_index, BestProvider, CurrentTime)
 21:     Else:
-22:         // Block is rare; trigger emergency gossip lookup
-23:         TriggerRarityGossip(SegmentID, block_index)
+22:         // Block is rare: no neighbour's bitfield shows it. Broadcast the want.
+23:         SendPULLRequest(AllActiveNeighbors, SegmentID, block_index, urgency=Urgency, flags=BROADCAST_WANT)
 ```

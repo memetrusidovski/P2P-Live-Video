@@ -11,6 +11,16 @@ syntax = "proto3";
 // There is no gRPC/HTTP2 transport in this protocol; DHT RPCs are plain-UDP
 // frames because they precede any QUIC session.
 //
+// STATUS (2026-09): this schema LAGS Appendix D. The resolution of ISSUE-019..039
+// changed or added the following frames, none of which are reflected here yet:
+// PeerRecord, REGISTER_PEER, GET_PEERS, STORE_RECORD/STORE_RECORD_ACK (0x1A/0x1B),
+// Stream Record layout, ROSTER (0x18), RANK_PROOF (0x19), PUNCH_REQUEST (0x1C),
+// MANIFEST_REQUEST (0x1D), MANIFEST/MANIFEST_UPDATE (chunk fields, slicing matrix),
+// PROOF_OF_UPLOAD (per-segment bitmap), REPUTATION_AUDIT_GOSSIP (evidence), PULL_REQUEST
+// (Flags), BLOCK_PROOF (SenderHopDepth), PROBE_RESPONSE (Flags/AssignedTrees),
+// SHUFFLE, GOSSIP_EXCHANGE, FORWARD_JOIN, DISCONNECT (reason 0x04). Regenerate from
+// the registry before relying on any message below. Appendix D is normative; this is not.
+//
 // Protocol version lives in the frame header — messages do not repeat it.
 // ============================================================================
 

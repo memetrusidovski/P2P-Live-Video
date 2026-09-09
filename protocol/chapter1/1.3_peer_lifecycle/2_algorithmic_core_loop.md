@@ -32,26 +32,28 @@ Output: Execution Status
 23:             JoinThreshold <- Max(1, Min(4, SwarmSize - 1))  // adaptive (see 1_transition_model.md)
 24:             If Size(ActiveSet) >= JoinThreshold then:
 25:                 State <- CONNECTING
-24:                 
-26:         case CONNECTING:
-27:             Parents <- ExecuteMultiForestJoin(M)
-28:             If Size(Parents) == M then:
-29:                 State <- ACTIVE
-30:                 
-31:         case ACTIVE:
-32:             ProcessStreamingBuffers()
-33:             EvaluateNeighborScores()
-34:             If AnyParentTimeoutDetected(Timestamp) then:
-35:                 State <- CHURN_REPAIR
-36:                 
-37:         case CHURN_REPAIR:
-38:             TriggerSubsecondParentReRoute()
-39:             If AllSlicesRestored() then:
-40:                 State <- ACTIVE
-41:             Else If AllConnectionsLost() then:
-42:                 State <- DISCOVERY
-43:                 
-44:     // Handle OS signals and low-latency network packet arrivals
-45:     PollNetworkSockets()
-46:     SleepMicroseconds(500) // Yield CPU
+26:                 
+27:         case CONNECTING:
+28:             Parents <- ExecuteMultiForestJoin(SubscribedTrees)  // NOT all M — see 1_transition_model.md
+29:             If Size(Parents) == Size(SubscribedTrees) then:
+30:                 State <- ACTIVE
+31:                 
+32:         case ACTIVE:
+33:             // Streaming never pauses for a repair: every tree with a parent is
+34:             // received, verified, forwarded and PULL-served on every iteration.
+35:             ProcessStreamingBuffers(SubscribedTrees \ Repairing)
+36:             ServePullRequests(); SendRostersIfDue(); IssueReceiptsIfDue()
+37:             EvaluateNeighborScores()
+38:             For each m in SubscribedTrees:
+39:                 If ParentTimeoutDetected(m, Timestamp) then:      // RTT-scaled, Ch3 §3.3
+40:                     Repairing <- Repairing ∪ {m}                  // per-tree CHURN_REPAIR
+41:             For each m in Repairing:
+42:                 If TriggerParentReRoute(m) == RESTORED then:       // Ch3 §3.3, tree m only
+43:                     Repairing <- Repairing \ {m}
+44:             If Size(Parents) == 0 then:
+45:                 State <- DISCOVERY                                  // every parent lost
+44:                 
+45:     // Handle OS signals and low-latency network packet arrivals
+46:     PollNetworkSockets()
+47:     SleepMicroseconds(500) // Yield CPU
 ```

@@ -9,14 +9,14 @@ This repository contains the design specification for a **decentralized, real-ti
 >
 > The notes in [`thoughts/`](thoughts/) are earlier exploratory material, retained for the reasoning they capture. Where they disagree with `protocol/`, the specification wins.
 
-Known design gaps and their fixes are tracked in [`issues/`](issues/).
+Open design gaps are tracked in [`issues/`](issues/); the reasoning behind resolved ones — decisions taken, alternatives rejected, residual risk — is recorded in [`solutions/`](solutions/).
 
 ---
 
 ### 🎯 Core Objectives
-- **Low latency:** 3–5 s end-to-end playout deadline, with a 4.0 s sliding buffer and ≤ 1.5 s startup join.
+- **Low latency:** 3–5 s glass-to-glass (≈ 4.0 s at the reference settings: 250 ms signing chunks, 3.0 s playout buffer, ≤ 7 hops), ≤ 1.5 s startup join.
 - **Scalability:** 1,000,000 concurrent viewers at ≤ 7 hops mean depth.
-- **Resilience:** sub-250 ms churn recovery; graceful resolution degradation instead of buffering.
+- **Resilience:** sub-second churn recovery (≈ 250–300 ms on local paths, RTT-scaled elsewhere), repaired per tree so one lost parent never stops forwarding on the others; graceful resolution degradation instead of buffering.
 - **Fairness:** reward contributors with lower latency and higher quality; leave free-riders at the base layer.
 - **Security:** signed manifests, Merkle-verified blocks, Sybil-resistant identities, kernel-level DDoS shielding.
 
@@ -24,7 +24,7 @@ Known design gaps and their fixes are tracked in [`issues/`](issues/).
 
 ### 🕸️ High-Level Architecture
 1. **Multi-forest overlay**
-   The stream is split into $M$ sub-stream slices carried by $M$ edge-disjoint spanning trees. Each relay-class peer is an interior node in its assigned tree(s) and a leaf elsewhere, so no peer carries the full bitrate upstream. $M$ scales with swarm size (1 → 6).
+   The stream is split into $M$ sub-stream slices carried by $M$ edge-disjoint spanning trees. Each relay-class peer is an interior node in its assigned tree(s) and a leaf elsewhere, so no peer carries the full bitrate upstream. $M$ scales with the relay population (2 → 6), and each tree carries a declared share of the SVC layer ladder.
 2. **S/Kademlia discovery**
    256-bit XOR routing with Proof-of-Work-bound node IDs and disjoint parallel lookups for eclipse resistance. Streams are self-authenticating: `StreamID = Blake3(publisher pubkey)`.
 3. **HyParView membership**
@@ -44,7 +44,7 @@ Known design gaps and their fixes are tracked in [`issues/`](issues/).
 
 ### ⚙️ Key Algorithms
 - **Parent selection:** multivariate scoring over available capacity, RTT, and hop depth, with warm-up gating and depth admission limits.
-- **Topology healing:** deterministic sibling election over a signed child roster, falling back to passive-set promotion within 250 ms.
+- **Topology healing:** deterministic sibling election over a per-tree child roster, falling back to promotion from a per-tree standby pool.
 - **Deadline scheduler:** ranks missing blocks by playout urgency and rarity every 100 ms.
 - **Capacity adaptation:** when swarm upload cannot sustain full bitrate, SVC enhancement layers are shed in priority order — the base layer never fails.
 

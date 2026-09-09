@@ -13,3 +13,5 @@ where:
 
 To ensure no playback interruption occurs, the protocol must satisfy:
 $$\max_{i \in \text{Swarm}} \left( T_{\text{recv}}(i, C_k) - T_k \right) < \Delta_{\text{playout}}$$
+
+$T_k$ here is the time the chunk *leaves the source*, not the time its first frame was captured. Between capture and departure sit the encoder and the signing barrier — the source cannot sign a chunk's Merkle root until its last block is encoded (Ch4 §4.1.1) — and those terms belong in the glass-to-glass budget alongside the hop sum. §3 assembles the full budget.
