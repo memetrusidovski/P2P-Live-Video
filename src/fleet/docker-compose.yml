@@ -1,0 +1,46 @@
+# One publisher plus N viewers: docker compose up --scale viewer=20
+# Build context is the src/ directory so the Dockerfile sees the workspace.
+services:
+  publisher:
+    build:
+      context: ..
+      dockerfile: fleet/Dockerfile
+    image: bitstream/bsnode:dev
+    hostname: publisher
+    cap_add: [NET_ADMIN]
+    environment:
+      BS_ROLE: publisher
+      BS_PORT: "4000"
+      BS_FILE: /media/sample.mp4
+      BS_SEED: "${BS_SEED:-1}"
+      BS_NETEM_PROFILE: "${BS_NETEM_PROFILE:-clean}"
+    volumes:
+      - ./media:/media:ro
+      - ./netem.sh:/usr/local/bin/netem.sh:ro
+      - ./profiles:/profiles:ro
+      - results:/results
+    networks: [swarm]
+
+  viewer:
+    image: bitstream/bsnode:dev
+    depends_on: [publisher]
+    cap_add: [NET_ADMIN]
+    environment:
+      BS_ROLE: viewer
+      BS_BOOTSTRAP: publisher:4000
+      BS_SEED: "${BS_SEED:-1}"
+      BS_EXPECT_HASH: "${BS_EXPECT_HASH:-}"
+      BS_DURATION_S: "${BS_DURATION_S:-60}"
+      BS_NETEM_PROFILE: "${BS_NETEM_PROFILE:-clean}"
+    volumes:
+      - ./netem.sh:/usr/local/bin/netem.sh:ro
+      - ./profiles:/profiles:ro
+      - results:/results
+    networks: [swarm]
+
+networks:
+  swarm:
+    driver: bridge
+
+volumes:
+  results:

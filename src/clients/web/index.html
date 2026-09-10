@@ -1,0 +1,41 @@
+<!doctype html>
+<!-- PLACEHOLDER (M2): MSE player fed by bs-player-api over WebSocket. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>BitStream Player</title>
+  <style>body{font-family:system-ui;margin:2rem}video{max-width:100%;background:#000}#log{font:12px monospace;white-space:pre-wrap}</style>
+</head>
+<body>
+  <h1>BitStream Player</h1>
+  <label>Player API: <input id="url" value="ws://localhost:8080/ws" size="40"></label>
+  <button id="connect">Connect</button>
+  <video id="video" controls autoplay muted></video>
+  <div id="log"></div>
+  <script>
+    // Skeleton: opens a WebSocket, expects binary messages. The first message is
+    // the fMP4 initialisation segment, later ones are media fragments (M2 will
+    // define this per ISSUE-060's stream descriptor). Codec string is a placeholder.
+    const log = (m) => (document.getElementById('log').textContent += m + '\n');
+    document.getElementById('connect').onclick = () => {
+      const video = document.getElementById('video');
+      const ms = new MediaSource();
+      video.src = URL.createObjectURL(ms);
+      ms.addEventListener('sourceopen', () => {
+        const mime = 'video/mp4; codecs="vp09.00.10.08"';
+        if (!MediaSource.isTypeSupported(mime)) { log('unsupported: ' + mime); return; }
+        const sb = ms.addSourceBuffer(mime);
+        const queue = [];
+        const pump = () => { if (!sb.updating && queue.length) sb.appendBuffer(queue.shift()); };
+        sb.addEventListener('updateend', pump);
+        const ws = new WebSocket(document.getElementById('url').value);
+        ws.binaryType = 'arraybuffer';
+        ws.onopen = () => log('connected');
+        ws.onmessage = (e) => { queue.push(e.data); pump(); };
+        ws.onclose = () => log('closed');
+        ws.onerror = () => log('websocket error');
+      });
+    };
+  </script>
+</body>
+</html>

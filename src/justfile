@@ -1,0 +1,24 @@
+# Task runner recipes. Installing `just` is optional (brew install just);
+# every recipe is a plain command you can also run by hand.
+
+check:
+    scripts/check.sh
+
+test:
+    cargo test --workspace
+
+# Run one simulator scenario: just sim scenarios/baseline_100.toml
+sim scenario:
+    cargo run -q -p bs-sim --profile sim -- run {{scenario}} --out results/$(basename {{scenario}} .toml)
+
+# Bring up a publisher and N containerised viewers (M2).
+fleet-up n profile="clean":
+    fleet/up.sh --viewers {{n}} --profile {{profile}}
+
+fleet-down:
+    fleet/down.sh
+
+# Regenerate golden wire vectors after an intentional layout change.
+vectors:
+    BS_UPDATE_VECTORS=1 cargo test -p bs-wire --test golden
+    cd py && uv run pytest -q

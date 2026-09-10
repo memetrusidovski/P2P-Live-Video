@@ -1,0 +1,43 @@
+# Cold start: N = 2 then 3, 5, 10. The first viewer must attach directly to the
+# source in every tree; later ones must find the early relays.
+seed = 3
+duration_s = 40.0
+forest_size = 3
+
+[publisher]
+upload_kbps = 20000
+
+[[viewers]]
+label = "first"
+count = 1
+class = "relay"
+upload_kbps = { min = 10000.0, max = 10000.0 }
+top_layer = 2
+join_s = { min = 1.0, max = 1.0 }
+
+[[viewers]]
+label = "next"
+count = 4
+class = "relay"
+upload_kbps = { min = 10000.0, max = 10000.0 }
+top_layer = 2
+join_s = { min = 6.0, max = 8.0 }
+
+[[viewers]]
+label = "leaves"
+count = 4
+class = "leaf"
+upload_kbps = { min = 1000.0, max = 2000.0 }
+top_layer = 2
+join_s = { min = 12.0, max = 14.0 }
+
+[network]
+regions = 1
+loss = 0.0
+
+[kpis]
+psr_max = 0.001
+# Cold start is capacity-limited: a displaced child may wait for the displacing
+# relay to warm up (about two segments) before it can re-attach.
+repair_p95_max_s = 3.0
+active_fraction_min = 1.0

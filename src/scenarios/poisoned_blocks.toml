@@ -1,0 +1,34 @@
+# Ch8 §8.3 scenario B: at t = 20 s, 10% of relays start corrupting the symbols
+# they forward. Their children must reject the blocks (Merkle) and never
+# forward them; data_integrity must stay at zero mismatches.
+seed = 13
+duration_s = 45.0
+forest_size = 3
+
+[publisher]
+upload_kbps = 100000
+
+[[viewers]]
+label = "relays"
+count = 60
+class = "relay"
+upload_kbps = { min = 10000.0, max = 20000.0 }
+top_layer = 2
+join_s = { min = 1.0, max = 10.0 }
+
+[[events]]
+kind = "poison"
+at_s = 20.0
+fraction = 0.1
+
+[network]
+regions = 2
+
+[kpis]
+# A child evicts a parent after three unverifiable blocks (Ch4 §4.1.2) and
+# re-routes; it starves for the repair time. PULL repair of the lost blocks and
+# audit gossip arrive in M3, so the starvation budget here is loose.
+psr_max = 0.10
+repair_p95_max_s = 4.0
+require_hash_match = true
+active_fraction_min = 0.9

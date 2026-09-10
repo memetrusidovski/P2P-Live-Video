@@ -1,0 +1,23 @@
+[package]
+name = "bs-wire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "BitStream canonical wire format: frame header, frame registry, byte layouts (protocol Appendix D)"
+
+[dependencies]
+bytes.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+
+[features]
+default = []
+serde = ["dep:serde", "dep:hex"]
+
+[dev-dependencies]
+proptest.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true

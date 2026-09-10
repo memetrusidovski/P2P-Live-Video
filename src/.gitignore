@@ -1,0 +1,11 @@
+/target
+/results
+/py/.venv
+**/__pycache__
+/py/dist
+/clients/web/node_modules
+/clients/desktop/node_modules
+/clients/desktop/src-tauri/target
+/fleet/out
+/testdata/generated
+.DS_Store

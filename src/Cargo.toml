@@ -1,0 +1,70 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bs-wire",
+    "crates/bs-crypto",
+    "crates/bs-media",
+    "crates/bs-core",
+    "crates/bs-sim",
+    "crates/bs-node",
+    "crates/bs-player-api",
+    "crates/bs-ingest",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/memet-rusidovski/P2P-Live-Video"
+rust-version = "1.85"
+
+[workspace.dependencies]
+bs-wire = { path = "crates/bs-wire" }
+bs-crypto = { path = "crates/bs-crypto" }
+bs-media = { path = "crates/bs-media" }
+bs-core = { path = "crates/bs-core" }
+bs-sim = { path = "crates/bs-sim" }
+bs-ingest = { path = "crates/bs-ingest" }
+bs-player-api = { path = "crates/bs-player-api" }
+
+blake3 = "1.8"
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+raptorq = "2.0"
+bytes = "1.10"
+hmac = "0.12"
+subtle = "2.6"
+
+tokio = { version = "1.47", features = ["full"] }
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.13"
+axum = { version = "0.8", features = ["ws"] }
+tokio-util = "0.7"
+futures = "0.3"
+
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.9"
+rand = "0.9"
+rand_chacha = "0.9"
+rand_core = "0.6"
+hex = "0.4"
+indexmap = "2"
+
+proptest = "1.7"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1
+
+# Fast-compiling optimised profile for simulator runs during development.
+[profile.sim]
+inherits = "release"
+lto = false
+codegen-units = 16

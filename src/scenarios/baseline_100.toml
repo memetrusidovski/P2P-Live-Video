@@ -1,0 +1,33 @@
+# M1 exit gate: 100 relay-class viewers, three regions, clean links.
+# Everyone should stream all three layers with zero starvation once attached.
+seed = 1
+duration_s = 60.0
+forest_size = 3
+
+[publisher]
+upload_kbps = 100000
+region = 0
+
+[[viewers]]
+label = "relays"
+count = 100
+class = "relay"
+upload_kbps = { min = 8000.0, max = 20000.0 }
+top_layer = 2
+join_s = { min = 1.0, max = 15.0 }
+
+[network]
+regions = 3
+intra_region_rtt_ms = { min = 10.0, max = 40.0 }
+inter_region_rtt_ms = { min = 60.0, max = 160.0 }
+jitter_ms = 2.0
+loss = 0.0
+
+[kpis]
+psr_max = 0.001
+sjl_mean_max_s = 3.6
+sjl_p95_max_s = 4.5
+depth_mean_max = 7.0
+depth_max = 8
+cdo_max = 0.05
+active_fraction_min = 0.99

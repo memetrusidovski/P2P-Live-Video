@@ -1,0 +1,37 @@
+# 20 early viewers, then a burst of 80 more within two seconds at t = 20 s.
+seed = 5
+duration_s = 60.0
+forest_size = 3
+
+[publisher]
+upload_kbps = 100000
+
+[[viewers]]
+label = "early"
+count = 20
+class = "relay"
+upload_kbps = { min = 10000.0, max = 20000.0 }
+top_layer = 2
+join_s = { min = 1.0, max = 8.0 }
+
+[[events]]
+kind = "join_burst"
+at_s = 20.0
+[events.group]
+label = "burst"
+count = 80
+class = "relay"
+upload_kbps = { min = 8000.0, max = 16000.0 }
+top_layer = 2
+join_s = { min = 0.0, max = 2.0 }
+
+[network]
+regions = 3
+
+[kpis]
+psr_max = 0.01
+repair_median_max_s = 2.5
+repair_p95_max_s = 4.0
+sjl_mean_max_s = 4.5
+sjl_p95_max_s = 6.0
+active_fraction_min = 0.97

@@ -1,0 +1,35 @@
+# 3% random datagram loss everywhere. RaptorQ parity must absorb it; the
+# verify-then-forward path must never emit a corrupted block.
+seed = 11
+duration_s = 45.0
+forest_size = 3
+
+[publisher]
+upload_kbps = 100000
+
+[[viewers]]
+label = "relays"
+count = 60
+class = "relay"
+upload_kbps = { min = 10000.0, max = 20000.0 }
+top_layer = 2
+join_s = { min = 1.0, max = 10.0 }
+
+[network]
+regions = 2
+loss = 0.03
+
+# Adaptive per-link parity arrives with PROOF_OF_UPLOAD loss reports in M3; until
+# then every link uses the fixed default (5 = the 30% cap, Ch4 §4.2.2).
+[params]
+default_parity = 5
+
+[kpis]
+psr_max = 0.02
+sjl_mean_max_s = 4.5
+sjl_p95_max_s = 6.0
+# Repairs here are displacement stragglers re-attaching under a warming relay
+# (one to two segments); PULL repair in M3 removes the gap.
+repair_median_max_s = 2.5
+repair_p95_max_s = 6.0
+active_fraction_min = 0.98

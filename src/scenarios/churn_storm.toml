@@ -1,0 +1,41 @@
+# Ch8 §8.3 scenario A: at t = 30 s kill 30% of the relays at once. Survivors
+# must repair every tree; steady-state starvation is measured over the whole run.
+seed = 7
+duration_s = 70.0
+forest_size = 3
+
+[publisher]
+upload_kbps = 100000
+
+[[viewers]]
+label = "relays"
+count = 80
+class = "relay"
+upload_kbps = { min = 8000.0, max = 20000.0 }
+top_layer = 2
+join_s = { min = 1.0, max = 12.0 }
+
+[[viewers]]
+label = "leaves"
+count = 20
+class = "leaf"
+upload_kbps = { min = 1000.0, max = 3000.0 }
+top_layer = 1
+join_s = { min = 5.0, max = 15.0 }
+
+[[events]]
+kind = "kill_fraction"
+at_s = 30.0
+fraction = 0.3
+class = "relay"
+
+[network]
+regions = 3
+
+[kpis]
+psr_max = 0.02
+# Median repair is the Ch3 §3.3 path (detect + re-attach); the tail after losing
+# 30% of the relays is capacity-bound until survivors warm up.
+repair_median_max_s = 1.0
+repair_p95_max_s = 3.5
+active_fraction_min = 0.95

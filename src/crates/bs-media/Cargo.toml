@@ -1,0 +1,21 @@
+[package]
+name = "bs-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "BitStream media pipeline: chunking, Merkle blocks, manifests, layer ladder, tree mapping, RaptorQ FEC, sources"
+
+[dependencies]
+bs-wire.workspace = true
+bs-crypto.workspace = true
+raptorq.workspace = true
+blake3.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true

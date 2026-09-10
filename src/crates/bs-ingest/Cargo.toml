@@ -1,0 +1,18 @@
+[package]
+name = "bs-ingest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "BitStream media ingest: file-backed and ffmpeg fMP4 sources feeding the publisher"
+
+[dependencies]
+bs-media.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+

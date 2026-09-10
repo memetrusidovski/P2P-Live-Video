@@ -1,0 +1,22 @@
+[package]
+name = "bs-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "BitStream sans-I/O peer state machine: lifecycle, forest, swarm buffer, repair"
+
+[dependencies]
+bs-wire = { workspace = true, features = ["serde"] }
+bs-crypto.workspace = true
+bs-media.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+indexmap.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

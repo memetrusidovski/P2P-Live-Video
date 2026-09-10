@@ -1,0 +1,29 @@
+# The stream is a real .mp4 read as opaque bytes and looped. Every delivered
+# layer-chunk is hashed against the source's copy, so a byte-exact transfer is
+# what "pass" means. Generate the file with scripts/make_testdata.sh.
+seed = 21
+duration_s = 40.0
+forest_size = 3
+
+[source]
+kind = "file"
+path = "../testdata/generated/sample.mp4"
+repeat = true
+
+[publisher]
+upload_kbps = 100000
+
+[[viewers]]
+label = "relays"
+count = 30
+class = "relay"
+upload_kbps = { min = 10000.0, max = 20000.0 }
+top_layer = 2
+join_s = { min = 1.0, max = 6.0 }
+
+[network]
+regions = 2
+
+[kpis]
+psr_max = 0.001
+active_fraction_min = 1.0
