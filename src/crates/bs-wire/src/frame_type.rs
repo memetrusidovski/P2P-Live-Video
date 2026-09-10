@@ -100,6 +100,8 @@ frame_types! {
     MANIFEST_REQUEST = 0x1D => QuicStream,
     /// Parent releases a child but keeps serving until a deadline.
     DRAIN_NOTICE = 0x1E => QuicStream,
+    /// Source-signed codec / container / initialisation data per layer (SOLUTION-060).
+    STREAM_DESCRIPTOR = 0x1F => QuicStream,
     /// Signed per-segment per-tree upload receipt.
     PROOF_OF_UPLOAD = 0x20 => QuicStream,
     /// Tit-for-Tat choke state.

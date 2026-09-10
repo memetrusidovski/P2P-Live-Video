@@ -5,7 +5,7 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done · `[!]` blo
 Every milestone has an **exit gate**: a command that must be green. Nothing is
 "done" by description alone.
 
-## M1 — Forest in simulation (synthetic data, 100 nodes) `[~]`
+## M1 — Forest in simulation (synthetic data, 100 nodes) `[x]`
 
 Goal: prove the multi-forest push path, verify-then-forward, parent selection and
 per-tree repair work at 100 nodes in a deterministic simulator, with data
@@ -38,23 +38,28 @@ and mean depth ≤ 7, `churn_storm` recovering every tree within the Ch3 §3.3 b
 zero invariant violations, and every viewer's reassembled output hashing equal to
 the source file.
 
-## M2 — Real network and real data `[ ]`
+## M2 — Real network and real data `[~]`
 
 | Item | Crate | Status |
 |---|---|---|
-| quinn/UDP driver around bs-core; identity-bound self-signed certs | bs-node | `[ ]` |
-| `bsnode publish --file x.mp4` / `bsnode watch --out y.mp4`; hash check on exit | bs-node | `[ ]` |
-| Localhost two-node integration test in CI | bs-node | `[ ]` |
-| `fleet/`: docker image, compose with N viewers, netem profiles, one-command up/down/scale | fleet/ | `[ ]` |
-| Fleet harness: collect per-node metrics and output hashes, produce the same JSON report as the simulator | py/ | `[ ]` |
-| ffmpeg fMP4 ingest, VP9 temporal-layer profile, simulcast profile | bs-ingest | `[ ]` |
-| Stream descriptor per ISSUE-060 (pending spec decision) | bs-wire/bs-core | `[!]` |
-| Player API: HTTP + WebSocket fMP4 to MSE | bs-player-api | `[ ]` |
-| Web client | clients/web | `[ ]` |
+| quinn/UDP driver around bs-core; identity-bound self-signed certs | bs-node | `[x]` |
+| `bsnode publish --file x.mp4` / `bsnode watch --out y.mp4`; hash check on exit | bs-node | `[x]` |
+| Localhost two-node integration test in CI | bs-node | `[x]` |
+| `fleet/`: docker image, compose with N viewers, netem profiles, one-command up/down/scale | fleet/ | `[x]` |
+| Fleet harness: collect per-node metrics and output hashes, produce the same JSON report as the simulator | py/ | `[x]` |
+| ffmpeg fMP4 ingest, simulcast renditions as layers (temporal-SVC profile deferred) | bs-ingest | `[x]` |
+| REGISTER_PEER / GET_PEERS frames + bootstrap guardian | bs-wire, bs-node | `[x]` |
+| Stream descriptor (SOLUTION-060): wire frame, core plumbing, Stream Record fields | bs-wire/bs-core | `[x]` |
+| Player reads INIT from the descriptor instead of the in-band TLV; publisher builds the descriptor from ffmpeg init segments | bs-node/bs-player-api | `[ ]` |
+| Fleet run under `lossy` / `cellular` netem profiles with a KPI gate in `check.sh` (opt-in, needs docker) | fleet/ | `[ ]` |
+| Browser check of the web player (manual: open http://host:8080 while watching) | clients/web | `[ ]` |
+| Player API: HTTP + WebSocket fMP4 to MSE | bs-player-api | `[x]` |
+| Web client | clients/web | `[x]` |
 
 **Exit gate:** 1 publisher + 20 containerised viewers under netem loss play the
 same `.mp4`, every viewer's output hash equals the source, and the web client plays
-it live.
+it live. Status: 6 clean-profile containers byte-exact (2026-09-10); lossy profile and
+the browser check still to run.
 
 ## M3 — Full protocol `[ ]`
 
@@ -72,6 +77,19 @@ connection migration · Tauri desktop · browser peer over WebTransport (LEAF_PR
 the fleet with simulated NAT types.
 
 ## Log
+
+- 2026-09-10 (later) — Spec caught up (SOLUTION-059/060 in the user's commit): wire, media and
+  core moved to the TreeID-scoped DISCONNECT, per-layer byte lengths, Stream Record descriptor
+  fields and the STREAM_DESCRIPTOR frame (36 codes, 22 typed; Python decoder in step).
+  Docker fleet: 6 viewers byte-exact. ffmpeg simulcast ingest → swarm → WebSocket → MSE player
+  working (two renditions, 0 starvation over 60 s). ISSUE-062 filed (block padding overhead).
+
+- 2026-09-10 — M2: quinn runtime with identity-bound mutual TLS and a shared UDP socket;
+  `bsnode publish/watch`; one publisher and three viewers on localhost streamed the first
+  3 MB of the user's example.mp4 byte-exact over QUIC; integration test in CI. Found and
+  fixed: RFC 9287 QUIC-bit greasing broke the plain-frame demux; STREAM_END discarded the
+  playout buffer. Filed ISSUE-062 (block padding overhead). Docker fleet and ffmpeg/player
+  path in progress.
 
 - 2026-09-09 (evening) — `scripts/check.sh` green end to end: fmt, clippy, 41 Rust tests,
   20 Python cross-decoder tests, seven simulator gates. Drain path reworked twice from

@@ -16,16 +16,23 @@ case "$ROLE" in
   publisher)
     exec bsnode publish \
       --file "${BS_FILE:-/media/sample.mp4}" \
+      ${BS_MAX_BYTES:+--max-bytes "$BS_MAX_BYTES"} \
       --listen "0.0.0.0:${BS_PORT:-4000}" \
+      --advertise-ip "$(hostname -i | awk '{print $1}')" \
+      --start-delay-s "${BS_START_DELAY_S:-5}" \
       --seed "${BS_SEED:-1}" \
       --result "$OUT/result.json"
     ;;
   viewer)
     exec bsnode watch \
       --bootstrap "${BS_BOOTSTRAP:-publisher:4000}" \
+      --publisher-seed "${BS_SEED:-1}" \
+      --publisher-port "${BS_PORT:-4000}" \
       --out "$OUT/output.bin" \
-      --expect-hash "${BS_EXPECT_HASH:-}" \
-      --seed "${BS_SEED:-1}" \
+      ${BS_EXPECT_HASH:+--expect-hash "$BS_EXPECT_HASH"} \
+      --class "${BS_CLASS:-relay}" \
+      --upload-kbps "${BS_UPLOAD_KBPS:-20000}" \
+      --seed "$(( ${BS_SEED:-1} + $(hostname | cksum | cut -d' ' -f1) % 100000 ))" \
       --duration-s "${BS_DURATION_S:-60}" \
       --result "$OUT/result.json"
     ;;

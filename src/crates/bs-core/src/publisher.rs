@@ -23,6 +23,8 @@ pub struct Publisher {
     pub last_root: Hash,
     /// Last emitted chunk's timestamp.
     pub last_ts_us: u64,
+    /// The STREAM_DESCRIPTOR in force, if the application set one.
+    pub descriptor: Option<bs_wire::frames::StreamDescriptor>,
 }
 
 impl Publisher {
@@ -38,6 +40,7 @@ impl Publisher {
             last_segment: SegmentSeq::NONE,
             last_root: Hash::ZERO,
             last_ts_us: 0,
+            descriptor: None,
         })
     }
 
@@ -74,11 +77,30 @@ impl Publisher {
             live_edge_manifest_hash: self.last_root,
             live_edge_timestamp_us: self.last_ts_us,
             effective_segment: SegmentSeq::NONE,
+            descriptor_version: self.descriptor.as_ref().map(|d| d.version).unwrap_or(0),
+            descriptor_hash: self
+                .descriptor
+                .as_ref()
+                .map(|d| bs_crypto::blake3_hash(&bs_wire::Encode::to_vec(d)))
+                .unwrap_or(Hash::ZERO),
             trees: self.matrix.to_entries(),
             trees_next: Vec::new(),
             signature: SignatureBytes::ZERO,
         };
         r.signature = self.identity.sign(&r.signable_bytes());
         r
+    }
+}
+
+impl Publisher {
+    /// Install (and sign) a descriptor; `version` must increase. Returns the signed copy.
+    pub fn set_descriptor(
+        &mut self,
+        mut d: bs_wire::frames::StreamDescriptor,
+    ) -> bs_wire::frames::StreamDescriptor {
+        d.stream_id = self.stream_id();
+        d.signature = self.identity.sign(&d.signable_bytes());
+        self.descriptor = Some(d.clone());
+        d
     }
 }

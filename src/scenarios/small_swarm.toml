@@ -39,5 +39,6 @@ loss = 0.0
 psr_max = 0.001
 # Cold start is capacity-limited: a displaced child may wait for the displacing
 # relay to warm up (about two segments) before it can re-attach.
+repair_median_max_s = 2.5
 repair_p95_max_s = 3.0
 active_fraction_min = 1.0

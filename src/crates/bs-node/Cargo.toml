@@ -17,6 +17,11 @@ tokio.workspace = true
 quinn.workspace = true
 rustls.workspace = true
 rcgen.workspace = true
+x509-parser.workspace = true
+rustls-pki-types.workspace = true
+ed25519-dalek.workspace = true
+futures.workspace = true
+tokio-util.workspace = true
 bytes.workspace = true
 clap.workspace = true
 serde.workspace = true
@@ -27,8 +32,17 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 rand.workspace = true
+rand_chacha.workspace = true
 hex.workspace = true
 blake3.workspace = true
 
 [dev-dependencies]
+
+[lib]
+name = "bs_node"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bsnode"
+path = "src/main.rs"
 

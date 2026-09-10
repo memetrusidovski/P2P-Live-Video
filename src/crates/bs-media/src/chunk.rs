@@ -8,6 +8,16 @@ use bytes::Bytes;
 
 use crate::MediaError;
 
+/// Recover a layer's payload from its concatenated, zero-padded blocks using the
+/// manifest's `LayerByteLength` (App D §D.4.8).
+pub fn strip_layer(padded: &[u8], byte_length: u32) -> Option<Bytes> {
+    let n = byte_length as usize;
+    if n > padded.len() {
+        return None;
+    }
+    Some(Bytes::copy_from_slice(&padded[..n]))
+}
+
 /// 250 ms of stream: one byte-string per layer, lowest layer first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayeredChunk {
@@ -89,28 +99,24 @@ impl<S: Signer> ChunkBuilder<S> {
     }
 
     /// Cut a chunk into 16 KB blocks numbered layer-major, build the Merkle tree
-    /// and sign the manifest.
+    /// and sign the manifest. Each layer's last block is zero-padded; the
+    /// manifest's `LayerByteLength` locates the padding (App D §D.4.8).
     pub fn build(&self, chunk: &LayeredChunk) -> Result<BuiltChunk, MediaError> {
         let mut blocks: Vec<Bytes> = Vec::new();
         let mut layer_block_counts = Vec::with_capacity(chunk.layers.len());
         let mut layer_byte_lengths = Vec::with_capacity(chunk.layers.len());
         for layer in &chunk.layers {
-            let n = layer
-                .len()
-                .div_ceil(BLOCK_SIZE)
-                .max(if layer.is_empty() { 0 } else { 1 });
+            // An empty layer still occupies one (all-zero) block so the tree and the
+            // layer-major numbering stay well defined.
+            let n = layer.len().div_ceil(BLOCK_SIZE).max(1);
             layer_block_counts.push(n as u16);
             layer_byte_lengths.push(layer.len() as u32);
+            let mut padded = Vec::with_capacity(n * BLOCK_SIZE);
+            padded.extend_from_slice(layer);
+            padded.resize(n * BLOCK_SIZE, 0);
+            let padded = Bytes::from(padded);
             for b in 0..n {
-                let start = b * BLOCK_SIZE;
-                let end = (start + BLOCK_SIZE).min(layer.len());
-                if end - start == BLOCK_SIZE {
-                    blocks.push(layer.slice(start..end));
-                } else {
-                    let mut v = layer[start..end].to_vec();
-                    v.resize(BLOCK_SIZE, 0);
-                    blocks.push(Bytes::from(v));
-                }
+                blocks.push(padded.slice(b * BLOCK_SIZE..(b + 1) * BLOCK_SIZE));
             }
         }
         if blocks.len() > bs_wire::consts::MAX_BLOCKS_PER_CHUNK {
@@ -119,15 +125,15 @@ impl<S: Signer> ChunkBuilder<S> {
             });
         }
         if blocks.is_empty() {
-            // An empty chunk still needs a manifest (e.g. a silent layer); give it
-            // one zero block so the tree exists.
-            blocks.push(Bytes::from(vec![0u8; BLOCK_SIZE]));
-            if layer_block_counts.is_empty() {
-                layer_block_counts.push(1);
-                layer_byte_lengths.push(0);
-            } else {
-                layer_block_counts[0] = 1;
-            }
+            return Err(MediaError::LayerCountMismatch {
+                got: 0,
+                expected: 1,
+            });
+        }
+        if blocks.len() > bs_wire::consts::MAX_BLOCKS_PER_CHUNK {
+            return Err(MediaError::TooManyBlocks {
+                blocks: blocks.len(),
+            });
         }
         let tree = MerkleTree::from_blocks(blocks.iter().map(|b| b.as_ref()));
         let body = ManifestBody {
@@ -137,9 +143,9 @@ impl<S: Signer> ChunkBuilder<S> {
             chunk_count: CHUNKS_PER_SEGMENT,
             timestamp_us: chunk.timestamp_us,
             merkle_root: tree.root(),
-            chunk_byte_length: chunk.byte_len() as u32,
             slicing_matrix_version: self.matrix_version,
             layer_block_counts,
+            layer_byte_lengths: layer_byte_lengths.clone(),
         };
         let mut unsigned = Manifest {
             body,

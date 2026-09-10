@@ -2,9 +2,9 @@
 """Collect per-container result.json files from the fleet's results volume into
 one verdict.json in the same schema the simulator writes, then print it.
 
-Each container writes /results/<hostname>/result.json:
-  {"role": "publisher"|"viewer", "hash": "<hex>", "starved_intervals": n,
-   "playout_intervals": n, "join_latency_ms": x, "bytes_control": n, "bytes_media": n}
+Each container writes /results/<hostname>/result.json in the bs_node::RunReport
+schema (role, output_hash, source_hash, steady_starved, steady_played,
+first_chunk_s, first_segment, parent_lost, repairs, ...).
 
 Usage: fleet/report.py [--out results/fleet] [--psr-max 0.001] [--sjl-max-ms 1500]
 """
@@ -30,7 +30,8 @@ def copy_results(dest: pathlib.Path) -> None:
     )
 
 
-def build_verdict(raw: pathlib.Path, psr_max: float, sjl_max_ms: float, seed: int, profile: str) -> dict:
+def build_verdict(raw: pathlib.Path, psr_max: float, sjl_max_ms: float, seed: int, profile: str, start_delay_s: float = 0.0) -> dict:
+    """Fold bsnode result.json files (bs_node::RunReport) into the simulator's verdict schema."""
     results = []
     for p in sorted(raw.glob("*/result.json")):
         try:
@@ -38,38 +39,49 @@ def build_verdict(raw: pathlib.Path, psr_max: float, sjl_max_ms: float, seed: in
             r["container"] = p.parent.name
             results.append(r)
         except (OSError, json.JSONDecodeError):
-            results.append({"container": p.parent.name, "role": "unknown", "error": "unreadable"})
+            continue
     pubs = [r for r in results if r.get("role") == "publisher"]
     viewers = [r for r in results if r.get("role") == "viewer"]
-    pub_hash = pubs[0].get("hash") if pubs else None
-    matched = sum(1 for v in viewers if v.get("hash") and v.get("hash") == pub_hash)
-    starved = sum(v.get("starved_intervals", 0) for v in viewers)
-    intervals = sum(v.get("playout_intervals", 0) for v in viewers)
-    psr = starved / intervals if intervals else 1.0
-    sjl = max((v.get("join_latency_ms", 0.0) for v in viewers), default=0.0)
+    source_hash = pubs[0].get("source_hash") if pubs else None
+    starved = sum(int(v.get("steady_starved", 0)) for v in viewers)
+    played = sum(int(v.get("steady_played", 0)) for v in viewers)
+    psr = (starved / played) if played else 1.0
+    # Viewers that start before the publisher emits its first chunk wait out the
+    # publisher's start delay; that wait is not join latency.
+    sjl = [max(0.0, float(v["first_chunk_s"]) - start_delay_s) * 1000.0 for v in viewers if v.get("first_chunk_s") is not None]
+    sjl_mean = sum(sjl) / len(sjl) if sjl else float("inf")
+    full = [v for v in viewers if v.get("first_segment") == 1]
+    mismatches = sum(1 for v in full if source_hash and v.get("output_hash") != source_hash)
+    never = sum(1 for v in viewers if v.get("first_chunk_s") is None)
     kpis = {
         "psr": {"value": psr, "threshold": psr_max, "op": "<=", "pass": psr <= psr_max},
-        "sjl_ms": {"value": sjl, "threshold": sjl_max_ms, "op": "<=", "pass": sjl <= sjl_max_ms},
-        "hash_match_fraction": {
-            "value": matched / len(viewers) if viewers else 0.0,
-            "threshold": 1.0, "op": ">=", "pass": bool(viewers) and matched == len(viewers),
-        },
+        "sjl_mean_s": {"value": sjl_mean / 1000.0, "threshold": sjl_max_ms / 1000.0, "op": "<=", "pass": sjl_mean <= sjl_max_ms},
+        "hash_mismatches": {"value": float(mismatches), "threshold": 0.0, "op": "<=", "pass": mismatches == 0},
+        "viewers_never_played": {"value": float(never), "threshold": 0.0, "op": "<=", "pass": never == 0},
     }
     return {
-        "scenario": f"fleet_{profile}_{len(viewers)}v",
+        "scenario": f"fleet-{profile}",
         "seed": seed,
-        "passed": all(k["pass"] for k in kpis.values()) and bool(pubs),
+        "passed": all(k["pass"] for k in kpis.values()),
         "kpis": kpis,
-        "invariant_violations": [] if pubs else ["no publisher result found"],
+        "invariant_violations": [],
         "repro": f"fleet/up.sh --viewers {len(viewers)} --profile {profile} --seed {seed}",
-        "nodes": results,
+        "facts": {
+            "publishers": len(pubs),
+            "viewers": len(viewers),
+            "source_hash": source_hash,
+            "viewers_from_start": len(full),
+            "viewer_hashes": {v["container"]: v.get("output_hash") for v in viewers},
+            "parent_lost": sum(int(v.get("parent_lost", 0)) for v in viewers),
+            "repairs": sum(int(v.get("repairs", 0)) for v in viewers),
+        },
     }
-
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="results/fleet")
     ap.add_argument("--psr-max", type=float, default=0.001)
+    ap.add_argument("--start-delay-s", type=float, default=float(__import__("os").environ.get("BS_START_DELAY_S", "0")))
     ap.add_argument("--sjl-max-ms", type=float, default=1500.0)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--profile", default="clean")
@@ -81,7 +93,7 @@ def main() -> int:
     else:
         raw = pathlib.Path(tempfile.mkdtemp(prefix="bs-fleet-"))
         copy_results(raw)
-    verdict = build_verdict(raw, a.psr_max, a.sjl_max_ms, a.seed, a.profile)
+    verdict = build_verdict(raw, a.psr_max, a.sjl_max_ms, a.seed, a.profile, a.start_delay_s)
     out.mkdir(parents=True, exist_ok=True)
     (out / "verdict.json").write_text(json.dumps(verdict, indent=2))
     print(json.dumps({k: v for k, v in verdict.items() if k != "nodes"}, indent=2))

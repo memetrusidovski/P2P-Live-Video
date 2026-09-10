@@ -78,20 +78,19 @@ fn arb_manifest_body() -> impl Strategy<Value = ManifestBody> {
         0u8..4,
         any::<u64>(),
         arb_hash(),
-        any::<u32>(),
         any::<u8>(),
-        prop::collection::vec(0u16..64, 1..4),
+        prop::collection::vec((1u16..64, 0u32..(64 * 16384)), 1..4),
     )
-        .prop_map(|(sid, seg, ci, ts, root, len, v, layers)| ManifestBody {
+        .prop_map(|(sid, seg, ci, ts, root, v, layers)| ManifestBody {
             stream_id: StreamId(sid),
             segment: SegmentSeq(seg),
             chunk_index: ci,
             chunk_count: 4,
             timestamp_us: ts,
             merkle_root: root,
-            chunk_byte_length: len,
             slicing_matrix_version: v,
-            layer_block_counts: layers,
+            layer_block_counts: layers.iter().map(|(n, _)| *n).collect(),
+            layer_byte_lengths: layers.iter().map(|(_, b)| *b).collect(),
         })
 }
 
@@ -179,11 +178,7 @@ fn arb_frame() -> impl Strategy<Value = Frame> {
             Disconnect {
                 sender: n,
                 reason: r,
-                tree_id: if r.is_rejection() {
-                    Some(TreeId(t))
-                } else {
-                    None
-                },
+                tree_id: TreeId(t),
             }
         )),
         (1u8..=8, arb_reason(), any::<bool>(), any::<u32>()).prop_map(|(t, r, s, d)| {
@@ -328,17 +323,18 @@ proptest! {
         prop_assert_eq!(PeerRecord::from_slice_exact(&v).unwrap(), r);
     }
 
-    /// Ch2 §2.3.3: Stream Record fixed part is 96 bytes plus 7 per tree row plus signature.
+    /// Ch2 §2.3.3: Stream Record fixed part is 132 bytes plus 7 per tree row plus signature.
     #[test]
     fn stream_record_roundtrip(pk in any::<[u8;32]>(), trees in prop::collection::vec(arb_mapping(), 1..7), next in prop::collection::vec(arb_mapping(), 0..7), sig in arb_sig()) {
         let r = StreamRecord {
             publisher_pubkey: PublicKeyBytes(pk), manifest_version: 7, slicing_mode: SlicingMode::SvcSpatial,
             register_sample_log2: 0, swarm_size: 100, relay_count: 50, live_edge_segment: SegmentSeq(9),
             live_edge_manifest_hash: Hash::ZERO, live_edge_timestamp_us: 1, effective_segment: SegmentSeq(0),
+            descriptor_version: 1, descriptor_hash: Hash([0x5D; 32]),
             trees: trees.clone(), trees_next: next.clone(), signature: sig,
         };
         let v = r.to_vec();
-        prop_assert_eq!(v.len(), 96 + 7 * (trees.len() + next.len()) + 64);
+        prop_assert_eq!(v.len(), 132 + 7 * (trees.len() + next.len()) + 64);
         prop_assert_eq!(StreamRecord::from_slice_exact(&v).unwrap(), r);
     }
 }
@@ -350,11 +346,11 @@ fn registry_codes_are_exhaustive() {
     for ft in FrameType::ALL {
         assert_eq!(FrameType::from_code(*ft as u8), Some(*ft));
     }
-    assert_eq!(FrameType::ALL.len(), 35, "Appendix D §D.3 lists 35 frames");
-    let bad = [PROTOCOL_VERSION, 0x1F, 0, 0];
+    assert_eq!(FrameType::ALL.len(), 36, "Appendix D §D.3 lists 36 frames");
+    let bad = [PROTOCOL_VERSION, 0x23, 0, 0];
     assert!(matches!(
         FrameHeader::from_slice_exact(&bad),
-        Err(WireError::UnknownFrameType(0x1F))
+        Err(WireError::UnknownFrameType(0x23))
     ));
 }
 

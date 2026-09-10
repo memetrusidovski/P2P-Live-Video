@@ -9,14 +9,7 @@ use bytes::Bytes;
 use crate::chunk::LayeredChunk;
 
 /// Rebuilds chunks from verified blocks and keeps per-layer running hashes.
-///
-/// Blocks are zero-padded to 16 KB on the wire and the manifest carries only the
-/// chunk's **total** byte length, so layer boundaries are recovered by the rule
-/// the M1 sources follow ([`crate::source::aligned_layer_sizes`]): every layer but
-/// the last is exactly `LayerBlockCount × 16 KB` with no padding, and the last
-/// layer is `ChunkByteLength − (bytes of the other layers)`. Real media
-/// containers are self-delimiting and will not need this; ISSUE-060 tracks the
-/// descriptor that will make the rule explicit on the wire.
+/// Layers are recovered through the manifest's `LayerByteLength` (`bs_media::chunk::strip_layer`).
 #[derive(Debug, Default)]
 pub struct ChunkAssembler {
     hashers: Vec<blake3::Hasher>,
@@ -79,11 +72,8 @@ impl ChunkAssembler {
 
     fn finish(&mut self, p: Pending) -> LayeredChunk {
         let m = &p.manifest;
-        let total = m.chunk_byte_length as usize;
         let mut layers = Vec::with_capacity(m.layer_block_counts.len());
         let mut j = 0u16;
-        let mut consumed = 0usize;
-        let last = m.layer_block_counts.len().saturating_sub(1);
         for (l, &n) in m.layer_block_counts.iter().enumerate() {
             let mut v = Vec::with_capacity(n as usize * bs_wire::consts::BLOCK_SIZE);
             for _ in 0..n {
@@ -92,20 +82,17 @@ impl ChunkAssembler {
                 }
                 j += 1;
             }
-            // Non-last layers are unpadded (block aligned) unless the stream ended
-            // inside them, which the total length reveals.
-            let _ = last;
-            let len = total.saturating_sub(consumed).min(v.len());
-            v.truncate(len);
-            consumed += len;
+            let bytes =
+                crate::chunk::strip_layer(&v, m.layer_byte_lengths.get(l).copied().unwrap_or(0))
+                    .unwrap_or_default();
             if l < self.hashers.len() {
-                self.hashers[l].update(&v);
-                self.bytes[l] += v.len() as u64;
+                self.hashers[l].update(&bytes);
+                self.bytes[l] += bytes.len() as u64;
             }
             if self.keep_output {
-                self.output.extend_from_slice(&v);
+                self.output.extend_from_slice(&bytes);
             }
-            layers.push(Bytes::from(v));
+            layers.push(bytes);
         }
         self.completed += 1;
         LayeredChunk {

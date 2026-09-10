@@ -1,41 +1,201 @@
 <!doctype html>
-<!-- PLACEHOLDER (M2): MSE player fed by bs-player-api over WebSocket. -->
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>BitStream Player</title>
-  <style>body{font-family:system-ui;margin:2rem}video{max-width:100%;background:#000}#log{font:12px monospace;white-space:pre-wrap}</style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BitStream Player</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0f1115; color: #d7dae0; font: 14px system-ui, sans-serif; }
+  main { display: grid; grid-template-columns: 1fr 320px; gap: 12px; padding: 12px; max-width: 1400px; margin: auto; }
+  video { width: 100%; background: #000; border-radius: 6px; }
+  aside { background: #171a21; border-radius: 6px; padding: 12px; font-size: 13px; }
+  h1 { font-size: 16px; margin: 0 0 8px; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 2px 4px; }
+  td:first-child { color: #8b93a5; }
+  .ok { color: #7ee787; } .bad { color: #ff7b72; } .warn { color: #e3b341; }
+  select, button { background: #222634; color: inherit; border: 1px solid #333a4a; border-radius: 4px; padding: 3px 6px; }
+  #log { margin-top: 8px; max-height: 220px; overflow: auto; font: 11px ui-monospace, monospace; color: #8b93a5; white-space: pre-wrap; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+</style>
 </head>
 <body>
-  <h1>BitStream Player</h1>
-  <label>Player API: <input id="url" value="ws://localhost:8080/ws" size="40"></label>
-  <button id="connect">Connect</button>
-  <video id="video" controls autoplay muted></video>
-  <div id="log"></div>
-  <script>
-    // Skeleton: opens a WebSocket, expects binary messages. The first message is
-    // the fMP4 initialisation segment, later ones are media fragments (M2 will
-    // define this per ISSUE-060's stream descriptor). Codec string is a placeholder.
-    const log = (m) => (document.getElementById('log').textContent += m + '\n');
-    document.getElementById('connect').onclick = () => {
-      const video = document.getElementById('video');
-      const ms = new MediaSource();
-      video.src = URL.createObjectURL(ms);
-      ms.addEventListener('sourceopen', () => {
-        const mime = 'video/mp4; codecs="vp09.00.10.08"';
-        if (!MediaSource.isTypeSupported(mime)) { log('unsupported: ' + mime); return; }
-        const sb = ms.addSourceBuffer(mime);
-        const queue = [];
-        const pump = () => { if (!sb.updating && queue.length) sb.appendBuffer(queue.shift()); };
-        sb.addEventListener('updateend', pump);
-        const ws = new WebSocket(document.getElementById('url').value);
-        ws.binaryType = 'arraybuffer';
-        ws.onopen = () => log('connected');
-        ws.onmessage = (e) => { queue.push(e.data); pump(); };
-        ws.onclose = () => log('closed');
-        ws.onerror = () => log('websocket error');
-      });
+<main>
+  <section>
+    <video id="v" controls autoplay muted playsinline></video>
+  </section>
+  <aside>
+    <h1>BitStream Player</h1>
+    <table>
+      <tr><td>socket</td><td id="s-sock">connecting</td></tr>
+      <tr><td>node state</td><td id="s-state">-</td></tr>
+      <tr><td>depth per tree</td><td id="s-depth">-</td></tr>
+      <tr><td>playing rendition</td><td id="s-layer">-</td></tr>
+      <tr><td>chunks played / starved</td><td id="s-chunks">-</td></tr>
+      <tr><td>first chunk</td><td id="s-first">-</td></tr>
+      <tr><td>buffered</td><td id="s-buf">-</td></tr>
+      <tr><td>codec</td><td id="s-codec">-</td></tr>
+      <tr><td>max rendition</td><td><select id="cap"><option value="99">auto (highest)</option></select></td></tr>
+    </table>
+    <div id="log"></div>
+  </aside>
+</main>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const video = $('v');
+  const logEl = $('log');
+  const log = (m) => { logEl.textContent = (new Date().toISOString().slice(11,23) + ' ' + m + '\n' + logEl.textContent).slice(0, 8000); };
+
+  let ms = null, sb = null, codec = null;
+  const inits = new Map();        // layer -> Uint8Array
+  let currentLayer = -1;
+  let layers = 0;
+  let cap = 99;
+  const queue = [];               // pending appends: {layer, init?, media?}
+  let appending = false;
+  let pendingBatch = null;        // {segment, chunk, media: Map(layer -> bytes)}
+
+  $('cap').addEventListener('change', e => { cap = parseInt(e.target.value, 10); currentLayer = -1; });
+
+  function avc1FromInit(init) {
+    for (let i = 0; i + 8 <= init.length; i++) {
+      if (init[i] === 0x61 && init[i+1] === 0x76 && init[i+2] === 0x63 && init[i+3] === 0x43) { // "avcC"
+        const p = i + 4;
+        const h = n => n.toString(16).padStart(2, '0');
+        return `avc1.${h(init[p+1])}${h(init[p+2])}${h(init[p+3])}`;
+      }
+    }
+    return 'avc1.64001f';
+  }
+
+  function ensureSource(init) {
+    if (ms) return true;
+    codec = avc1FromInit(init);
+    const type = `video/mp4; codecs="${codec}"`;
+    $('s-codec').textContent = codec + (MediaSource.isTypeSupported(type) ? '' : ' (unsupported)');
+    if (!MediaSource.isTypeSupported(type)) { log('codec unsupported: ' + type); return false; }
+    ms = new MediaSource();
+    video.src = URL.createObjectURL(ms);
+    ms.addEventListener('sourceopen', () => {
+      sb = ms.addSourceBuffer(type);
+      sb.mode = 'segments';
+      sb.addEventListener('updateend', () => { appending = false; pump(); });
+      sb.addEventListener('error', e => log('sourcebuffer error'));
+      pump();
+    });
+    return true;
+  }
+
+  function trimBuffer() {
+    try {
+      const b = sb.buffered;
+      if (b.length && video.currentTime - b.start(0) > 20) {
+        appending = true;
+        sb.remove(b.start(0), video.currentTime - 10);
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  function pump() {
+    if (!sb || appending || sb.updating) return;
+    const item = queue.shift();
+    if (!item) return;
+    try {
+      appending = true;
+      sb.appendBuffer(item);
+    } catch (e) {
+      appending = false;
+      if (e.name === 'QuotaExceededError') {
+        log('quota exceeded; trimming');
+        queue.unshift(item);
+        if (!trimBuffer()) queue.shift();
+      } else {
+        log('append failed: ' + e.message);
+      }
+    }
+  }
+
+  function flushBatch() {
+    if (!pendingBatch) return;
+    const b = pendingBatch; pendingBatch = null;
+    let best = -1;
+    for (const l of b.media.keys()) if (l <= cap && l > best) best = l;
+    if (best < 0) return;
+    const init = inits.get(best);
+    if (!init) return;                     // cannot start this layer yet
+    if (!ensureSource(init)) return;
+    if (best !== currentLayer) {
+      queue.push(init);
+      currentLayer = best;
+      $('s-layer').textContent = `layer ${best} of ${layers}`;
+      log(`switch to layer ${best}`);
+    }
+    queue.push(b.media.get(best));
+    pump();
+    // Stay near the live edge.
+    try {
+      const r = sb && sb.buffered;
+      if (r && r.length) {
+        const end = r.end(r.length - 1);
+        $('s-buf').textContent = `${(end - video.currentTime).toFixed(2)} s ahead`;
+        if (end - video.currentTime > 3.0) video.currentTime = end - 0.5;
+        if (video.paused && video.readyState >= 2) video.play().catch(() => {});
+      }
+    } catch (e) {}
+  }
+
+  function onBinary(buf) {
+    const u = new Uint8Array(buf);
+    if (u.length < 7) return;
+    const kind = u[0], layer = u[1];
+    const segment = (u[2] << 24 | u[3] << 16 | u[4] << 8 | u[5]) >>> 0, chunk = u[6];
+    const payload = u.subarray(7);
+    if (kind === 1) {                       // init
+      if (!inits.has(layer)) log(`init for layer ${layer} (${payload.length} B)`);
+      inits.set(layer, payload);
+      return;
+    }
+    if (kind !== 2) return;
+    const key = segment * 4 + chunk;
+    if (pendingBatch && pendingBatch.key !== key) flushBatch();
+    if (!pendingBatch) pendingBatch = { key, segment, chunk, media: new Map() };
+    pendingBatch.media.set(layer, payload);
+    // A chunk's frames arrive together; flush on the next status/text frame or next chunk.
+    clearTimeout(onBinary.t);
+    onBinary.t = setTimeout(flushBatch, 30);
+  }
+
+  function onStatus(s) {
+    $('s-state').textContent = s.state || '-';
+    $('s-depth').textContent = (s.depth || []).map(d => d === 255 ? '-' : d).join(' / ');
+    $('s-chunks').innerHTML = `${s.played} / <span class="${s.starved ? 'warn' : 'ok'}">${s.starved}</span>`;
+    $('s-first').textContent = s.first_chunk_s != null ? s.first_chunk_s.toFixed(2) + ' s' : '-';
+    if (s.layers && s.layers !== layers) {
+      layers = s.layers;
+      const sel = $('cap');
+      while (sel.options.length > 1) sel.remove(1);
+      for (let l = 0; l < layers; l++) { const o = document.createElement('option'); o.value = l; o.textContent = `layer ${l}`; sel.appendChild(o); }
+    }
+  }
+
+  function connect() {
+    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => { $('s-sock').innerHTML = '<span class="ok">open</span>'; log('websocket open'); };
+    ws.onclose = () => { $('s-sock').innerHTML = '<span class="bad">closed</span>'; setTimeout(connect, 2000); };
+    ws.onerror = () => {};
+    ws.onmessage = ev => {
+      if (typeof ev.data === 'string') {
+        try { const m = JSON.parse(ev.data); if (m.type === 'hello') { layers = m.layers; onStatus({ layers }); } else onStatus(m); } catch (e) {}
+      } else onBinary(ev.data);
     };
-  </script>
+  }
+  connect();
+})();
+</script>
 </body>
 </html>

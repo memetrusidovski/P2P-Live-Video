@@ -95,7 +95,15 @@ fn chunk_build_and_verify() {
         "46875 B → 3 blocks, 46875 → 3, remainder 89196 → 6"
     );
     assert_eq!(built.block_count(), 12);
-    assert_eq!(m.body.chunk_byte_length as usize, chunk.byte_len());
+    assert_eq!(m.body.chunk_byte_length() as usize, chunk.byte_len());
+    assert_eq!(
+        m.body.layer_byte_lengths,
+        chunk
+            .layers
+            .iter()
+            .map(|l| l.len() as u32)
+            .collect::<Vec<_>>()
+    );
     verify_manifest(m, &pk.public_key()).unwrap();
     assert!(verify_manifest(
         m,

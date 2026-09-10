@@ -573,14 +573,12 @@ impl SwarmBuffer {
     }
 }
 
-/// Build the delivered chunk: leading complete layers only, with the aligned
-/// layer-length rule (see `bs_media::sink`).
+/// Build the delivered chunk: leading complete layers only, each stripped of its
+/// padding through the manifest's `LayerByteLength`.
 fn assemble(cb: &ChunkBuf) -> PlayedChunk {
     let m = &cb.manifest;
-    let total = m.chunk_byte_length as usize;
     let layers_total = m.layer_block_counts.len() as u8;
     let mut layers = Vec::new();
-    let mut consumed = 0usize;
     let mut j = 0u16;
     let mut complete = 0u8;
     for (l, &n) in m.layer_block_counts.iter().enumerate() {
@@ -594,10 +592,12 @@ fn assemble(cb: &ChunkBuf) -> PlayedChunk {
             }
             j += 1;
         }
-        let len = total.saturating_sub(consumed).min(v.len());
-        v.truncate(len);
-        consumed += len;
-        layers.push(Bytes::from(v));
+        let Some(bytes) =
+            bs_media::chunk::strip_layer(&v, m.layer_byte_lengths.get(l).copied().unwrap_or(0))
+        else {
+            break;
+        };
+        layers.push(bytes);
         complete += 1;
     }
     PlayedChunk {

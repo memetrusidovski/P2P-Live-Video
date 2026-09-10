@@ -63,6 +63,7 @@ pub fn seed_for_tree(a: SocketAddr, params: &Params, m: u8, tree: u8) -> u64 {
 
 /// One traced output.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum TraceItem {
     Event(Event),
     Send {
@@ -404,6 +405,7 @@ impl Harness {
                 );
             }
             Output::Event(e) => self.trace(from, TraceItem::Event(e)),
+            Output::Descriptor(_) => {}
         }
     }
 

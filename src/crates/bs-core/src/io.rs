@@ -72,6 +72,8 @@ pub enum Command {
     PublishChunk(LayeredChunk),
     /// Publisher only: the source ended.
     EndStream,
+    /// Publisher only: install the STREAM_DESCRIPTOR for the current layers (App D §D.4.20).
+    SetDescriptor(bs_wire::frames::StreamDescriptor),
     /// Leave gracefully.
     Quit,
 }
@@ -118,6 +120,9 @@ pub enum Output {
     },
     /// A structured event for logs, KPIs and `explain`.
     Event(Event),
+    /// The verified STREAM_DESCRIPTOR for the stream (delivered to the player once
+    /// per version).
+    Descriptor(bs_wire::frames::StreamDescriptor),
 }
 
 /// Structured events. Every field is plain data so the simulator can write

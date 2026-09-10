@@ -12,6 +12,8 @@ services:
       BS_ROLE: publisher
       BS_PORT: "4000"
       BS_FILE: /media/sample.mp4
+      BS_MAX_BYTES: "${BS_MAX_BYTES:-}"
+      BS_START_DELAY_S: "${BS_START_DELAY_S:-8}"
       BS_SEED: "${BS_SEED:-1}"
       BS_NETEM_PROFILE: "${BS_NETEM_PROFILE:-clean}"
     volumes:
@@ -31,6 +33,8 @@ services:
       BS_SEED: "${BS_SEED:-1}"
       BS_EXPECT_HASH: "${BS_EXPECT_HASH:-}"
       BS_DURATION_S: "${BS_DURATION_S:-60}"
+      BS_CLASS: "${BS_CLASS:-relay}"
+      BS_UPLOAD_KBPS: "${BS_UPLOAD_KBPS:-20000}"
       BS_NETEM_PROFILE: "${BS_NETEM_PROFILE:-clean}"
     volumes:
       - ./netem.sh:/usr/local/bin/netem.sh:ro

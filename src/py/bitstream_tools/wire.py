@@ -25,6 +25,7 @@ FRAME_NAMES = {
     0x15: "BUFFER_STATE_BITFIELD", 0x16: "PULL_REQUEST", 0x17: "MANIFEST_UPDATE",
     0x18: "ROSTER", 0x19: "RANK_PROOF", 0x1A: "STORE_RECORD", 0x1B: "STORE_RECORD_ACK",
     0x1C: "PUNCH_REQUEST", 0x1D: "MANIFEST_REQUEST", 0x1E: "DRAIN_NOTICE",
+    0x1F: "STREAM_DESCRIPTOR",
     0x20: "PROOF_OF_UPLOAD", 0x21: "CHOKE_STATE", 0x22: "REPUTATION_AUDIT_GOSSIP",
     0x30: "RELAY_PROPOSAL", 0x31: "RELAY_BIND",
 }
@@ -187,14 +188,22 @@ def _manifest_body(c: Cursor) -> dict[str, Any]:
     body["timestamp_us"] = c.u64("timestamp")
     body["merkle_root"] = c.take(32, "merkle_root")
     block_count = c.u16("block_count")
-    body["chunk_byte_length"] = c.u32("chunk_byte_length")
+    chunk_byte_length = c.u32("chunk_byte_length")
     body["slicing_matrix_version"] = c.u8("matrix_version")
     layer_count = c.u8("layer_count")
     c.skip(2)
-    body["layer_block_counts"] = [c.u16("layer_block_count") for _ in range(layer_count)]
+    # [LayerBlockCount 2][LayerByteLength 4] per layer, lowest first.
+    body["layer_block_counts"] = []
+    body["layer_byte_lengths"] = []
+    for _ in range(layer_count):
+        body["layer_block_counts"].append(c.u16("layer_block_count"))
+        body["layer_byte_lengths"].append(c.u32("layer_byte_length"))
     if sum(body["layer_block_counts"]) != block_count:
         raise WireError("BlockCount != sum(LayerBlockCount)")
+    if sum(body["layer_byte_lengths"]) != chunk_byte_length:
+        raise WireError("ChunkByteLength != sum(LayerByteLength)")
     body["block_count"] = block_count
+    body["chunk_byte_length"] = chunk_byte_length
     return body
 
 
@@ -203,6 +212,43 @@ def _tree_mapping_entry(c: Cursor) -> dict[str, int]:
         "tree_id": c.u8(), "layer": c.u8(), "stripe_index": c.u8(),
         "stripe_count": c.u8(), "priority": c.u8(), "bitrate_kbps": c.u16(),
     }
+
+
+SLICING_MODE = {0x01: "SVC_SPATIAL", 0x02: "MDC"}
+CONTENT_TYPE = {0x01: "VIDEO_CMAF", 0x02: "VIDEO_ANNEXB", 0x03: "AUDIO", 0x7F: "OPAQUE"}
+LAYER_MODE = {0x01: "SVC_SPATIAL", 0x02: "SVC_TEMPORAL", 0x03: "SIMULCAST", 0x04: "INDEPENDENT"}
+GET_PEERS_REQUEST_LEN = VALIDATION_BLOCK_LEN + 32 + 4
+
+
+def decode_stream_record(c: Cursor) -> dict[str, Any]:
+    # Ch2 sec. 2.3.3 canonical layout:
+    # [PublisherPubKey 32][ManifestVersion 4][SlicingMode 1][NumTrees 1]
+    # [RegisterSampleLog2 1][NumTreesNext 1][SwarmSize 4][RelayCount 4]
+    # [LiveEdgeSegmentId 4][LiveEdgeManifestHash 32][LiveEdgeTimestamp 8][EffectiveSegmentSeq 4]
+    # [DescriptorVersion 4][DescriptorHash 32]
+    # [TreeMappingEntry x NumTrees][TreeMappingEntry x NumTreesNext][Signature 64]
+    # Fixed part 132 bytes.
+    rec: dict[str, Any] = {"publisher_pubkey": c.take(32, "publisher_pubkey")}
+    rec["manifest_version"] = c.u32("manifest_version")
+    mode = c.u8("slicing_mode")
+    if mode not in SLICING_MODE:
+        raise WireError(f"bad slicing mode {mode}")
+    rec["slicing_mode"] = SLICING_MODE[mode]
+    num_trees = c.u8("num_trees")
+    rec["register_sample_log2"] = c.u8("register_sample_log2")
+    num_trees_next = c.u8("num_trees_next")
+    rec["swarm_size"] = c.u32("swarm_size")
+    rec["relay_count"] = c.u32("relay_count")
+    rec["live_edge_segment"] = c.u32("live_edge_segment")
+    rec["live_edge_manifest_hash"] = c.take(32, "live_edge_manifest_hash")
+    rec["live_edge_timestamp_us"] = c.u64("live_edge_timestamp")
+    rec["effective_segment"] = c.u32("effective_segment")
+    rec["descriptor_version"] = c.u32("descriptor_version")
+    rec["descriptor_hash"] = c.take(32, "descriptor_hash")
+    rec["trees"] = [_tree_mapping_entry(c) for _ in range(num_trees)]
+    rec["trees_next"] = [_tree_mapping_entry(c) for _ in range(num_trees_next)]
+    rec["signature"] = c.take(64, "signature")
+    return rec
 
 
 def decode_payload(ft: int, payload: bytes) -> dict[str, Any]:
@@ -252,11 +298,13 @@ def decode_payload(ft: int, payload: bytes) -> dict[str, Any]:
         out["hop_depth"] = c.u8()
         out["pending"] = bool(c.u8() & 1)
     elif name == "DISCONNECT":
+        # App D sec. D.4.3b: TreeID 0 = whole connection, m > 0 = only tree m.
         out["sender"] = c.take(32)
         code = c.u8()
         out["reason"] = DISCONNECT_REASON[code]
-        if code in REJECTION_REASONS:
-            out["tree_id"] = c.u8()
+        out["is_rejection"] = code in REJECTION_REASONS
+        out["tree_id"] = c.u8()
+        c.skip(2)
     elif name == "DRAIN_NOTICE":
         out["tree_id"] = c.u8()
         out["reason"] = DISCONNECT_REASON[c.u8()]
@@ -274,7 +322,7 @@ def decode_payload(ft: int, payload: bytes) -> dict[str, Any]:
     elif name == "MANIFEST_REQUEST":
         out["segment"] = c.u32()
         ci = c.u8()
-        out["selector"] = {0xFF: "ALL_CHUNKS", 0xFE: "PENDING_UPDATE"}.get(ci, ci)
+        out["selector"] = {0xFF: "ALL_CHUNKS", 0xFE: "PENDING_UPDATE", 0xFD: "DESCRIPTOR"}.get(ci, ci)
         c.skip(3)
     elif name == "PULL_REQUEST":
         out["segment"] = c.u32()
@@ -293,6 +341,40 @@ def decode_payload(ft: int, payload: bytes) -> dict[str, Any]:
         out["effective_segment"] = c.u32()
         n = c.u8()
         out["trees"] = [_tree_mapping_entry(c) for _ in range(n)]
+        out["signature"] = c.take(64)
+    elif name == "STREAM_DESCRIPTOR":
+        # App D sec. D.4.20:
+        # [StreamID 32][DescriptorVersion 4][EffectiveSegmentSeq 4][ContentType 1][LayerMode 1][LayerCount 1][Reserved 1]
+        # per layer: [CodecTag 4][Width 2][Height 2][FrameRateMilli 4][BitrateKbps 2][InitLength 2][InitData]
+        # [Signature 64]
+        out["stream_id"] = c.take(32)
+        out["version"] = c.u32("descriptor_version")
+        out["effective_segment"] = c.u32("effective_segment")
+        ct = c.u8("content_type")
+        if ct not in CONTENT_TYPE:
+            raise WireError(f"bad content type {ct}")
+        out["content_type"] = CONTENT_TYPE[ct]
+        lm = c.u8("layer_mode")
+        if lm not in LAYER_MODE:
+            raise WireError(f"bad layer mode {lm}")
+        out["layer_mode"] = LAYER_MODE[lm]
+        n = c.u8("layer_count")
+        c.skip(1)
+        layers = []
+        for _ in range(n):
+            layer = {
+                "codec_tag": c.take(4, "codec_tag").decode("ascii", "replace"),
+                "width": c.u16("width"),
+                "height": c.u16("height"),
+                "frame_rate_milli": c.u32("frame_rate_milli"),
+                "bitrate_kbps": c.u16("bitrate_kbps"),
+            }
+            init_len = c.u16("init_length")
+            if init_len > 4096:
+                raise WireError(f"init data {init_len} > 4096")
+            layer["init_data"] = c.take(init_len, "init_data")
+            layers.append(layer)
+        out["layers"] = layers
         out["signature"] = c.take(64)
     elif name == "BLOCK_PROOF":
         out["segment"] = c.u32()
@@ -314,6 +396,46 @@ def decode_payload(ft: int, payload: bytes) -> dict[str, Any]:
         h = c.u16()
         out["siblings"] = [c.take(32) for _ in range(h)]
         out["data"] = c.take(c.remaining())
+    elif name == "REGISTER_PEER":
+        # Ch2 sec. 2.3.3: [K_s 32][VB 152][Port 2][Protocol 1][NodeClass 1]
+        # [AssignedTrees 1][Flags 1][Reserved 2][Signature 64]
+        out["stream_id"] = c.take(32)
+        out["validation"] = decode_validation_block(c)
+        out["port"] = c.u16()
+        proto = c.u8()
+        if proto != 0x01:
+            raise WireError(f"bad protocol type {proto}")
+        out["protocol"] = "UDP"
+        out["node_class"] = NODE_CLASS[c.u8()]
+        out["assigned_trees"] = tree_set(c.u8())
+        out["flags"] = decode_peer_flags(c.u8())
+        c.skip(2)
+        out["signature"] = c.take(64)
+    elif name == "GET_PEERS":
+        if len(payload) == GET_PEERS_REQUEST_LEN:
+            # App D sec. D.4.6b request: [VB 152][K_s 32][StarvedTrees 1][WantedTrees 1][ReqFlags 1][Reserved 1]
+            out["direction"] = "request"
+            out["validation"] = decode_validation_block(c)
+            out["stream_id"] = c.take(32)
+            out["starved_trees"] = tree_set(c.u8())
+            out["wanted_trees"] = tree_set(c.u8())
+            out["want_relay_capable"] = bool(c.u8() & 1)
+            c.skip(1)
+        else:
+            # Response: [Guardian NodeID 32][Count 1][RespFlags 1][StreamRecordLength 2]
+            # [PeerRecord x Count][Stream Record L bytes]
+            out["direction"] = "response"
+            out["guardian"] = c.take(32)
+            count = c.u8()
+            out["sampled"] = bool(c.u8() & 1)
+            sr_len = c.u16()
+            out["records"] = [decode_peer_record(c) for _ in range(count)]
+            if sr_len:
+                sub = Cursor(c.take(sr_len, "stream_record"))
+                out["stream_record"] = decode_stream_record(sub)
+                sub.done()
+            else:
+                out["stream_record"] = None
     else:
         out["raw"] = payload
         return out

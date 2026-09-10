@@ -31,6 +31,9 @@ pub enum Frame {
     BlockProof(BlockProof),
     RaptorQSymbol(RaptorQSymbol),
     BlockTransmission(BlockTransmission),
+    RegisterPeer(RegisterPeer),
+    GetPeers(GetPeersFrame),
+    StreamDescriptor(StreamDescriptor),
     /// A registered frame type whose layout is not yet implemented.
     Raw {
         /// Frame type.
@@ -62,6 +65,9 @@ impl Frame {
             Frame::BlockProof(_) => FrameType::BLOCK_PROOF,
             Frame::RaptorQSymbol(_) => FrameType::RAPTORQ_SYMBOL,
             Frame::BlockTransmission(_) => FrameType::BLOCK_TRANSMISSION,
+            Frame::RegisterPeer(_) => FrameType::REGISTER_PEER,
+            Frame::GetPeers(_) => FrameType::GET_PEERS,
+            Frame::StreamDescriptor(_) => FrameType::STREAM_DESCRIPTOR,
             Frame::Raw { frame_type, .. } => *frame_type,
         }
     }
@@ -87,6 +93,9 @@ impl Frame {
             Frame::BlockProof(f) => f.encoded_len(),
             Frame::RaptorQSymbol(f) => f.encoded_len(),
             Frame::BlockTransmission(f) => f.encoded_len(),
+            Frame::RegisterPeer(f) => f.encoded_len(),
+            Frame::GetPeers(f) => f.encoded_len(),
+            Frame::StreamDescriptor(f) => f.encoded_len(),
             Frame::Raw { payload, .. } => payload.len(),
         }
     }
@@ -116,6 +125,9 @@ impl Frame {
             Frame::BlockProof(f) => f.encode(buf),
             Frame::RaptorQSymbol(f) => f.encode(buf),
             Frame::BlockTransmission(f) => f.encode(buf),
+            Frame::RegisterPeer(f) => f.encode(buf),
+            Frame::GetPeers(f) => f.encode(buf),
+            Frame::StreamDescriptor(f) => f.encode(buf),
             Frame::Raw { payload, .. } => buf.put_slice(payload),
         }
     }
@@ -178,6 +190,11 @@ impl Frame {
             FrameType::BLOCK_TRANSMISSION => {
                 let len = p.len();
                 Frame::BlockTransmission(BlockTransmission::decode_with_len(&mut p, len)?)
+            }
+            FrameType::REGISTER_PEER => Frame::RegisterPeer(RegisterPeer::from_slice_exact(p)?),
+            FrameType::GET_PEERS => Frame::GetPeers(GetPeersFrame::from_payload(p)?),
+            FrameType::STREAM_DESCRIPTOR => {
+                Frame::StreamDescriptor(StreamDescriptor::from_slice_exact(p)?)
             }
             other => Frame::Raw {
                 frame_type: other,

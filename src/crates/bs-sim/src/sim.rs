@@ -669,6 +669,11 @@ impl Sim {
                 );
             }
             Output::Register(rec) => self.oracle.register(rec),
+            Output::Descriptor(d) => self.log.note(
+                self.now,
+                i,
+                &format!("stream descriptor v{} received", d.version),
+            ),
             Output::StoreRecord(sr) => self.oracle.store(sr),
             Output::Deliver {
                 chunk,

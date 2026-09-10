@@ -263,14 +263,21 @@ Two ways, same code:
 
 | Decision | Where | Issue |
 |---|---|---|
-| Refused tree joins are answered with `DISCONNECT` reasons `0x0A–0x0C`, plus a `TreeID` byte | `bs_wire::DisconnectReason`, `frames::Disconnect` | ISSUE-059 |
+| Refused tree joins are answered with `DISCONNECT` reasons `0x0A–0x0C`; `DISCONNECT` carries a `TreeID` (0 = whole connection) | `bs_wire::DisconnectReason`, `frames::Disconnect` | SOLUTION-059 |
 | Validation-block signature pre-image is `FrameType ‖ Timestamp ‖ body`, hashed with Blake3 | `ValidationBlock::signed_message` | (doc comment; spec says "hash of payload and timestamp") |
 | Merkle trees pad to a power of two with zero leaves | `bs_crypto::MerkleTree` | (doc comment; spec fixes this only for RANK_PROOF) |
-| Codec/container descriptor for players | pending | ISSUE-060 |
 | A relay assigned to tree m displaces a pure subscriber of m through the drain path (`DRAIN_NOTICE` Displaced); it also asks saturated parents for its own tree | `Node::on_neighbor`, `Node::finish_probing` | ISSUE-061 |
-| `DISCONNECT` received on a tree stream is scoped to that tree; on the control stream it ends the session | `Node::on_disconnect` | (doc comment; the frame carries no TreeID) |
 | Sequential handover: below `10·B_m·Ω` uplink a displacing admission is `ACCEPTED.PENDING` and the new child is served when the drained child leaves; the drain window is then one segment, not τ_drain | `Node::on_neighbor`, `release_pending` | Ch1 §1.2.2 Handover budget; ISSUE-061 addendum |
 | Playout anchors at the newest manifest seen before the first chunk plays; never re-anchors backward | `SwarmBuffer::insert_manifest` | Ch4 §4.3.1 |
 | Opaque sources size every non-final layer to whole 16 KB blocks so layer boundaries are recoverable from `ChunkByteLength` alone | `bs_media::source::aligned_layer_sizes` | ISSUE-060 addendum |
 | A parent that delivers three unverifiable blocks is evicted and excluded from future candidate lists | `Node::try_verify` | Ch4 §4.1.2 "the delivering parent is flagged" |
 | A newly admitted child receives the manifests of the two most recent segments | `Node::send_recent_manifests` | Ch4 §4.3.1 (backfill via MANIFEST_REQUEST in M3) |
+| Layer padding is stripped with the manifest's `LayerByteLength` (SOLUTION-060); the interim length prefix is gone | `bs_media::chunk::strip_layer` | App D §D.4.8 |
+| `STREAM_DESCRIPTOR` is signed by the publisher, pushed to every admitted child once per version, forwarded by relays, requested by a joiner with `MANIFEST_REQUEST(0xFD)` on its first attach, and handed to the application as `Output::Descriptor` | `Node::set_descriptor`, `on_descriptor`, `on_manifest_request` | App D §D.4.20 |
+| Real media is carried as an app-level TLV container inside each layer payload (INIT once per segment in chunk 0, MEDIA per fragment); renditions are layers (`SIMULCAST`). The player still reads INIT from the TLV; moving it to the descriptor's `InitData` is the next step | `bs_ingest::container`, `bs-player-api`, `clients/web` | SOLUTION-060 |
+| A join round of pure timeouts is a discovery failure, not a shed signal; only refusals (saturated, depth, unparented) advance the shed counter | `Node::join_round_failed` | App D §D.4.3b |
+| Plain pre-session frames and QUIC share one UDP socket, demultiplexed on the QUIC fixed bit; RFC 9287 greasing is disabled | `bs_node::transport::DemuxSocket` | App D §D.2 |
+| QUIC sessions use mutual TLS with self-signed Ed25519 certs whose SAN carries `bitstream://<nodeid>/<nonce>`; verification is the identity binding + static PoW, no CA | `bs_node::tls` | Ch2 §2.2, Ch6 §6.2 |
+| Channels map to QUIC as: control = one bidi stream tagged 0, tree m = one bidi stream tagged m, symbols = datagrams | `bs_node::driver` | App D §D.2 |
+| Discovery in M2 is a single bootstrap guardian inside `bsnode publish` answering `GET_PEERS` / `REGISTER_PEER` with observed addresses | `bs_node::guardian` | Ch2 §2.3 (S/Kademlia in M3) |
+| STREAM_END ends the relay role at once but playback drains the buffer before TERMINATED | `Node::on_stream_end` | Ch1 §1.3.1 |

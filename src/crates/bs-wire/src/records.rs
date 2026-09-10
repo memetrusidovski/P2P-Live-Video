@@ -153,6 +153,10 @@ pub struct StreamRecord {
     pub live_edge_timestamp_us: u64,
     /// Switch segment of a pending `MANIFEST_UPDATE`, or 0.
     pub effective_segment: SegmentSeq,
+    /// Version of the STREAM_DESCRIPTOR in force (0 = none).
+    pub descriptor_version: u32,
+    /// Blake3 of the STREAM_DESCRIPTOR in force.
+    pub descriptor_hash: Hash,
     /// Matrix in force.
     pub trees: Vec<TreeMappingEntry>,
     /// Pending matrix (empty when nothing is pending).
@@ -163,7 +167,7 @@ pub struct StreamRecord {
 
 impl StreamRecord {
     /// Fixed part length before the matrices and signature.
-    pub const FIXED_LEN: usize = 32 + 4 + 1 + 1 + 1 + 1 + 4 + 4 + 4 + 32 + 8 + 4;
+    pub const FIXED_LEN: usize = 32 + 4 + 1 + 1 + 1 + 1 + 4 + 4 + 4 + 32 + 8 + 4 + 4 + 32;
 
     /// Bytes the publisher signature covers.
     pub fn signable_bytes(&self) -> Vec<u8> {
@@ -185,6 +189,8 @@ impl StreamRecord {
         self.live_edge_manifest_hash.encode(buf);
         buf.put_u64(self.live_edge_timestamp_us);
         buf.put_u32(self.effective_segment.0);
+        buf.put_u32(self.descriptor_version);
+        self.descriptor_hash.encode(buf);
         for t in &self.trees {
             t.encode(buf);
         }
@@ -218,6 +224,8 @@ impl Decode for StreamRecord {
         let live_edge_manifest_hash = Hash::decode(buf)?;
         let live_edge_timestamp_us = get_u64(buf, "StreamRecord.live_edge_ts")?;
         let effective_segment = SegmentSeq(get_u32(buf, "StreamRecord.effective_seq")?);
+        let descriptor_version = get_u32(buf, "StreamRecord.descriptor_version")?;
+        let descriptor_hash = Hash::decode(buf)?;
         let mut trees = Vec::with_capacity(num_trees as usize);
         for _ in 0..num_trees {
             trees.push(TreeMappingEntry::decode(buf)?);
@@ -238,6 +246,8 @@ impl Decode for StreamRecord {
             live_edge_manifest_hash,
             live_edge_timestamp_us,
             effective_segment,
+            descriptor_version,
+            descriptor_hash,
             trees,
             trees_next,
             signature,

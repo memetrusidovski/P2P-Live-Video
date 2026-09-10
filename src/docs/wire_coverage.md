@@ -1,6 +1,6 @@
 # Wire coverage
 
-All 35 frame codes from Appendix D sec. D.3 as known to `bs-wire`. "Typed" means the
+All 36 frame codes from Appendix D sec. D.3 as known to `bs-wire`. "Typed" means the
 payload has a struct with encode/decode and a golden vector; "Raw" means it
 decodes to `Frame::Raw { frame_type, payload }` until its milestone.
 
@@ -12,11 +12,11 @@ decodes to `Frame::Raw { frame_type, payload }` until its milestone.
 | 0x04 | STREAM_END | QUIC stream | Typed | M1 |
 | 0x05 | NEIGHBOR | QUIC stream | Typed | M1 |
 | 0x06 | SHUFFLE | QUIC stream | Raw | M3 |
-| 0x07 | DISCONNECT | QUIC stream | Typed (ISSUE-059 rejection codes) | M1 |
+| 0x07 | DISCONNECT | QUIC stream | Typed (TreeID scope + refusal codes, SOLUTION-059) | M1 |
 | 0x08 | ACCEPTED | QUIC stream | Typed | M1 |
 | 0x09 | FORWARD_JOIN | QUIC stream | Raw | M3 |
-| 0x0A | REGISTER_PEER | pre-session UDP | Raw | M3 |
-| 0x0B | GET_PEERS | pre-session UDP | Raw | M3 |
+| 0x0A | REGISTER_PEER | pre-session UDP | Typed | M2 (bootstrap guardian), M3 (DHT) |
+| 0x0B | GET_PEERS | pre-session UDP | Typed (request and response) | M2 (bootstrap guardian), M3 (DHT) |
 | 0x0C | FIND_NODE | pre-session UDP | Raw | M3 |
 | 0x0D | FIND_VALUE | pre-session UDP | Raw | M3 |
 | 0x0E | PROBE | pre-session UDP | Typed | M1 |
@@ -36,14 +36,19 @@ decodes to `Frame::Raw { frame_type, payload }` until its milestone.
 | 0x1C | PUNCH_REQUEST | pre-session UDP | Raw | M4 |
 | 0x1D | MANIFEST_REQUEST | QUIC stream | Typed | M1 |
 | 0x1E | DRAIN_NOTICE | QUIC stream | Typed | M1 |
+| 0x1F | STREAM_DESCRIPTOR | QUIC stream | Typed (SOLUTION-060) | M2 |
 | 0x20 | PROOF_OF_UPLOAD | QUIC stream | Raw | M3 |
 | 0x21 | CHOKE_STATE | QUIC stream | Typed | M1 |
 | 0x22 | REPUTATION_AUDIT_GOSSIP | QUIC stream | Raw | M3 |
 | 0x30 | RELAY_PROPOSAL | QUIC stream | Raw | M4 |
 | 0x31 | RELAY_BIND | QUIC stream | Raw | M4 |
 
-Typed: 19. Raw: 16. Records implemented: `PeerRecord`, `StreamRecord`,
+Typed: 22. Raw: 14. Records implemented: `PeerRecord`, `StreamRecord`,
 `TreeMappingEntry`, `ValidationBlock`.
+
+In M2 `REGISTER_PEER` and `GET_PEERS` are answered by a single bootstrap
+guardian embedded in `bsnode publish`; the S/Kademlia routing that locates
+guardians (`FIND_NODE`, `FIND_VALUE`, `STORE_RECORD*`) arrives with M3.
 
 Pending spec decisions that will add wire structures: ISSUE-060 (stream
 descriptor and a `MANIFEST_REQUEST` selector for it).

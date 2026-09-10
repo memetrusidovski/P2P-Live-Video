@@ -4,10 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "BitStream media ingest: file-backed and ffmpeg fMP4 sources feeding the publisher"
+description = "BitStream media ingest: ffmpeg fMP4 simulcast source and the TLV layer container"
 
 [dependencies]
 bs-media.workspace = true
+bs-wire.workspace = true
 tokio.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
@@ -15,4 +16,3 @@ tracing.workspace = true
 anyhow.workspace = true
 
 [dev-dependencies]
-

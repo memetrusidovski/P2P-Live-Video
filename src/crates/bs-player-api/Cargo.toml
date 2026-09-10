@@ -7,7 +7,7 @@ rust-version.workspace = true
 description = "BitStream local player API: HTTP + WebSocket delivery of reassembled media to clients"
 
 [dependencies]
-bs-media.workspace = true
+bs-ingest.workspace = true
 axum.workspace = true
 tokio.workspace = true
 bytes.workspace = true
@@ -15,7 +15,6 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 futures.workspace = true
-thiserror.workspace = true
+anyhow.workspace = true
 
 [dev-dependencies]
-

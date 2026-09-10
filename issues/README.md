@@ -8,9 +8,14 @@ The canonical specification is [`../protocol/`](../protocol/). When an issue is 
 
 ## Open Issues
 
-None. Every issue filed to date (ISSUE-001 through ISSUE-060) has been verified against the specification and closed; the reasoning is in [`../solutions/`](../solutions/).
+| Issue | Priority | Component | Summary |
+|---|---|---|---|
+| [ISSUE-061](ISSUE-061-relay-of-tree-cannot-displace-pure-subscriber.md) | High | Ch1 §1.2.2, §1.3 | A relay assigned to tree m has no admission priority in m; a saturated parent full of pure subscribers deadlocks the tree's growth. Found by the M1 simulator at cold start; addendum on the sequential-handover deadlock |
+| [ISSUE-062](ISSUE-062-per-layer-block-padding-not-in-overhead-factor.md) | Medium | Ch4 §4.1.1, Ch1 §1.3, App B | Per-layer 16 KB block padding costs 10–15 % at 250 ms chunks and is not in Ω, so slot counts are optimistic by that fraction. Found when four framing bytes per layer took the 100-relay baseline from 0.02 % to 31 % starvation |
 
-New issues should be filed as `ISSUE-061-<slug>.md` following the existing format: a header (Status, Priority, Component, Affects, File), then Summary, Detailed Description with worked numbers, Impact, Proposed Fix, Effort. Cross-reference related issues and name the cluster if one exists. Read [`../AUDITOR-AGENT.md`](../AUDITOR-AGENT.md) before filing anything, and [`../FIXER-AGENT.md`](../FIXER-AGENT.md) before resolving anything.
+Both were filed from the reference implementation in [`../src/`](../src/) (2026-09-09/10). ISSUE-001 through ISSUE-060 are closed; the reasoning is in [`../solutions/`](../solutions/).
+
+New issues should be filed as `ISSUE-063-<slug>.md` following the existing format: a header (Status, Priority, Component, Affects, File), then Summary, Detailed Description with worked numbers, Impact, Proposed Fix, Effort. Cross-reference related issues and name the cluster if one exists. Read [`../AUDITOR-AGENT.md`](../AUDITOR-AGENT.md) before filing anything, and [`../FIXER-AGENT.md`](../FIXER-AGENT.md) before resolving anything.
 
 ---
 

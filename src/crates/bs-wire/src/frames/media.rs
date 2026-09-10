@@ -32,18 +32,23 @@ pub struct ManifestBody {
     pub timestamp_us: u64,
     /// Merkle root over the chunk's blocks.
     pub merkle_root: Hash,
-    /// True byte length of the chunk before padding.
-    pub chunk_byte_length: u32,
     /// Slicing matrix version this chunk was cut under.
     pub slicing_matrix_version: u8,
     /// Blocks per layer, lowest layer first; the sum is `BlockCount`.
     pub layer_block_counts: Vec<u16>,
+    /// Exact payload bytes per layer (strips the last block's padding); the sum is
+    /// `ChunkByteLength`.
+    pub layer_byte_lengths: Vec<u32>,
 }
 
 impl ManifestBody {
     /// Total blocks in the chunk.
     pub fn block_count(&self) -> u16 {
         self.layer_block_counts.iter().copied().sum()
+    }
+    /// Total payload bytes in the chunk (`ChunkByteLength`).
+    pub fn chunk_byte_length(&self) -> u32 {
+        self.layer_byte_lengths.iter().copied().sum()
     }
     /// Which layer block `j` belongs to, and its index within that layer.
     pub fn layer_of(&self, j: u16) -> Option<(u8, u16)> {
@@ -64,7 +69,7 @@ impl ManifestBody {
         Some(self.layer_block_counts[..l as usize].iter().copied().sum())
     }
     fn encoded_len(&self) -> usize {
-        32 + 4 + 1 + 1 + 2 + 8 + 32 + 2 + 4 + 1 + 1 + 2 + 2 * self.layer_block_counts.len()
+        32 + 4 + 1 + 1 + 2 + 8 + 32 + 2 + 4 + 1 + 1 + 2 + 6 * self.layer_block_counts.len()
     }
     fn encode<B: BufMut>(&self, buf: &mut B) {
         self.stream_id.encode(buf);
@@ -75,12 +80,13 @@ impl ManifestBody {
         buf.put_u64(self.timestamp_us);
         self.merkle_root.encode(buf);
         buf.put_u16(self.block_count());
-        buf.put_u32(self.chunk_byte_length);
+        buf.put_u32(self.chunk_byte_length());
         buf.put_u8(self.slicing_matrix_version);
         buf.put_u8(self.layer_block_counts.len() as u8);
         put_reserved(buf, 2);
-        for n in &self.layer_block_counts {
+        for (n, b) in self.layer_block_counts.iter().zip(&self.layer_byte_lengths) {
             buf.put_u16(*n);
+            buf.put_u32(*b);
         }
     }
     fn decode<B: Buf>(buf: &mut B) -> Result<Self> {
@@ -97,8 +103,10 @@ impl ManifestBody {
         let layer_count = get_u8(buf, "Manifest.layer_count")?;
         skip_reserved(buf, 2, "Manifest.reserved2")?;
         let mut layer_block_counts = Vec::with_capacity(layer_count as usize);
+        let mut layer_byte_lengths = Vec::with_capacity(layer_count as usize);
         for _ in 0..layer_count {
             layer_block_counts.push(get_u16(buf, "Manifest.layer_block_count")?);
+            layer_byte_lengths.push(get_u32(buf, "Manifest.layer_byte_length")?);
         }
         let sum: u32 = layer_block_counts.iter().map(|n| *n as u32).sum();
         if sum != block_count as u32 {
@@ -108,6 +116,14 @@ impl ManifestBody {
                 present: sum as usize,
             });
         }
+        let bsum: u64 = layer_byte_lengths.iter().map(|n| *n as u64).sum();
+        if bsum != chunk_byte_length as u64 {
+            return Err(WireError::CountMismatch {
+                context: "Manifest.ChunkByteLength vs LayerByteLength",
+                declared: chunk_byte_length as usize,
+                present: bsum as usize,
+            });
+        }
         Ok(Self {
             stream_id,
             segment,
@@ -115,9 +131,9 @@ impl ManifestBody {
             chunk_count,
             timestamp_us,
             merkle_root,
-            chunk_byte_length,
             slicing_matrix_version,
             layer_block_counts,
+            layer_byte_lengths,
         })
     }
 }
@@ -369,5 +385,191 @@ impl Decode for BlockTransmission {
     fn decode<B: Buf>(buf: &mut B) -> Result<Self> {
         let len = buf.remaining();
         Self::decode_with_len(buf, len)
+    }
+}
+
+/// `STREAM_DESCRIPTOR.ContentType` (App D §D.4.20).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum ContentType {
+    /// fMP4/CMAF media segments; `init_data` is `ftyp`+`moov`.
+    VideoCmaf = 0x01,
+    /// Annex-B; `init_data` is the parameter sets (may be empty).
+    VideoAnnexB = 0x02,
+    /// Audio.
+    Audio = 0x03,
+    /// Bytes with no protocol-known structure.
+    Opaque = 0x7F,
+}
+impl ContentType {
+    fn from_code(c: u8) -> Result<Self> {
+        Ok(match c {
+            0x01 => Self::VideoCmaf,
+            0x02 => Self::VideoAnnexB,
+            0x03 => Self::Audio,
+            0x7F => Self::Opaque,
+            v => {
+                return Err(WireError::InvalidField {
+                    field: "ContentType",
+                    value: v as u64,
+                })
+            }
+        })
+    }
+}
+
+/// `STREAM_DESCRIPTOR.LayerMode`: how layers combine at the decoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum LayerMode {
+    /// Spatial SVC: additive layers of one bitstream.
+    SvcSpatial = 0x01,
+    /// Temporal SVC: additive frame-rate layers.
+    SvcTemporal = 0x02,
+    /// Independent renditions; the highest received is decoded.
+    Simulcast = 0x03,
+    /// Unrelated streams (e.g. video plus audio).
+    Independent = 0x04,
+}
+impl LayerMode {
+    fn from_code(c: u8) -> Result<Self> {
+        Ok(match c {
+            0x01 => Self::SvcSpatial,
+            0x02 => Self::SvcTemporal,
+            0x03 => Self::Simulcast,
+            0x04 => Self::Independent,
+            v => {
+                return Err(WireError::InvalidField {
+                    field: "LayerMode",
+                    value: v as u64,
+                })
+            }
+        })
+    }
+}
+
+/// One layer of a STREAM_DESCRIPTOR:
+/// `[CodecTag 4][Width 2][Height 2][FrameRateMilli 4][BitrateKbps 2][InitLength 2][InitData]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayerDescriptor {
+    /// FourCC (e.g. `avc1`, `vp09`, `av01`, `opus`, `data`).
+    pub codec_tag: [u8; 4],
+    /// Width in pixels (0 if not video).
+    pub width: u16,
+    /// Height in pixels.
+    pub height: u16,
+    /// Frame rate × 1000.
+    pub frame_rate_milli: u32,
+    /// Nominal bitrate.
+    pub bitrate_kbps: u16,
+    /// Initialisation data, ≤ 4096 bytes.
+    pub init_data: Bytes,
+}
+impl LayerDescriptor {
+    /// Maximum initialisation data.
+    pub const MAX_INIT: usize = 4096;
+    fn encoded_len(&self) -> usize {
+        4 + 2 + 2 + 4 + 2 + 2 + self.init_data.len()
+    }
+}
+
+/// STREAM_DESCRIPTOR (0x1F):
+/// `[StreamID 32][DescriptorVersion 4][EffectiveSegmentSeq 4][ContentType 1][LayerMode 1][LayerCount 1][Reserved 1]`
+/// `[LayerDescriptor × LayerCount][Signature 64]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamDescriptor {
+    /// Stream.
+    pub stream_id: StreamId,
+    /// Strictly increasing version.
+    pub version: u32,
+    /// First segment the descriptor applies to.
+    pub effective_segment: SegmentSeq,
+    /// What the bytes are.
+    pub content_type: ContentType,
+    /// How layers combine.
+    pub layer_mode: LayerMode,
+    /// Per layer, lowest first.
+    pub layers: Vec<LayerDescriptor>,
+    /// Source signature over every preceding byte.
+    pub signature: SignatureBytes,
+}
+impl StreamDescriptor {
+    /// Bytes the signature covers.
+    pub fn signable_bytes(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(self.encoded_len() - 64);
+        self.encode_unsigned(&mut v);
+        v
+    }
+    fn encode_unsigned<B: BufMut>(&self, buf: &mut B) {
+        self.stream_id.encode(buf);
+        buf.put_u32(self.version);
+        buf.put_u32(self.effective_segment.0);
+        buf.put_u8(self.content_type as u8);
+        buf.put_u8(self.layer_mode as u8);
+        buf.put_u8(self.layers.len() as u8);
+        put_reserved(buf, 1);
+        for l in &self.layers {
+            buf.put_slice(&l.codec_tag);
+            buf.put_u16(l.width);
+            buf.put_u16(l.height);
+            buf.put_u32(l.frame_rate_milli);
+            buf.put_u16(l.bitrate_kbps);
+            buf.put_u16(l.init_data.len() as u16);
+            buf.put_slice(&l.init_data);
+        }
+    }
+}
+impl Encode for StreamDescriptor {
+    fn encoded_len(&self) -> usize {
+        32 + 4 + 4 + 4 + self.layers.iter().map(|l| l.encoded_len()).sum::<usize>() + 64
+    }
+    fn encode<B: BufMut>(&self, buf: &mut B) {
+        self.encode_unsigned(buf);
+        self.signature.encode(buf);
+    }
+}
+impl Decode for StreamDescriptor {
+    fn decode<B: Buf>(buf: &mut B) -> Result<Self> {
+        let stream_id = StreamId::decode(buf)?;
+        let version = get_u32(buf, "StreamDescriptor.version")?;
+        let effective_segment = SegmentSeq(get_u32(buf, "StreamDescriptor.effective")?);
+        let content_type = ContentType::from_code(get_u8(buf, "StreamDescriptor.content_type")?)?;
+        let layer_mode = LayerMode::from_code(get_u8(buf, "StreamDescriptor.layer_mode")?)?;
+        let n = get_u8(buf, "StreamDescriptor.layer_count")?;
+        skip_reserved(buf, 1, "StreamDescriptor.reserved")?;
+        let mut layers = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let codec_tag = crate::codec::get_array::<4, _>(buf, "LayerDescriptor.codec_tag")?;
+            let width = get_u16(buf, "LayerDescriptor.width")?;
+            let height = get_u16(buf, "LayerDescriptor.height")?;
+            let frame_rate_milli = get_u32(buf, "LayerDescriptor.fps")?;
+            let bitrate_kbps = get_u16(buf, "LayerDescriptor.bitrate")?;
+            let init_len = get_u16(buf, "LayerDescriptor.init_len")? as usize;
+            if init_len > LayerDescriptor::MAX_INIT {
+                return Err(WireError::InvalidField {
+                    field: "LayerDescriptor.init_len",
+                    value: init_len as u64,
+                });
+            }
+            let init_data = Bytes::from(get_vec(buf, init_len, "LayerDescriptor.init_data")?);
+            layers.push(LayerDescriptor {
+                codec_tag,
+                width,
+                height,
+                frame_rate_milli,
+                bitrate_kbps,
+                init_data,
+            });
+        }
+        let signature = SignatureBytes::decode(buf)?;
+        Ok(Self {
+            stream_id,
+            version,
+            effective_segment,
+            content_type,
+            layer_mode,
+            layers,
+            signature,
+        })
     }
 }

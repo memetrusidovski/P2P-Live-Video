@@ -141,42 +141,41 @@ impl Decode for Accepted {
     }
 }
 
-/// DISCONNECT (0x07): `[Sender NodeID 32][Reason 1]`.
+/// DISCONNECT (0x07): `[Sender NodeID 32][Reason 1][TreeID 1][Reserved 2]` (App D §D.4.3b).
 ///
-/// **Implementation extension (ISSUE-059):** a refused tree join is answered with
-/// a DISCONNECT whose reason is one of the `Rejected*` codes; `tree_id` names the
-/// tree so the joiner can correct its passive pool. The extra byte is only present
-/// for rejection reasons, keeping the spec's 33-byte layout for all other reasons.
+/// `tree_id = 0` ends the whole connection; `m > 0` ends only the tree-`m`
+/// relationship, or — with a `Rejected*` reason — declines a `NEIGHBOR(m)` that
+/// never became one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Disconnect {
     /// Sender.
     pub sender: NodeId,
     /// Reason.
     pub reason: DisconnectReason,
-    /// Tree the rejection refers to (rejection reasons only).
-    pub tree_id: Option<TreeId>,
+    /// Scope: `NONE` = whole connection, else one tree.
+    pub tree_id: TreeId,
+}
+impl Disconnect {
+    /// Encoded length.
+    pub const LEN: usize = 36;
 }
 impl Encode for Disconnect {
     fn encoded_len(&self) -> usize {
-        33 + if self.reason.is_rejection() { 1 } else { 0 }
+        Self::LEN
     }
     fn encode<B: BufMut>(&self, buf: &mut B) {
         self.sender.encode(buf);
         buf.put_u8(self.reason as u8);
-        if self.reason.is_rejection() {
-            buf.put_u8(self.tree_id.unwrap_or(TreeId::NONE).0);
-        }
+        buf.put_u8(self.tree_id.0);
+        put_reserved(buf, 2);
     }
 }
 impl Decode for Disconnect {
     fn decode<B: Buf>(buf: &mut B) -> Result<Self> {
         let sender = NodeId::decode(buf)?;
         let reason = DisconnectReason::from_code(get_u8(buf, "Disconnect.reason")?)?;
-        let tree_id = if reason.is_rejection() {
-            Some(TreeId(get_u8(buf, "Disconnect.tree_id")?))
-        } else {
-            None
-        };
+        let tree_id = TreeId(get_u8(buf, "Disconnect.tree_id")?);
+        skip_reserved(buf, 2, "Disconnect.reserved")?;
         Ok(Self {
             sender,
             reason,
@@ -349,6 +348,8 @@ pub enum ManifestSelector {
     AllChunks,
     /// The pending MANIFEST_UPDATE (`0xFE`).
     PendingUpdate,
+    /// The STREAM_DESCRIPTOR in force and any pending one (`0xFD`).
+    Descriptor,
 }
 impl ManifestRequest {
     /// Encoded length.
@@ -364,6 +365,7 @@ impl Encode for ManifestRequest {
             ManifestSelector::Chunk(c) => c,
             ManifestSelector::AllChunks => 0xFF,
             ManifestSelector::PendingUpdate => 0xFE,
+            ManifestSelector::Descriptor => 0xFD,
         });
         put_reserved(buf, 3);
     }
@@ -374,6 +376,7 @@ impl Decode for ManifestRequest {
         let selector = match get_u8(buf, "ManifestRequest.chunk")? {
             0xFF => ManifestSelector::AllChunks,
             0xFE => ManifestSelector::PendingUpdate,
+            0xFD => ManifestSelector::Descriptor,
             c => ManifestSelector::Chunk(c),
         };
         skip_reserved(buf, 3, "ManifestRequest.reserved")?;

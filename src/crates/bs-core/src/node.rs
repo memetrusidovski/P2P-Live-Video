@@ -100,6 +100,12 @@ pub struct Node {
     started_at: Option<Instant>,
     first_ok_chunk: bool,
     manifests_forwarded: HashSet<(u32, u8, PeerAddr)>,
+    /// STREAM_END received: terminate once the playout buffer is drained.
+    ending: bool,
+    /// The verified STREAM_DESCRIPTOR in force (publisher: its own signed copy).
+    descriptor: Option<StreamDescriptor>,
+    /// Children already sent the current descriptor version.
+    descriptor_sent: HashSet<(u32, PeerAddr)>,
     now: Instant,
 }
 
@@ -152,6 +158,9 @@ impl Node {
             started_at: None,
             first_ok_chunk: false,
             manifests_forwarded: HashSet::new(),
+            ending: false,
+            descriptor: None,
+            descriptor_sent: HashSet::new(),
             now: Instant::ZERO,
             cfg,
         }
@@ -298,6 +307,7 @@ impl Node {
             } => self.on_discovered(records, stream_record),
             Command::PublishChunk(chunk) => self.publish_chunk(chunk),
             Command::EndStream => self.end_stream(),
+            Command::SetDescriptor(d) => self.set_descriptor(d),
             Command::Quit => self.quit(),
         }
     }
@@ -622,15 +632,20 @@ impl Node {
         let mut scored: Vec<(PeerRecord, f64, u8, f64)> = Vec::new();
         let mut saturated: Vec<(PeerRecord, f64, u8, f64)> = Vec::new();
         let mut saw_warming = false;
+        let mut saturated_seen = 0usize;
         let n = candidates.len();
         for c in candidates {
             let Some(r) = c.response else { continue };
             match r.tree_state {
                 bs_wire::TreeState::Warming => saw_warming = true,
-                bs_wire::TreeState::Unparented => {}
+                bs_wire::TreeState::Unparented => saturated_seen += 1,
                 bs_wire::TreeState::Serving => {
                     if r.hop >= d_max {
+                        saturated_seen += 1;
                         continue;
+                    }
+                    if r.k_avail == 0 {
+                        saturated_seen += 1;
                     }
                     if r.k_avail > 0 {
                         scored.push((c.record, r.score, r.hop, r.rtt_ms));
@@ -647,7 +662,8 @@ impl Node {
         scored.extend(saturated);
         self.join_stats[tree.index()].saw_warming = saw_warming;
         if scored.is_empty() {
-            self.join_round_failed(tree, n);
+            let _ = n;
+            self.join_round_failed(tree, saturated_seen);
             return;
         }
         self.request_next(tree, scored, 0);
@@ -700,9 +716,13 @@ impl Node {
         self.send(addr, Channel::Control, Frame::Neighbor(f), None);
     }
 
-    fn join_round_failed(&mut self, tree: TreeId, candidates: usize) {
+    /// `saturated` counts candidates that *refused* (saturated / depth) or advertised
+    /// no slots; a round of pure timeouts is a discovery failure, not a shed signal
+    /// (App D §D.4.3b), and does not advance the shed counter.
+    fn join_round_failed(&mut self, tree: TreeId, saturated: usize) {
         let idx = tree.index();
-        if !self.join_stats[idx].saw_warming {
+        let candidates = saturated;
+        if !self.join_stats[idx].saw_warming && saturated > 0 {
             self.join_stats[idx].failed_rounds += 1;
         }
         let failed = self.join_stats[idx].failed_rounds;
@@ -769,7 +789,7 @@ impl Node {
                     let f = Disconnect {
                         sender: self.identity.node_id(),
                         reason: DisconnectReason::Quit,
-                        tree_id: None,
+                        tree_id: id,
                     };
                     self.send(p.addr, Channel::Tree(id), Frame::Disconnect(f), None);
                     self.maybe_close_session(p.addr);
@@ -777,7 +797,7 @@ impl Node {
                         let f = Disconnect {
                             sender: self.identity.node_id(),
                             reason: DisconnectReason::Quit,
-                            tree_id: None,
+                            tree_id: id,
                         };
                         self.send(op.addr, Channel::Tree(id), Frame::Disconnect(f), None);
                         self.maybe_close_session(op.addr);
@@ -876,7 +896,10 @@ impl Node {
     }
 
     fn on_rejected(&mut self, from: PeerAddr, d: &Disconnect) {
-        let Some(tree) = d.tree_id else { return };
+        let tree = d.tree_id;
+        if !tree.is_tree() {
+            return;
+        }
         let idx = tree.index();
         if idx >= self.trees.len() {
             return;
@@ -955,7 +978,7 @@ impl Node {
         let reject = |reason: DisconnectReason| Disconnect {
             sender: NodeId::ZERO,
             reason,
-            tree_id: Some(n.tree_id),
+            tree_id: n.tree_id,
         };
         let verdict: Result<u8, DisconnectReason> =
             if idx >= self.trees.len() || !self.trees[idx].assigned {
@@ -1083,6 +1106,7 @@ impl Node {
     /// push next verify at once (late joiners backfill the rest with
     /// MANIFEST_REQUEST in M3).
     fn send_recent_manifests(&mut self, to: PeerAddr) {
+        self.send_descriptor_to(to);
         let from_seg = SegmentSeq(self.swarm.live_edge.0.saturating_sub(1).max(1));
         for m in self.swarm.manifests_from(from_seg) {
             if self
@@ -1109,6 +1133,98 @@ impl Node {
             self.send_recent_manifests(addr);
             // A pending joiner keeps any old parent until our first block; the
             // ACCEPTED it holds already carries our depth.
+        }
+    }
+
+    /// Push the descriptor in force to one peer, once per version (App D §D.4.20).
+    fn send_descriptor_to(&mut self, to: PeerAddr) {
+        let Some(d) = self.descriptor.clone() else {
+            return;
+        };
+        if self.descriptor_sent.insert((d.version, to)) {
+            self.send(to, Channel::Control, Frame::StreamDescriptor(d), None);
+        }
+    }
+
+    /// Publisher: install a new descriptor and push it down every tree.
+    fn set_descriptor(&mut self, d: StreamDescriptor) {
+        let Some(p) = self.publisher.as_mut() else {
+            return;
+        };
+        let signed = p.set_descriptor(d);
+        self.descriptor = Some(signed);
+        let children: HashSet<PeerAddr> = self
+            .trees
+            .iter()
+            .flat_map(|t| t.children.values().filter(|c| !c.pending).map(|c| c.addr))
+            .collect();
+        for c in children {
+            self.send_descriptor_to(c);
+        }
+        self.store_record();
+    }
+
+    /// A descriptor arrived: verify against the pinned publisher key, keep the
+    /// newest version, forward to children, and hand it to the application once.
+    fn on_descriptor(&mut self, _from: PeerAddr, d: StreamDescriptor) {
+        let Some(pk) = self.publisher_key else { return };
+        if d.stream_id != self.stream_id()
+            || bs_crypto::Verifier::verify(&pk, &d.signable_bytes(), &d.signature).is_err()
+        {
+            self.emit(Event::Note {
+                text: "stream descriptor rejected (signature/stream id)".into(),
+            });
+            return;
+        }
+        if self
+            .descriptor
+            .as_ref()
+            .map(|c| c.version >= d.version)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        self.descriptor = Some(d.clone());
+        let children: HashSet<PeerAddr> = self
+            .trees
+            .iter()
+            .flat_map(|t| t.children.values().filter(|c| !c.pending).map(|c| c.addr))
+            .collect();
+        for c in children {
+            self.send_descriptor_to(c);
+        }
+        self.out.push_back(Output::Descriptor(d));
+    }
+
+    /// Serve manifests or the descriptor from the retained window (App D §D.4.16).
+    fn on_manifest_request(&mut self, from: PeerAddr, r: ManifestRequest) {
+        match r.selector {
+            ManifestSelector::Descriptor => {
+                if let Some(d) = self.descriptor.clone() {
+                    self.send(from, Channel::Control, Frame::StreamDescriptor(d), None);
+                }
+            }
+            ManifestSelector::Chunk(c) => {
+                if let Some(m) = self
+                    .swarm
+                    .manifests_from(r.segment)
+                    .into_iter()
+                    .find(|m| m.body.segment == r.segment && m.body.chunk_index == c)
+                {
+                    self.send(from, Channel::Control, Frame::Manifest(m), None);
+                }
+            }
+            ManifestSelector::AllChunks => {
+                for m in self
+                    .swarm
+                    .manifests_from(r.segment)
+                    .into_iter()
+                    .filter(|m| m.body.segment == r.segment)
+                {
+                    self.send(from, Channel::Control, Frame::Manifest(m), None);
+                }
+            }
+            ManifestSelector::PendingUpdate => {}
         }
     }
 
@@ -1226,8 +1342,11 @@ impl Node {
             parent: p.node_id,
             reason: reason.into(),
         });
-        self.trees[idx].repairing = true;
         self.maybe_close_session(p.addr);
+        if self.ending {
+            return; // the stream is over; nothing to repair
+        }
+        self.trees[idx].repairing = true;
         if self.trees[idx].wants_parent() {
             self.begin_probing(tree);
         }
@@ -1269,11 +1388,11 @@ impl Node {
                 if d.reason.is_rejection() {
                     self.on_rejected(from, &d);
                 } else {
-                    // A DISCONNECT on a tree stream ends only that tree's relationship
-                    // (drain expiry); on the control stream it ends the whole session.
-                    let scope = match channel {
-                        Channel::Tree(t) => Some(t),
-                        _ => None,
+                    // App D §D.4.3b: TreeID 0 ends the whole connection, m > 0 only tree m.
+                    let scope = if d.tree_id.is_tree() {
+                        Some(d.tree_id)
+                    } else {
+                        None
                     };
                     self.on_disconnect(from, d, scope);
                 }
@@ -1283,13 +1402,18 @@ impl Node {
             Frame::BlockProof(bp) => self.on_block_proof(from, channel, bp),
             Frame::RaptorQSymbol(s) => self.on_symbol(from, s),
             Frame::StreamEnd(e) => self.on_stream_end(from, e),
+            Frame::StreamDescriptor(d) => self.on_descriptor(from, d),
+            Frame::ManifestRequest(r) => self.on_manifest_request(from, r),
             Frame::Join(_)
             | Frame::ChokeState(_)
-            | Frame::ManifestRequest(_)
             | Frame::PullRequest(_)
             | Frame::ManifestUpdate(_)
             | Frame::BlockTransmission(_) => {
                 // M3.
+            }
+            Frame::RegisterPeer(_) | Frame::GetPeers(_) => {
+                // Discovery frames are answered by the guardian in the driver (M2) or the
+                // DHT module (M3), never by the peer core.
             }
             Frame::Raw { .. } => {}
         }
@@ -1461,7 +1585,13 @@ impl Node {
         for c in children {
             self.send(c, Channel::Control, Frame::StreamEnd(e.clone()), None);
         }
-        self.set_state(Lifecycle::Terminated);
+        // The overlay role ends now; playback finishes what is buffered. Ch1 §1.3.1 says
+        // TERMINATED "immediately", read here as "stop relaying": a viewer that discards
+        // 3 s of verified video would lose the end of every stream.
+        self.ending = true;
+        if self.swarm.next_deadline().is_none() {
+            self.set_state(Lifecycle::Terminated);
+        }
     }
 
     fn on_manifest(&mut self, from: PeerAddr, m: Manifest) {
@@ -1548,7 +1678,7 @@ impl Node {
                     let f = Disconnect {
                         sender: self.identity.node_id(),
                         reason: DisconnectReason::Choke,
-                        tree_id: None,
+                        tree_id: tree,
                     };
                     self.send(op.addr, Channel::Tree(tree), Frame::Disconnect(f), None);
                     self.maybe_close_session(op.addr);
@@ -1810,7 +1940,7 @@ impl Node {
             let f = Disconnect {
                 sender: self.node_id(),
                 reason: DisconnectReason::Quit,
-                tree_id: None,
+                tree_id: TreeId::NONE,
             };
             self.send(p, Channel::Control, Frame::Disconnect(f), None);
             self.out.push_back(Output::CloseSession(p));
@@ -1903,6 +2033,12 @@ impl Node {
             }
             self.swarm.gc(now);
         }
+        if self.ending
+            && self.swarm.next_deadline().is_none()
+            && self.state != Lifecycle::Terminated
+        {
+            self.set_state(Lifecycle::Terminated);
+        }
     }
 
     fn liveness(&mut self) {
@@ -1947,7 +2083,7 @@ impl Node {
             let f = Disconnect {
                 sender: self.identity.node_id(),
                 reason: DisconnectReason::Displaced,
-                tree_id: None,
+                tree_id: tree,
             };
             self.send(addr, Channel::Tree(tree), Frame::Disconnect(f), None);
             self.emit(Event::ChildRemoved {

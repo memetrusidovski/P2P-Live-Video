@@ -494,7 +494,7 @@ fn join_rejections_carry_reason_and_tree() {
         unreachable!()
     };
     assert_eq!(d.reason, DisconnectReason::RejectedNotAssigned);
-    assert_eq!(d.tree_id, Some(TreeId(2)));
+    assert_eq!(d.tree_id, TreeId(2));
     // The publisher's single tree-1 slot is held by the relay.
     h.inject(p, stranger, Channel::Control, nb(1, NodeClass::Leaf));
     let d = sends_of(&h, p, FrameType::DISCONNECT)
@@ -505,7 +505,7 @@ fn join_rejections_carry_reason_and_tree() {
         unreachable!()
     };
     assert_eq!(d.reason, DisconnectReason::RejectedSaturated);
-    assert_eq!(d.tree_id, Some(TreeId(1)));
+    assert_eq!(d.tree_id, TreeId(1));
     assert!(sends_of(&h, p, FrameType::ACCEPTED)
         .iter()
         .all(|(_, to, _, _)| *to != stranger));
@@ -628,9 +628,10 @@ fn stream_end_propagates_and_forgeries_are_ignored() {
         Lifecycle::Active,
         "forged STREAM_END ignored"
     );
-    // The real thing.
+    // The real thing. Children stop relaying at once but drain their playout
+    // buffers (delta_buffer = 3 s) before reporting TERMINATED.
     h.feed(p, Input::Cmd(Command::EndStream));
-    h.run_for(secs(1.0));
+    h.run_for(secs(4.5));
     assert_eq!(h.node(p).state(), Lifecycle::Terminated);
     assert!(sends_of(&h, p, FrameType::STREAM_END)
         .iter()

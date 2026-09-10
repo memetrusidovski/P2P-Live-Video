@@ -12,8 +12,10 @@ use crate::ladder::Ladder;
 pub const CHUNK_MS: u32 = 250;
 
 /// Per-layer byte sizes for one chunk such that every layer **except the last**
-/// is a whole number of 16 KB blocks (at least one) and the last layer takes the
-/// remainder of the ladder's total. The manifest carries only the chunk's total
+/// fills a whole number of 16 KB blocks (at least one) and the last layer takes the
+/// remainder of the ladder's total. Not required for correctness (the manifest's
+/// `LayerByteLength` strips padding); it keeps padding overhead at zero for the
+/// synthetic and file sources (see ISSUE-062). The manifest carries only the chunk's total
 /// byte length, so a consumer can recover exact layer boundaries only if the
 /// non-final layers carry no padding; this rule guarantees that for opaque
 /// payloads (see [`crate::sink::ChunkAssembler`] and ISSUE-060).
