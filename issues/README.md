@@ -12,6 +12,7 @@ The canonical specification is [`../protocol/`](../protocol/). When an issue is 
 |---|---|---|---|
 | [ISSUE-061](ISSUE-061-relay-of-tree-cannot-displace-pure-subscriber.md) | High | Ch1 §1.2.2, §1.3 | A relay assigned to tree m has no admission priority in m; a saturated parent full of pure subscribers deadlocks the tree's growth. Found by the M1 simulator at cold start; addendum on the sequential-handover deadlock |
 | [ISSUE-062](ISSUE-062-per-layer-block-padding-not-in-overhead-factor.md) | Medium | Ch4 §4.1.1, Ch1 §1.3, App B | Per-layer 16 KB block padding costs 10–15 % at 250 ms chunks and is not in Ω, so slot counts are optimistic by that fraction. Found when four framing bytes per layer took the 100-relay baseline from 0.02 % to 31 % starvation |
+| [ISSUE-063](ISSUE-063-unbounded-warming-exemption-livelocks-joiners.md) | Medium | Ch1 §1.2.2, Ch1 §1.1.5 §5.3, App D §D.4.7 | The WARMING exemption from the shed rule has no bound; at capacity some candidate is always warming, so joiners probe forever and never shed. Found by the lossy-links simulator gate; implementation bounds it to 4 consecutive rounds |
 
 Both were filed from the reference implementation in [`../src/`](../src/) (2026-09-09/10). ISSUE-001 through ISSUE-060 are closed; the reasoning is in [`../solutions/`](../solutions/).
 

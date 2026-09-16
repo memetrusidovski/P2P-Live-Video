@@ -269,14 +269,95 @@ pub fn verdict(sim: &mut Sim, scenario_path: &Path, out: &Path) -> Verdict {
         "no_session_drops".into(),
         serde_json::json!(k.no_session_drops),
     );
+    facts.insert(
+        "no_session_by_type".into(),
+        serde_json::json!(k.no_session_by_type),
+    );
     let (_, _, qdrops, ldrops) = sim.network.totals();
     facts.insert("queue_drops".into(), serde_json::json!(qdrops));
+    {
+        let top: Vec<serde_json::Value> = sim
+            .network
+            .top_queue_drops(6)
+            .into_iter()
+            .map(|(addr, drops, up)| {
+                let n = nodes.iter().position(|x| x.addr == addr);
+                let detail = n.map(|i| {
+                    let x = &nodes[i];
+                    serde_json::json!({
+                        "node": i, "label": x.label, "upload_kbps": up, "drops": drops, "class": format!("{:?}", x.node.node_class()),
+                        "trees": x.node.trees().iter().map(|t| serde_json::json!({"tree": t.id.0, "children": t.children.len(), "k_v": t.k_v, "assigned": t.assigned})).collect::<Vec<_>>(),
+                        "active_set": x.node.active_set_len(),
+                    })
+                });
+                detail.unwrap_or(serde_json::json!({"addr": addr.to_string(), "drops": drops}))
+            })
+            .collect();
+        facts.insert("top_queue_drops".into(), serde_json::json!(top));
+    }
     facts.insert("loss_drops".into(), serde_json::json!(ldrops));
     facts.insert(
         "oracle_queries".into(),
         serde_json::json!(sim.oracle.queries),
     );
     facts.insert("events_logged".into(), serde_json::json!(sim.log.lines));
+    facts.insert(
+        "backfill_played".into(),
+        serde_json::json!(k.nodes.iter().map(|n| n.backfill_played).sum::<u64>()),
+    );
+    facts.insert(
+        "backfill_ok".into(),
+        serde_json::json!(k.nodes.iter().map(|n| n.backfill_ok).sum::<u64>()),
+    );
+    facts.insert(
+        "pulls_served".into(),
+        serde_json::json!(k.nodes.iter().map(|n| n.pulls_served).sum::<u64>()),
+    );
+    facts.insert(
+        "pulls_refused".into(),
+        serde_json::json!(k.nodes.iter().map(|n| n.pulls_refused).sum::<u64>()),
+    );
+    facts.insert(
+        "pulls_unheld".into(),
+        serde_json::json!(k.nodes.iter().map(|n| n.pulls_unheld).sum::<u64>()),
+    );
+    {
+        let lookups: u64 = k.nodes.iter().map(|n| n.dht_lookups).sum();
+        let hops: u64 = k.nodes.iter().map(|n| n.dht_hops).sum();
+        let ms: u64 = k.nodes.iter().map(|n| n.dht_lookup_ms).sum();
+        let queried: u64 = k.nodes.iter().map(|n| n.dht_queried).sum();
+        let mean = |x: u64| {
+            if lookups > 0 {
+                x as f64 / lookups as f64
+            } else {
+                0.0
+            }
+        };
+        facts.insert("dht_lookups".into(), serde_json::json!(lookups));
+        facts.insert("dht_hops_mean".into(), serde_json::json!(mean(hops)));
+        facts.insert("dht_lookup_ms_mean".into(), serde_json::json!(mean(ms)));
+        facts.insert("dht_queried_mean".into(), serde_json::json!(mean(queried)));
+        facts.insert(
+            "dht_rpc_served".into(),
+            serde_json::json!(k.nodes.iter().map(|n| n.dht_served).sum::<u64>()),
+        );
+        facts.insert(
+            "dht_rpc_served_max".into(),
+            serde_json::json!(k.nodes.iter().map(|n| n.dht_served).max().unwrap_or(0)),
+        );
+        facts.insert(
+            "dht_get_peers_served".into(),
+            serde_json::json!(k.nodes.iter().map(|n| n.dht_get_peers_served).sum::<u64>()),
+        );
+    }
+    facts.insert(
+        "pulls_sent".into(),
+        serde_json::json!(k.nodes.iter().map(|n| n.pulls_sent).sum::<u64>()),
+    );
+    facts.insert(
+        "blocks_pulled".into(),
+        serde_json::json!(k.nodes.iter().map(|n| n.blocks_pulled).sum::<u64>()),
+    );
     facts.insert(
         "soft_violations".into(),
         serde_json::json!(sim.invariants.soft_counts()),
@@ -391,6 +472,7 @@ pub fn write_reports(sim: &Sim, v: &Verdict, out: &Path) -> anyhow::Result<()> {
                     "parent": t.parent.as_ref().map(|p| p.node_id.short()), "children": t.children.len(),
                     "verified_segments": t.verified_segments, "live_edge": t.live_edge.0,
                 })).collect::<Vec<_>>(),
+                "dht_contacts": n.node.dht_contacts(), "dht_registrations": n.node.dht_registrations(), "dht_rpc_served": n.node.dht_rpc_served(),
             })
         })
         .collect();

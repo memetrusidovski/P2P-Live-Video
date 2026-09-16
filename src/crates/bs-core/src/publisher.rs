@@ -17,6 +17,8 @@ pub struct Publisher {
     pub matrix: SlicingMatrix,
     /// Record version, bumped on every republish.
     pub record_version: u32,
+    /// Registration sampling exponent `s` published in the record (Ch2 §2.3.2).
+    pub sample_log2: u8,
     /// Last segment emitted.
     pub last_segment: SegmentSeq,
     /// Manifest root of the last chunk.
@@ -37,6 +39,7 @@ impl Publisher {
             ladder,
             matrix,
             record_version: 0,
+            sample_log2: 0,
             last_segment: SegmentSeq::NONE,
             last_root: Hash::ZERO,
             last_ts_us: 0,
@@ -70,7 +73,7 @@ impl Publisher {
             publisher_pubkey: self.identity.public_key(),
             manifest_version: self.record_version,
             slicing_mode: SlicingMode::SvcSpatial,
-            register_sample_log2: 0,
+            register_sample_log2: self.sample_log2,
             swarm_size,
             relay_count,
             live_edge_segment: self.last_segment,

@@ -85,10 +85,10 @@ Outputs per scenario under `results/<name>/`:
 
 | File | Content |
 |---|---|
-| `verdict.json` | `passed`, per-KPI value / threshold / pass, invariant violations, seed, `repro` |
+| `verdict.json` | `passed`, per-KPI value / threshold / pass, invariant violations, seed, `repro`, and `facts` (counters that are not gates: `queue_drops`, `top_queue_drops` with the worst hosts' class, uplink and per-tree fan-out, `pulls_sent/served/refused/unheld`, `backfill_played/ok`, `no_session_by_type`, `dht_lookups`, `dht_hops_mean`, `dht_lookup_ms_mean`, `dht_rpc_served(_max)`, membership set sizes) |
 | `kpis.json` | PSR, SJL, CDO, mean and max depth per tree, repair-time distribution, bytes by frame type, output-hash equality per node |
 | `events.jsonl` | one structured event per line: `t_us`, `node`, `kind`, fields |
-| `topology.json` | forest snapshots at configured times |
+| `topology.json` | forest snapshots at configured times, plus per node `dht_contacts`, `dht_registrations` (guardian load) and `dht_rpc_served`. Set `discovery = "oracle"` in a scenario to run the M1 oracle instead of the DHT and compare |
 
 Invariants are checked after every simulated event. A violation halts the run
 and the verdict records the node, tree, segment and the last 20 events on that
@@ -109,7 +109,9 @@ events in between. It turns "PSR was 0.4 percent" into a specific sequence of
 events.
 
 Every scenario carries a `seed`; the verdict repeats it and the `repro` command
-re-runs that exact scenario with that seed.
+re-runs that exact scenario with that seed. Two runs with the same seed must produce
+an identical verdict; a difference is itself a bug (a `HashMap` iteration order leaking
+into a decision is the usual cause, and it happened once on 2026-09-10).
 
 ## Level 5: real network
 

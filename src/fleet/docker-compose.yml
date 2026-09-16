@@ -10,12 +10,17 @@ services:
     cap_add: [NET_ADMIN]
     environment:
       BS_ROLE: publisher
+      BS_RUN_ID: "${BS_RUN_ID:-run}"
       BS_PORT: "4000"
       BS_FILE: /media/sample.mp4
       BS_MAX_BYTES: "${BS_MAX_BYTES:-}"
       BS_START_DELAY_S: "${BS_START_DELAY_S:-8}"
+      BS_INGEST: "${BS_INGEST:-file}"
+      BS_RENDITIONS: "${BS_RENDITIONS:-360p:800,720p:2500}"
       BS_SEED: "${BS_SEED:-1}"
       BS_NETEM_PROFILE: "${BS_NETEM_PROFILE:-clean}"
+    ports:
+      - "8079:8080"
     volumes:
       - ./media:/media:ro
       - ./netem.sh:/usr/local/bin/netem.sh:ro
@@ -29,6 +34,7 @@ services:
     cap_add: [NET_ADMIN]
     environment:
       BS_ROLE: viewer
+      BS_RUN_ID: "${BS_RUN_ID:-run}"
       BS_BOOTSTRAP: publisher:4000
       BS_SEED: "${BS_SEED:-1}"
       BS_EXPECT_HASH: "${BS_EXPECT_HASH:-}"
@@ -36,6 +42,9 @@ services:
       BS_CLASS: "${BS_CLASS:-relay}"
       BS_UPLOAD_KBPS: "${BS_UPLOAD_KBPS:-20000}"
       BS_NETEM_PROFILE: "${BS_NETEM_PROFILE:-clean}"
+    ports:
+      # one host port per replica: viewer N is reachable at localhost:80(80+N)
+      - "8080-8199:8080"
     volumes:
       - ./netem.sh:/usr/local/bin/netem.sh:ro
       - ./profiles:/profiles:ro

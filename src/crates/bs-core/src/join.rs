@@ -92,4 +92,7 @@ pub struct JoinStats {
     pub rounds: u32,
     /// Whether the last round saw a WARMING candidate (round does not count).
     pub saw_warming: bool,
+    /// Consecutive rounds exempted from the shed counter by a WARMING candidate.
+    /// Bounded by `Params::warming_exempt_rounds` (ISSUE-063).
+    pub warming_rounds: u32,
 }

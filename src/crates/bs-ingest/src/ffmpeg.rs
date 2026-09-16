@@ -85,6 +85,7 @@ enum Ev {
 
 struct Rendition {
     init: Option<Bytes>,
+    init_sent: bool,
     queue: VecDeque<Bytes>,
     ended: bool,
     skipped: u64,
@@ -99,6 +100,10 @@ pub struct FfmpegSource {
     _children: Vec<Child>,
     /// Fragments emitted per rendition.
     pub emitted: Vec<u64>,
+    /// Frame rate used for every rendition.
+    fps: u32,
+    /// The rendition specs, in layer order.
+    specs: Vec<RenditionSpec>,
 }
 
 /// Detect the frame rate of `input` with ffprobe.
@@ -150,10 +155,16 @@ impl FfmpegSource {
             let mut cmd = Command::new("ffmpeg");
             cmd.args(["-hide_banner", "-loglevel", "error", "-re", "-i"])
                 .arg(&input)
-                // Audio is dropped in every rendition: an audio track in rendition 0
-                // alone would need its own fragment cadence and codec string handling.
+                // Every rendition carries its own AAC audio track, so switching
+                // renditions never changes the set of tracks (MSE type
+                // `video/mp4; codecs="avc1.…,mp4a.40.2"`).
                 .args([
-                    "-an",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "96k",
+                    "-ac",
+                    "2",
                     "-c:v",
                     "libx264",
                     "-preset",
@@ -226,10 +237,13 @@ impl FfmpegSource {
         let n = renditions.len();
         Ok(Self {
             ladder: RenditionSpec::ladder(&renditions),
+            fps,
+            specs: renditions.clone(),
             rx,
             rend: (0..n)
                 .map(|_| Rendition {
                     init: None,
+                    init_sent: false,
                     queue: VecDeque::new(),
                     ended: false,
                     skipped: 0,
@@ -296,9 +310,20 @@ impl FfmpegSource {
             let mut recs = Vec::new();
             match r.queue.pop_front() {
                 Some(media) => {
-                    if chunk_index == 0 {
+                    // The initialisation segment rides the first chunk only; from then
+                    // on the STREAM_DESCRIPTOR (App D §D.4.20) carries it to joiners.
+                    if !r.init_sent {
                         if let Some(init) = &r.init {
                             recs.push(Record::new(RecordType::Init, init.clone()));
+                            let meta = format!(
+                                r#"{{"fps":{},"height":{},"kbps":{},"label":"{}"}}"#,
+                                self.fps,
+                                self.specs[i].height,
+                                self.specs[i].kbps,
+                                self.specs[i].label
+                            );
+                            recs.push(Record::new(RecordType::Meta, meta.into_bytes()));
+                            r.init_sent = true;
                         }
                     }
                     recs.push(Record::new(RecordType::Media, media));

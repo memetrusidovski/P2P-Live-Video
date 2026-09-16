@@ -48,6 +48,21 @@ Two independent parts.
 
 Either way, add `LayerByteLength` to the manifest: without it a consumer cannot strip a middle layer's padding (the implementation currently prefixes each layer with its length inside the payload, which is what triggered this ticket; see the ISSUE-060 addendum).
 
+## Addendum: per-symbol framing is also under-counted
+
+$f_{\text{frame}} = 0.03$ (App B) is meant to cover framing on media bytes. On the wire each 1024 B `RAPTORQ_SYMBOL` carries the 4-byte frame header plus 8 bytes of segment/SBN/ESI and rides a QUIC datagram in a UDP/IP packet: roughly $12 + 48$–$60$ bytes, i.e. **$5.9$–$7\%$** of the symbol, before the per-block `BLOCK_PROOF` ($\approx 140$ B per 16 KB block, $0.9\%$). Measured in the simulator with a 60-byte per-packet overhead, a relay at $K_v$ children pushes $\approx 1.19\times$ the media bitrate against an $\Omega$ of $1.094$. While the PULL reserve $r_{\text{pull}} = 0.10$ was unused this passed unnoticed; once pulls consume it (Ch4 §4.3), a full relay's uplink runs at $\approx 103$–$110\%$ and its egress queue drops symbols — 27,000 in the 100-node flash-crowd scenario. Proposed: define $f_{\text{frame}}$ from the symbol size and the transport's per-packet overhead ($\lceil (h_{\text{udp/ip/quic}} + 12) / T_{\text{symbol}} \rceil$, $\approx 0.06$ at $T = 1024$), and state that block padding (above) and `BLOCK_PROOF` are charged on top. The implementation uses $0.06$ meanwhile.
+
 ## Effort
 
 Part 1: small (one formula or one sentence about `BitrateKbps`, one App B row). Part 2: medium (manifest layout, block-to-tree rule, PoU bitmap semantics).
+
+## Addendum (2026-09-15): App B and Ch1 disagree on $f_{\text{frame}}$
+
+Ch1 §1.2 §1.3 states $f_{\text{frame}} = 0.085$ and its worked $\Omega_v = 1.15$ at the parity floor
+is consistent with that value ($(1 + 1/16)(1 + 0.085) = 1.153$). Appendix B still lists $0.03$. The
+implementation follows Ch1 (`Params::default().f_frame = 0.085`); the simulator's measured
+per-symbol framing is $6$–$7\%$, so the difference is the only budget the control plane
+(bitfields, gossip, proofs, heartbeats) has on a relay whose PULL reserve is fully spent. At
+$0.06$ the lossy and churn gates showed egress-queue drops on relays allocated to the last slot.
+App B should be corrected to $0.085$.
+

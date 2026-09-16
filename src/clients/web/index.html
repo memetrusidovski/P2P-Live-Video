@@ -34,6 +34,10 @@
       <tr><td>playing rendition</td><td id="s-layer">-</td></tr>
       <tr><td>chunks played / starved</td><td id="s-chunks">-</td></tr>
       <tr><td>first chunk</td><td id="s-first">-</td></tr>
+      <tr><td>role / node</td><td id="s-role">-</td></tr>
+      <tr><td>bytes delivered</td><td id="s-bytes">-</td></tr>
+      <tr><td>running blake3</td><td id="s-hash">-</td></tr>
+      <tr><td>blocks rejected / parents lost</td><td id="s-integrity">-</td></tr>
       <tr><td>buffered</td><td id="s-buf">-</td></tr>
       <tr><td>codec</td><td id="s-codec">-</td></tr>
       <tr><td>max rendition</td><td><select id="cap"><option value="99">auto (highest)</option></select></td></tr>
@@ -70,9 +74,29 @@
     return 'avc1.64001f';
   }
 
+  function hasBox(init, tag) {
+    for (let i = 0; i + 4 <= init.length; i++) {
+      if (init[i] === tag.charCodeAt(0) && init[i+1] === tag.charCodeAt(1) && init[i+2] === tag.charCodeAt(2) && init[i+3] === tag.charCodeAt(3)) return true;
+    }
+    return false;
+  }
+
+  let descriptor = null;
+  function onDescriptor(d) {
+    descriptor = d;
+    const sel = $('cap');
+    while (sel.options.length > 1) sel.remove(1);
+    (d.layers || []).forEach((l, i) => {
+      const o = document.createElement('option'); o.value = i;
+      o.textContent = `${i}: ${l.height ? l.height + 'p' : l.codec} ${l.kbps} kbps`;
+      sel.appendChild(o);
+    });
+    log(`descriptor v${d.version}: ${d.content_type} ${d.layer_mode}, ${(d.layers || []).length} layers`);
+  }
+
   function ensureSource(init) {
     if (ms) return true;
-    codec = avc1FromInit(init);
+    codec = avc1FromInit(init) + (hasBox(init, 'mp4a') ? ',mp4a.40.2' : '');
     const type = `video/mp4; codecs="${codec}"`;
     $('s-codec').textContent = codec + (MediaSource.isTypeSupported(type) ? '' : ' (unsupported)');
     if (!MediaSource.isTypeSupported(type)) { log('codec unsupported: ' + type); return false; }
@@ -131,7 +155,7 @@
     if (best !== currentLayer) {
       queue.push(init);
       currentLayer = best;
-      $('s-layer').textContent = `layer ${best} of ${layers}`;
+      $('s-layer').textContent = descriptor && descriptor.layers[best] ? `${best}: ${descriptor.layers[best].height}p ${descriptor.layers[best].kbps} kbps` : `layer ${best} of ${layers}`;
       log(`switch to layer ${best}`);
     }
     queue.push(b.media.get(best));
@@ -174,11 +198,16 @@
     $('s-depth').textContent = (s.depth || []).map(d => d === 255 ? '-' : d).join(' / ');
     $('s-chunks').innerHTML = `${s.played} / <span class="${s.starved ? 'warn' : 'ok'}">${s.starved}</span>`;
     $('s-first').textContent = s.first_chunk_s != null ? s.first_chunk_s.toFixed(2) + ' s' : '-';
+    $('s-role').textContent = (s.role || '-') + ' ' + (s.node_id || '').slice(0, 12) + (s.descriptor_version ? ' · descriptor v' + s.descriptor_version : '');
+    $('s-bytes').textContent = (s.bytes || 0).toLocaleString();
+    $('s-hash').textContent = s.hash_so_far ? s.hash_so_far.slice(0, 24) + '…' : '-';
+    $('s-integrity').textContent = (s.blocks_rejected || 0) + ' / ' + (s.parent_lost || 0) + (s.chunks_ok != null ? '   (chunks ok ' + s.chunks_ok + ')' : '');
+    if (s.role === 'publisher') { document.getElementById('v').style.display = 'none'; }
     if (s.layers && s.layers !== layers) {
       layers = s.layers;
       const sel = $('cap');
       while (sel.options.length > 1) sel.remove(1);
-      for (let l = 0; l < layers; l++) { const o = document.createElement('option'); o.value = l; o.textContent = `layer ${l}`; sel.appendChild(o); }
+      if (!descriptor) for (let l = 0; l < layers; l++) { const o = document.createElement('option'); o.value = l; o.textContent = `layer ${l}`; sel.appendChild(o); }
     }
   }
 
@@ -190,7 +219,7 @@
     ws.onerror = () => {};
     ws.onmessage = ev => {
       if (typeof ev.data === 'string') {
-        try { const m = JSON.parse(ev.data); if (m.type === 'hello') { layers = m.layers; onStatus({ layers }); } else onStatus(m); } catch (e) {}
+        try { const m = JSON.parse(ev.data); if (m.type === 'hello') { layers = m.layers; onStatus({ layers }); } else if (m.type === 'descriptor') { onDescriptor(m.descriptor); } else onStatus(m); } catch (e) {}
       } else onBinary(ev.data);
     };
   }

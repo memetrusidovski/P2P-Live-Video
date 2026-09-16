@@ -94,6 +94,23 @@ fn arb_manifest_body() -> impl Strategy<Value = ManifestBody> {
         })
 }
 
+fn arb_peer_record() -> impl Strategy<Value = PeerRecord> {
+    (
+        arb_node_id(),
+        arb_class(),
+        any::<u8>(),
+        arb_flags(),
+        arb_addr(),
+    )
+        .prop_map(|(n, c, t, f, a)| PeerRecord {
+            node_id: n,
+            node_class: c,
+            assigned_trees: TreeSet(t),
+            flags: f,
+            addr: a,
+        })
+}
+
 fn arb_frame() -> impl Strategy<Value = Frame> {
     prop_oneof![
         (arb_vb(), any::<[u8; 32]>()).prop_map(|(v, s)| Frame::Ping(Ping {
@@ -282,6 +299,51 @@ fn arb_frame() -> impl Strategy<Value = Frame> {
                     data: Bytes::from(d),
                 })
             ),
+        (
+            any::<u32>(),
+            0u8..16,
+            prop::collection::vec(any::<bool>(), 1..64)
+        )
+            .prop_map(|(s, c, held)| {
+                Frame::BufferStateBitfield(BufferStateBitfield::from_flags(
+                    SegmentSeq(s),
+                    BlockIndex::new(c, 0).unwrap(),
+                    &held,
+                ))
+            }),
+        (arb_peer_record(), any::<u8>(), any::<u8>()).prop_map(|(o, ttl, pr)| {
+            Frame::ForwardJoin(ForwardJoin {
+                origin: o,
+                ttl,
+                pr_gossip: pr,
+            })
+        }),
+        (
+            arb_node_id(),
+            any::<u8>(),
+            any::<u8>(),
+            prop::collection::vec(arb_peer_record(), 0..9)
+        )
+            .prop_map(|(o, ttl, w, r)| Frame::Shuffle(Shuffle {
+                origin: o,
+                ttl,
+                wanted_trees: TreeSet(w),
+                records: r
+            })),
+        (
+            arb_node_id(),
+            any::<u32>(),
+            any::<u8>(),
+            prop::collection::vec(arb_peer_record(), 0..9),
+            arb_hash()
+        )
+            .prop_map(|(n, seq, w, r, h)| Frame::GossipExchange(GossipExchange {
+                sender: n,
+                sequence: seq,
+                wanted_trees: TreeSet(w),
+                records: r,
+                hmac: h
+            })),
     ]
 }
 

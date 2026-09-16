@@ -203,6 +203,41 @@ impl Invariants {
                 );
             }
             self.live_edge_prev.insert(i, le);
+            // DHT: only reachable relay-class contacts live in k-buckets (Ch2 §2.3.2 rule 1).
+            for c in n.node.dht_contact_records() {
+                if c.node_class != bs_wire::NodeClass::Relay
+                    || c.flags.reachability == bs_wire::Reachability::Symmetric
+                {
+                    self.violation(
+                        now,
+                        i,
+                        "dht_contact_class",
+                        format!(
+                            "routing table holds {:?} {:?} contact {}",
+                            c.node_class,
+                            c.flags.reachability,
+                            c.node_id.short()
+                        ),
+                        true,
+                        log,
+                    );
+                }
+            }
+            // HyParView: the Active Set never exceeds its target (Ch3 §3.1.3 hard cap).
+            if n.node.active_set_len() > n.node.active_set_target() {
+                self.violation(
+                    now,
+                    i,
+                    "active_set_cap",
+                    format!(
+                        "active set {} > target {}",
+                        n.node.active_set_len(),
+                        n.node.active_set_target()
+                    ),
+                    false,
+                    log,
+                );
+            }
             for t in n.node.trees() {
                 // K_avail never exceeds K_v (children ≤ K_v) — the source may exceed
                 // only via the base-layer reserve (M3), so it is hard for everyone in M1.
@@ -264,14 +299,16 @@ impl Invariants {
                             }
                         }
                     }
-                    // Depth bound.
+                    // Depth bound: propagated depth may exceed D_max while a branch unwinds
+                    // (Ch1 §1.2.2 Depth Propagation drains it); admission above D_max is the
+                    // hard rule, checked on ParentAttached.
                     if t.depth != u8::MAX && t.depth > self.d_max {
                         self.violation(
                             now,
                             i,
-                            "depth_bound",
+                            "depth_bound_propagated",
                             format!("depth {} > D_max in tree {}", t.depth, t.id),
-                            true,
+                            false,
                             log,
                         );
                     }

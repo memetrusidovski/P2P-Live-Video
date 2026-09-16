@@ -59,6 +59,7 @@ async fn publisher_and_two_viewers_stream_a_file_byte_exact() {
         duration_s: Some(30.0),
         start_delay_s: 2.0,
         result_path: None,
+        player: None,
     })
     .await
     .expect("publisher starts");
@@ -86,6 +87,7 @@ async fn publisher_and_two_viewers_stream_a_file_byte_exact() {
             duration_s: Some(25.0),
             start_delay_s: 0.0,
             result_path: None,
+            player: None,
         })
         .await
         .expect("viewer starts");

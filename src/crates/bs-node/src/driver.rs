@@ -14,18 +14,15 @@ use bs_core::{
     Channel, Command, Event, Input, Instant, Lifecycle, Node, NodeConfig, Output, Params, Role,
 };
 use bs_crypto::pow::Difficulty;
-use bs_crypto::Signer;
 use bs_media::source::Source;
 use bs_media::{FileSource, Ladder, LayeredChunk, SyntheticSource};
-use bs_wire::frames::{GetPeers, GetPeersFrame, RegisterPeer};
-use bs_wire::{Frame, FrameType, NodeClass, NodeId, StreamId, TreeSet, WireAddr};
+use bs_wire::{Frame, FrameType, NodeClass, NodeId, StreamId};
 use bytes::{Buf, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::guardian::Guardian;
 use crate::tls;
 use crate::transport::{DemuxSocket, PlainDatagram};
 use quinn::AsyncUdpSocket as _;
@@ -105,6 +102,8 @@ pub struct RunConfig {
     pub start_delay_s: f64,
     /// Where to write result.json.
     pub result_path: Option<PathBuf>,
+    /// Serve the player page / status API here (either role).
+    pub player: Option<SocketAddr>,
 }
 
 /// What a run produced.
@@ -150,7 +149,7 @@ pub struct RunReport {
     pub source_hash: Option<String>,
     /// Frames sent by type.
     pub sent: HashMap<String, u64>,
-    /// Peers registered at the guardian (publisher).
+    /// Registrations this node holds as a DHT guardian.
     pub guardian_peers: Option<usize>,
     /// Parent losses.
     pub parent_lost: u64,
@@ -196,16 +195,24 @@ fn channel_tag(c: Channel) -> u8 {
     match c {
         Channel::Control => 0,
         Channel::Tree(t) => t.0,
+        Channel::Pull => 0xF0,
         _ => 0xFF,
     }
 }
 fn tag_channel(t: u8) -> Channel {
-    if t == 0 {
-        Channel::Control
-    } else {
-        Channel::Tree(bs_wire::TreeId(t))
+    match t {
+        0 => Channel::Control,
+        0xF0 => Channel::Pull,
+        t => Channel::Tree(bs_wire::TreeId(t)),
     }
 }
+
+/// Senders into the player API: deliveries, status, descriptor.
+type PlayerHandles = (
+    tokio::sync::broadcast::Sender<bs_player_api::Delivered>,
+    tokio::sync::watch::Sender<bs_player_api::Status>,
+    tokio::sync::watch::Sender<Option<bs_player_api::DescriptorInfo>>,
+);
 
 /// A running node's handle.
 pub struct Handle {
@@ -238,6 +245,8 @@ pub async fn start(cfg: RunConfig) -> anyhow::Result<Handle> {
         upload_kbps: cfg.upload_kbps,
         addr,
         stream_id,
+        bootstrap: cfg.bootstrap.into_iter().collect(),
+        discovery: bs_core::DiscoveryMode::Dht,
         params: cfg.params.clone(),
         seed: cfg.seed,
     });
@@ -324,7 +333,6 @@ struct Sink {
 struct Driver {
     cfg: RunConfig,
     node: Node,
-    identity: bs_crypto::Identity,
     sock: Arc<DemuxSocket>,
     endpoint: quinn::Endpoint,
     plain_rx: mpsc::UnboundedReceiver<PlainDatagram>,
@@ -332,11 +340,9 @@ struct Driver {
     ev_rx: mpsc::UnboundedReceiver<Ev>,
     conns: HashMap<SocketAddr, Conn>,
     epoch: tokio::time::Instant,
-    guardian: Option<Guardian>,
     source: Option<Box<dyn Source + Send>>,
     source_hash: Option<bs_wire::Hash>,
     sink: Sink,
-    dyn_nonce: u64,
     stop_rx: tokio::sync::watch::Receiver<bool>,
     local_addr: SocketAddr,
     // stats
@@ -352,14 +358,16 @@ struct Driver {
     repairs: u64,
     sessions: u64,
     ended: bool,
+    checkpoints: std::collections::VecDeque<bs_player_api::Checkpoint>,
+    descriptor_version: u32,
+    blocks_rejected: u64,
+    pub_hasher: blake3::Hasher,
+    pub_bytes: u64,
     end_at: Option<tokio::time::Instant>,
     /// Live chunks from ffmpeg (publisher, `Media::Ffmpeg`).
     live_rx: Option<mpsc::Receiver<LayeredChunk>>,
-    /// Player API senders (viewer, `Media::Play`).
-    player: Option<(
-        tokio::sync::broadcast::Sender<bs_player_api::Delivered>,
-        tokio::sync::watch::Sender<bs_player_api::Status>,
-    )>,
+    /// Player API senders (status, deliveries, descriptor).
+    player: Option<PlayerHandles>,
     layers_complete_last: u8,
 }
 
@@ -381,17 +389,6 @@ impl Driver {
             c2_min: cfg.params.c2_min,
         };
         let is_pub = matches!(cfg.role, Role::Publisher { .. });
-        let guardian = if is_pub {
-            Some(Guardian::new(
-                node.stream_id(),
-                node.node_id(),
-                difficulty,
-                cfg.params.tau_ttl.as_micros(),
-                cfg.seed,
-            ))
-        } else {
-            None
-        };
         let (source, source_hash): (Option<Box<dyn Source + Send>>, Option<bs_wire::Hash>) =
             match &cfg.media {
                 Media::File {
@@ -437,12 +434,10 @@ impl Driver {
                 first_segment: None,
             },
         };
-        let c2 = difficulty.dynamic_required(2, cfg.node_class, false);
-        let dyn_nonce = identity.solve_dynamic(node.addr().ip(), c2);
+        let _ = (difficulty, identity);
         Ok(Self {
             cfg,
             node,
-            identity,
             sock,
             endpoint,
             plain_rx,
@@ -450,11 +445,9 @@ impl Driver {
             ev_rx,
             conns: HashMap::new(),
             epoch: tokio::time::Instant::now(),
-            guardian,
             source,
             source_hash,
             sink,
-            dyn_nonce,
             stop_rx,
             local_addr,
             sent: HashMap::new(),
@@ -469,6 +462,11 @@ impl Driver {
             repairs: 0,
             sessions: 0,
             ended: false,
+            checkpoints: std::collections::VecDeque::new(),
+            descriptor_version: 0,
+            blocks_rejected: 0,
+            pub_hasher: blake3::Hasher::new(),
+            pub_bytes: 0,
             end_at: None,
             live_rx: None,
             player: None,
@@ -520,10 +518,6 @@ impl Driver {
             .cfg
             .duration_s
             .map(|d| self.epoch + std::time::Duration::from_secs_f64(d));
-        let mut register_tick = tokio::time::interval(std::time::Duration::from_micros(
-            self.cfg.params.tau_ttl.as_micros() / 2,
-        ));
-
         loop {
             let next_timer = self
                 .node
@@ -554,6 +548,8 @@ impl Driver {
                     match c {
                         Some(c) => {
                             self.chunks_published += 1;
+                            self.chunks_published += 1;
+                            self.note_published(&c);
                             self.feed(Input::Cmd(Command::PublishChunk(c)));
                         }
                         None => {
@@ -562,10 +558,6 @@ impl Driver {
                             self.feed(Input::Cmd(Command::EndStream));
                         }
                     }
-                }
-                _ = register_tick.tick(), if !is_pub => {
-                    let rec = self.node.peer_record();
-                    self.register(rec);
                 }
                 _ = self.stop_rx.changed() => { self.feed(Input::Cmd(Command::Quit)); break; }
                 _ = end => break,
@@ -589,6 +581,23 @@ impl Driver {
 
     /// Start ffmpeg ingest (publisher, after `start_delay_s`) and the player API (viewer).
     async fn setup_live_media(&mut self) -> anyhow::Result<()> {
+        let player_addr = self.cfg.player.or(match &self.cfg.media {
+            Media::Play { addr, .. } => Some(*addr),
+            _ => None,
+        });
+        if let Some(addr) = player_addr {
+            let (state, dtx, stx, xtx) = bs_player_api::PlayerState::new();
+            let layers = self
+                .node
+                .matrix()
+                .map(|m| m.layer_count)
+                .unwrap_or(self.cfg.ladder.len() as u8);
+            stx.send_modify(|s| s.layers = layers);
+            let (bound, _task) = bs_player_api::serve(addr, state).await?;
+            info!("player: open http://{bound}/");
+            self.player = Some((dtx, stx, xtx));
+            self.publish_status();
+        }
         match self.cfg.media.clone() {
             Media::Ffmpeg {
                 input,
@@ -615,18 +624,6 @@ impl Driver {
                 });
                 self.live_rx = Some(rx);
             }
-            Media::Play { addr, .. } => {
-                let (state, dtx, stx) = bs_player_api::PlayerState::new();
-                let layers = self
-                    .node
-                    .matrix()
-                    .map(|m| m.layer_count)
-                    .unwrap_or(self.cfg.ladder.len() as u8);
-                stx.send_modify(|s| s.layers = layers);
-                let (bound, _task) = bs_player_api::serve(addr, state).await?;
-                info!("player: open http://{bound}/");
-                self.player = Some((dtx, stx));
-            }
             _ => {}
         }
         Ok(())
@@ -639,12 +636,62 @@ impl Driver {
         self.publish_status();
     }
 
+    /// Record a per-chunk integrity checkpoint (bounded history).
+    fn checkpoint(&mut self, segment: u32, chunk: u8, layers: &[Bytes]) {
+        let layer_hashes = layers
+            .iter()
+            .map(|l| hex::encode(&blake3::hash(l).as_bytes()[..8]))
+            .collect();
+        self.checkpoints.push_back(bs_player_api::Checkpoint {
+            segment,
+            chunk,
+            layer_hashes,
+        });
+        while self.checkpoints.len() > 96 {
+            self.checkpoints.pop_front();
+        }
+    }
+
     fn publish_status(&mut self) {
-        let Some((_, stx)) = self.player.as_ref() else {
+        let Some((_, stx, _)) = self.player.as_ref() else {
             return;
         };
         let depth: Vec<u8> = self.node.trees().iter().map(|t| t.depth).collect();
+        let is_pub = matches!(self.cfg.role, Role::Publisher { .. });
+        let (bytes, hash_so_far) = if is_pub {
+            (
+                self.pub_bytes,
+                if self.pub_bytes > 0 {
+                    Some(hex::encode(self.pub_hasher.finalize().as_bytes()))
+                } else {
+                    None
+                },
+            )
+        } else {
+            (
+                self.sink.bytes,
+                if self.sink.started {
+                    Some(hex::encode(self.sink.hasher.finalize().as_bytes()))
+                } else {
+                    None
+                },
+            )
+        };
         let st = bs_player_api::Status {
+            role: if is_pub {
+                "publisher".into()
+            } else {
+                "viewer".into()
+            },
+            node_id: self.node.node_id().to_string(),
+            chunks_ok: self.ok,
+            blocks_rejected: self.blocks_rejected,
+            parent_lost: self.parent_lost,
+            bytes,
+            hash_so_far,
+            source_hash: self.source_hash.map(|h| h.to_string()),
+            descriptor_version: self.descriptor_version,
+            checkpoints: self.checkpoints.iter().cloned().collect(),
             state: format!("{:?}", self.node.state()),
             layers: self
                 .node
@@ -669,11 +716,133 @@ impl Driver {
         }
     }
 
+    /// Hand a descriptor to the player page (init segments ride kind-1 frames).
+    fn publish_descriptor(&mut self, d: &bs_wire::frames::StreamDescriptor) {
+        let Some((_, _, xtx)) = self.player.as_ref() else {
+            return;
+        };
+        let info = bs_player_api::DescriptorInfo {
+            version: d.version,
+            content_type: format!("{:?}", d.content_type),
+            layer_mode: format!("{:?}", d.layer_mode),
+            layers: d
+                .layers
+                .iter()
+                .map(|l| bs_player_api::DescriptorLayer {
+                    codec: String::from_utf8_lossy(&l.codec_tag).into_owned(),
+                    width: l.width,
+                    height: l.height,
+                    fps: l.frame_rate_milli as f64 / 1000.0,
+                    kbps: l.bitrate_kbps,
+                    has_init: !l.init_data.is_empty(),
+                    init: l.init_data.clone(),
+                })
+                .collect(),
+        };
+        let _ = xtx.send(Some(info));
+    }
+
+    /// Build the STREAM_DESCRIPTOR (App D §D.4.20) from the first chunk: ffmpeg
+    /// renditions carry their fMP4 initialisation segment as an INIT record in the
+    /// container; opaque sources describe themselves as OPAQUE / `data`.
+    fn build_descriptor(&self, c: &LayeredChunk) -> bs_wire::frames::StreamDescriptor {
+        use bs_wire::frames::{ContentType, LayerDescriptor, LayerMode, StreamDescriptor};
+        let ladder = &self.cfg.ladder;
+        let (content_type, layer_mode) = match &self.cfg.media {
+            Media::Ffmpeg { .. } => (ContentType::VideoCmaf, LayerMode::Simulcast),
+            _ => (ContentType::Opaque, LayerMode::Independent),
+        };
+        let (specs, fps) = match &self.cfg.media {
+            Media::Ffmpeg {
+                renditions, fps, ..
+            } => (
+                bs_ingest::RenditionSpec::parse_list(&renditions.join(",")).unwrap_or_default(),
+                fps.unwrap_or(0) as f64,
+            ),
+            _ => (Vec::new(), 0.0),
+        };
+        let layers = c
+            .layers
+            .iter()
+            .enumerate()
+            .map(|(l, payload)| {
+                // The first chunk of an ffmpeg rendition carries its INIT segment and a
+                // META record `{"fps":..,"height":..}` written by the ingest.
+                let (init, meta) = if content_type == ContentType::VideoCmaf {
+                    let recs = bs_ingest::container::decode(payload);
+                    let init = recs
+                        .iter()
+                        .find(|r| r.kind == bs_ingest::container::RecordType::Init)
+                        .map(|r| r.data.clone())
+                        .filter(|b| b.len() <= LayerDescriptor::MAX_INIT)
+                        .unwrap_or_default();
+                    let meta = recs
+                        .iter()
+                        .find(|r| r.kind == bs_ingest::container::RecordType::Meta)
+                        .and_then(|r| serde_json::from_slice::<serde_json::Value>(&r.data).ok());
+                    (init, meta)
+                } else {
+                    (Bytes::new(), None)
+                };
+                let spec = specs.get(l);
+                let meta_fps = meta.as_ref().and_then(|m| m["fps"].as_f64()).unwrap_or(fps);
+                let height = meta
+                    .as_ref()
+                    .and_then(|m| m["height"].as_u64())
+                    .map(|h| h as u16)
+                    .or(spec.map(|s| s.height as u16))
+                    .unwrap_or(0);
+                LayerDescriptor {
+                    codec_tag: if content_type == ContentType::VideoCmaf {
+                        *b"avc1"
+                    } else {
+                        *b"data"
+                    },
+                    width: (height as u32 * 16 / 9) as u16,
+                    height,
+                    frame_rate_milli: (meta_fps * 1000.0) as u32,
+                    bitrate_kbps: ladder
+                        .layers
+                        .get(l)
+                        .map(|x| x.bitrate_kbps.min(u16::MAX as u32) as u16)
+                        .unwrap_or(0),
+                    init_data: init,
+                }
+            })
+            .collect();
+        StreamDescriptor {
+            stream_id: self.node.stream_id(),
+            version: 1,
+            effective_segment: c.segment,
+            content_type,
+            layer_mode,
+            layers,
+            signature: bs_wire::SignatureBytes::ZERO,
+        }
+    }
+
+    /// Publisher-side integrity bookkeeping for a chunk about to be published.
+    fn note_published(&mut self, c: &LayeredChunk) {
+        if self.descriptor_version == 0 {
+            let d = self.build_descriptor(c);
+            self.descriptor_version = d.version;
+            self.publish_descriptor(&d);
+            self.feed(Input::Cmd(Command::SetDescriptor(d)));
+        }
+        for l in &c.layers {
+            self.pub_hasher.update(l);
+            self.pub_bytes += l.len() as u64;
+        }
+        self.checkpoint(c.segment.0, c.chunk_index, &c.layers);
+        self.publish_status();
+    }
+
     fn publish_tick(&mut self) {
         let chunk = self.source.as_mut().and_then(|s| s.next_chunk());
         match chunk {
             Some(c) => {
                 self.chunks_published += 1;
+                self.note_published(&c);
                 self.feed(Input::Cmd(Command::PublishChunk(c)));
             }
             None => {
@@ -695,35 +864,7 @@ impl Driver {
                 return;
             }
         };
-        // Guardian frames are handled here, never by the core.
-        match &frame {
-            Frame::RegisterPeer(r) => {
-                let now = self.now().as_micros();
-                if let Some(g) = self.guardian.as_mut() {
-                    if !g.handle_register(p.from, r, now) {
-                        debug!("rejected REGISTER_PEER from {}", p.from);
-                    }
-                }
-                return;
-            }
-            Frame::GetPeers(GetPeersFrame::Request(g)) => {
-                let now = self.now().as_micros();
-                if let Some(gd) = self.guardian.as_mut() {
-                    if let Some(resp) = gd.handle_get_peers(p.from, g, now) {
-                        self.send_plain(p.from, Frame::GetPeers(GetPeersFrame::Response(resp)));
-                    }
-                }
-                return;
-            }
-            Frame::GetPeers(GetPeersFrame::Response(r)) => {
-                self.feed(Input::Cmd(Command::Discovered {
-                    records: r.records.clone(),
-                    stream_record: r.stream_record.clone(),
-                }));
-                return;
-            }
-            _ => {}
-        }
+        // Every plain frame, DHT RPCs included, is the core's (Ch2 lives in bs-core).
         self.feed(Input::Frame {
             from: p.from,
             channel: Channel::Udp,
@@ -739,6 +880,14 @@ impl Driver {
                 conn,
             } => {
                 self.sessions += 1;
+                // Gossip HMAC key (Ch3 §3.2.2) from the TLS exporter: identical on both ends.
+                let mut session_key = [0u8; 32];
+                if conn
+                    .export_keying_material(&mut session_key, b"bitstream gossip v1", &[])
+                    .is_err()
+                {
+                    warn!("keying material export failed for {peer}");
+                }
                 self.spawn_readers(peer, conn.clone());
                 self.conns.insert(
                     peer,
@@ -748,7 +897,11 @@ impl Driver {
                         writers: HashMap::new(),
                     },
                 );
-                self.feed(Input::SessionOpened { peer, node_id });
+                self.feed(Input::SessionOpened {
+                    peer,
+                    node_id,
+                    session_key,
+                });
             }
             Ev::ConnectFailed { peer, err } => {
                 debug!("connect to {peer} failed: {err}");
@@ -875,7 +1028,7 @@ impl Driver {
                             });
                         }
                     }
-                    Channel::Control | Channel::Tree(_) => {
+                    Channel::Control | Channel::Tree(_) | Channel::Pull => {
                         let bytes = match frame.to_bytes() {
                             Ok(b) => b,
                             Err(_) => return,
@@ -937,15 +1090,8 @@ impl Driver {
                     c.conn.close(0u32.into(), b"");
                 }
             }
-            Output::Discover {
-                wanted_trees,
-                starved_trees,
-            } => self.discover(wanted_trees, starved_trees),
-            Output::Register(rec) => self.register(rec),
-            Output::StoreRecord(sr) => {
-                if let Some(g) = self.guardian.as_mut() {
-                    g.stream_record = Some(sr);
-                }
+            Output::Discover { .. } | Output::Register(_) | Output::StoreRecord(_) => {
+                // Oracle-mode outputs; the node runs the DHT in the core.
             }
             Output::Deliver {
                 chunk,
@@ -953,13 +1099,17 @@ impl Driver {
                 layers_subscribed,
             } => self.deliver(chunk, layers_complete, layers_subscribed),
             Output::Event(e) => self.on_event(e),
-            Output::Descriptor(d) => info!(
-                "stream descriptor v{} ({:?}, {:?}, {} layers)",
-                d.version,
-                d.content_type,
-                d.layer_mode,
-                d.layers.len()
-            ),
+            Output::Descriptor(d) => {
+                self.descriptor_version = d.version;
+                self.publish_descriptor(&d);
+                info!(
+                    "stream descriptor v{} ({:?}, {:?}, {} layers)",
+                    d.version,
+                    d.content_type,
+                    d.layer_mode,
+                    d.layers.len()
+                );
+            }
         }
     }
 
@@ -1000,78 +1150,18 @@ impl Driver {
         }
     }
 
-    fn validation_block(&self, ty: FrameType, body: &[u8]) -> bs_wire::ValidationBlock {
-        self.identity
-            .validation_block(ty, self.dyn_nonce, self.now().as_micros(), body)
-    }
-
-    fn discover(&mut self, wanted: TreeSet, starved: TreeSet) {
-        let Some(b) = self.cfg.bootstrap else { return };
-        let sid = self.node.stream_id();
-        let mut body = Vec::with_capacity(36);
-        body.extend_from_slice(sid.as_bytes());
-        body.push(starved.0);
-        body.push(wanted.0);
-        body.push(0);
-        body.push(0);
-        let vb = self.validation_block(FrameType::GET_PEERS, &body);
-        let f = GetPeers {
-            validation: vb,
-            stream_id: sid,
-            starved_trees: starved,
-            wanted_trees: wanted,
-            want_relay_capable: false,
-        };
-        self.send_plain(b, Frame::GetPeers(GetPeersFrame::Request(f)));
-    }
-
-    fn register(&mut self, rec: bs_wire::PeerRecord) {
-        let now = self.now().as_micros();
-        if let Some(g) = self.guardian.as_mut() {
-            g.register_local(rec, now);
-            return;
-        }
-        let Some(b) = self.cfg.bootstrap else { return };
-        let sid = self.node.stream_id();
-        let port = self.local_addr.port();
-        let ts = now;
-        let msg = RegisterPeer::signable_bytes(
-            &sid,
-            &rec.node_id,
-            port,
-            rec.node_class,
-            rec.assigned_trees,
-            rec.flags,
-            ts,
-        );
-        let signature = self.identity.sign(&msg);
-        let mut body = Vec::with_capacity(72);
-        body.extend_from_slice(&port.to_be_bytes());
-        body.push(RegisterPeer::PROTOCOL_UDP);
-        body.push(rec.node_class as u8);
-        body.push(rec.assigned_trees.0);
-        body.push(rec.flags.to_byte());
-        body.extend_from_slice(&[0, 0]);
-        body.extend_from_slice(signature.as_bytes());
-        let vb =
-            self.identity
-                .validation_block(FrameType::REGISTER_PEER, self.dyn_nonce, ts, &body);
-        let f = RegisterPeer {
-            stream_id: sid,
-            validation: vb,
-            port,
-            node_class: rec.node_class,
-            assigned_trees: rec.assigned_trees,
-            flags: rec.flags,
-            signature,
-        };
-        let _ = WireAddr(self.local_addr);
-        self.send_plain(b, Frame::RegisterPeer(f));
-    }
-
     fn deliver(&mut self, chunk: LayeredChunk, layers_complete: u8, layers_subscribed: u8) {
         self.layers_complete_last = layers_complete;
-        if let Some((tx, _)) = self.player.as_ref() {
+        if layers_complete >= 1 {
+            let complete: Vec<Bytes> = chunk
+                .layers
+                .iter()
+                .take(layers_complete as usize)
+                .cloned()
+                .collect();
+            self.checkpoint(chunk.segment.0, chunk.chunk_index, &complete);
+        }
+        if let Some((tx, _, _)) = self.player.as_ref() {
             if layers_complete >= 1 {
                 let _ = tx.send(bs_player_api::Delivered {
                     segment: chunk.segment.0,
@@ -1214,7 +1304,7 @@ impl Driver {
             _ => None,
         };
         RunReport {
-            role: if self.guardian.is_some() {
+            role: if matches!(self.cfg.role, Role::Publisher { .. }) {
                 "publisher".into()
             } else {
                 "viewer".into()
@@ -1242,7 +1332,7 @@ impl Driver {
                 .iter()
                 .map(|(k, v)| (k.name().to_string(), *v))
                 .collect(),
-            guardian_peers: self.guardian.as_ref().map(|g| g.len()),
+            guardian_peers: Some(self.node.dht_registrations()),
             parent_lost: self.parent_lost,
             repairs: self.repairs,
             sessions: self.sessions,

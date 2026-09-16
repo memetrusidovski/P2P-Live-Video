@@ -33,7 +33,15 @@ pub enum Frame {
     BlockTransmission(BlockTransmission),
     RegisterPeer(RegisterPeer),
     GetPeers(GetPeersFrame),
+    FindNode(FindFrame),
+    FindValue(FindFrame),
+    StoreRecord(StoreRecord),
+    StoreRecordAck(StoreRecordAck),
     StreamDescriptor(StreamDescriptor),
+    BufferStateBitfield(BufferStateBitfield),
+    ForwardJoin(ForwardJoin),
+    Shuffle(Shuffle),
+    GossipExchange(GossipExchange),
     /// A registered frame type whose layout is not yet implemented.
     Raw {
         /// Frame type.
@@ -67,7 +75,15 @@ impl Frame {
             Frame::BlockTransmission(_) => FrameType::BLOCK_TRANSMISSION,
             Frame::RegisterPeer(_) => FrameType::REGISTER_PEER,
             Frame::GetPeers(_) => FrameType::GET_PEERS,
+            Frame::FindNode(_) => FrameType::FIND_NODE,
+            Frame::FindValue(_) => FrameType::FIND_VALUE,
+            Frame::StoreRecord(_) => FrameType::STORE_RECORD,
+            Frame::StoreRecordAck(_) => FrameType::STORE_RECORD_ACK,
             Frame::StreamDescriptor(_) => FrameType::STREAM_DESCRIPTOR,
+            Frame::BufferStateBitfield(_) => FrameType::BUFFER_STATE_BITFIELD,
+            Frame::ForwardJoin(_) => FrameType::FORWARD_JOIN,
+            Frame::Shuffle(_) => FrameType::SHUFFLE,
+            Frame::GossipExchange(_) => FrameType::GOSSIP_EXCHANGE,
             Frame::Raw { frame_type, .. } => *frame_type,
         }
     }
@@ -95,7 +111,14 @@ impl Frame {
             Frame::BlockTransmission(f) => f.encoded_len(),
             Frame::RegisterPeer(f) => f.encoded_len(),
             Frame::GetPeers(f) => f.encoded_len(),
+            Frame::FindNode(f) | Frame::FindValue(f) => f.encoded_len(),
+            Frame::StoreRecord(f) => f.encoded_len(),
+            Frame::StoreRecordAck(f) => f.encoded_len(),
             Frame::StreamDescriptor(f) => f.encoded_len(),
+            Frame::BufferStateBitfield(f) => f.encoded_len(),
+            Frame::ForwardJoin(f) => f.encoded_len(),
+            Frame::Shuffle(f) => f.encoded_len(),
+            Frame::GossipExchange(f) => f.encoded_len(),
             Frame::Raw { payload, .. } => payload.len(),
         }
     }
@@ -127,7 +150,14 @@ impl Frame {
             Frame::BlockTransmission(f) => f.encode(buf),
             Frame::RegisterPeer(f) => f.encode(buf),
             Frame::GetPeers(f) => f.encode(buf),
+            Frame::FindNode(f) | Frame::FindValue(f) => f.encode(buf),
+            Frame::StoreRecord(f) => f.encode(buf),
+            Frame::StoreRecordAck(f) => f.encode(buf),
             Frame::StreamDescriptor(f) => f.encode(buf),
+            Frame::BufferStateBitfield(f) => f.encode(buf),
+            Frame::ForwardJoin(f) => f.encode(buf),
+            Frame::Shuffle(f) => f.encode(buf),
+            Frame::GossipExchange(f) => f.encode(buf),
             Frame::Raw { payload, .. } => buf.put_slice(payload),
         }
     }
@@ -193,6 +223,20 @@ impl Frame {
             }
             FrameType::REGISTER_PEER => Frame::RegisterPeer(RegisterPeer::from_slice_exact(p)?),
             FrameType::GET_PEERS => Frame::GetPeers(GetPeersFrame::from_payload(p)?),
+            FrameType::FIND_NODE => Frame::FindNode(FindFrame::from_payload(p)?),
+            FrameType::FIND_VALUE => Frame::FindValue(FindFrame::from_payload(p)?),
+            FrameType::STORE_RECORD => Frame::StoreRecord(StoreRecord::from_slice_exact(p)?),
+            FrameType::STORE_RECORD_ACK => {
+                Frame::StoreRecordAck(StoreRecordAck::from_slice_exact(p)?)
+            }
+            FrameType::FORWARD_JOIN => Frame::ForwardJoin(ForwardJoin::from_slice_exact(p)?),
+            FrameType::SHUFFLE => Frame::Shuffle(Shuffle::from_slice_exact(p)?),
+            FrameType::GOSSIP_EXCHANGE => {
+                Frame::GossipExchange(GossipExchange::from_slice_exact(p)?)
+            }
+            FrameType::BUFFER_STATE_BITFIELD => {
+                Frame::BufferStateBitfield(BufferStateBitfield::from_slice_exact(p)?)
+            }
             FrameType::STREAM_DESCRIPTOR => {
                 Frame::StreamDescriptor(StreamDescriptor::from_slice_exact(p)?)
             }

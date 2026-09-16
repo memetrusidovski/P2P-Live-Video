@@ -20,11 +20,16 @@ struct Cli {
     /// Use the specification's proof-of-work difficulty (default: cheap simulation values).
     #[arg(long, global = true)]
     spec_pow: bool,
+    /// RaptorQ parity symbols per 16 KB block on every link (1..=5). Adaptive per-link
+    /// parity arrives with PROOF_OF_UPLOAD loss reports (M3); until then 1 suits clean
+    /// links and 4-5 lossy ones.
+    #[arg(long, global = true, default_value_t = 1)]
+    parity: u16,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Publish a file (or synthetic bytes) and act as the bootstrap guardian.
+    /// Publish a file (or synthetic bytes) and seed the DHT for viewers.
     Publish {
         /// File to stream as opaque bytes. Omit for synthetic data.
         #[arg(long)]
@@ -62,6 +67,9 @@ enum Cmd {
         /// Write result.json here.
         #[arg(long)]
         result: Option<PathBuf>,
+        /// Serve the status page and API on this address (e.g. 0.0.0.0:8080).
+        #[arg(long)]
+        player: Option<SocketAddr>,
         /// Ingest mode: "file" (opaque bytes, default) or "ffmpeg" (live simulcast renditions).
         #[arg(long, default_value = "file")]
         ingest: String,
@@ -75,9 +83,9 @@ enum Cmd {
         #[arg(long)]
         fps: Option<u32>,
     },
-    /// Join a stream through a bootstrap guardian and write the reassembled bytes.
+    /// Join a stream through a DHT bootstrap seed and write the reassembled bytes.
     Watch {
-        /// Bootstrap guardian address (host:port).
+        /// DHT bootstrap seed address, normally the publisher (host:port).
         #[arg(long)]
         bootstrap: String,
         /// UDP bind address.
@@ -152,18 +160,20 @@ fn ladder(spec: &str) -> anyhow::Result<Ladder> {
     anyhow::bail!("unknown ladder {spec}")
 }
 
-fn params(spec_pow: bool) -> Params {
-    if spec_pow {
+fn params(spec_pow: bool, parity: u16) -> Params {
+    let mut p = if spec_pow {
         Params::default()
     } else {
         Params::for_simulation()
-    }
+    };
+    p.default_parity = parity.clamp(1, 5);
+    p
 }
 
 /// The stream id of a publisher started with `seed` on `port` (identity derivation
 /// mirrors `bs_core::Node::new`).
 fn publisher_stream_id(seed: u64, port: u16, spec_pow: bool) -> StreamId {
-    let p = params(spec_pow);
+    let p = params(spec_pow, 1);
     let mut s = [0u8; 32];
     s[..8].copy_from_slice(&seed.to_le_bytes());
     s[8..16].copy_from_slice(&port.to_le_bytes()[..].repeat(4)[..8]);
@@ -177,14 +187,15 @@ fn publisher_stream_id(seed: u64, port: u16, spec_pow: bool) -> StreamId {
     bs_crypto::stream_id(&id.public_key())
 }
 
-
 /// Stop the node gracefully on Ctrl-C or SIGTERM (docker stop), so result.json is
 /// written and child processes (ffmpeg) are reaped.
 fn stop_on_signal(stop: tokio::sync::watch::Sender<bool>) {
     tokio::spawn(async move {
         #[cfg(unix)]
         {
-            let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("sigterm handler");
+            let mut term =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("sigterm handler");
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {}
                 _ = term.recv() => {}
@@ -228,6 +239,7 @@ async fn main() -> anyhow::Result<()> {
             start_delay_s,
             duration_s,
             result,
+            player,
             ingest,
             input,
             renditions,
@@ -274,11 +286,12 @@ async fn main() -> anyhow::Result<()> {
                 upload_kbps,
                 ladder: lad,
                 media,
-                params: params(cli.spec_pow),
+                params: params(cli.spec_pow, cli.parity),
                 seed,
                 duration_s,
                 start_delay_s,
                 result_path: result,
+                player,
             };
             let h = bs_node::start(cfg).await?;
             eprintln!(
@@ -346,11 +359,12 @@ async fn main() -> anyhow::Result<()> {
                         expect_hash,
                     },
                 },
-                params: params(cli.spec_pow),
+                params: params(cli.spec_pow, cli.parity),
                 seed,
                 duration_s,
                 start_delay_s: 0.0,
                 result_path: result,
+                player: None,
             };
             let h = bs_node::start(cfg).await?;
             eprintln!(

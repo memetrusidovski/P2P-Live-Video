@@ -10,3 +10,4 @@
 /testdata/generated
 .DS_Store
 /fleet/media
+/fleet/.last_run_id

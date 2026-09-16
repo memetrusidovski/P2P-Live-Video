@@ -51,8 +51,34 @@ pub struct NodeStats {
     pub sheds: u64,
     /// Failed join rounds.
     pub failed_join_rounds: u64,
+    /// DHT lookups finished.
+    pub dht_lookups: u64,
+    /// Sum of lookup hops.
+    pub dht_hops: u64,
+    /// Sum of lookup wall times, ms.
+    pub dht_lookup_ms: u64,
+    /// Sum of FIND requests sent by lookups.
+    pub dht_queried: u64,
+    /// DHT RPCs served.
+    pub dht_served: u64,
+    /// GET_PEERS served.
+    pub dht_get_peers_served: u64,
     /// Blocks rejected (poison).
     pub blocks_rejected: u64,
+    /// Backfilled chunks played / complete.
+    pub backfill_played: u64,
+    /// Backfilled chunks complete at their deadline.
+    pub backfill_ok: u64,
+    /// PULL_REQUESTs sent.
+    pub pulls_sent: u64,
+    /// PULL_REQUESTs served.
+    pub pulls_served: u64,
+    /// PULL_REQUESTs refused (budget).
+    pub pulls_refused: u64,
+    /// Directed PULL_REQUESTs received for blocks not held.
+    pub pulls_unheld: u64,
+    /// Blocks completed via PULL.
+    pub blocks_pulled: u64,
     /// Final depth per tree (255 = none).
     pub depth: Vec<u8>,
     /// Final children per tree.
@@ -74,6 +100,8 @@ pub struct Kpis {
     pub depth_series: Vec<(u64, f64, u8, usize, usize)>,
     /// Session-bound sends dropped for lack of a session.
     pub no_session_drops: u64,
+    /// No-session drops by frame type.
+    pub no_session_by_type: std::collections::BTreeMap<String, u64>,
 }
 
 impl Kpis {
@@ -87,6 +115,7 @@ impl Kpis {
             repairs_us: Vec::new(),
             depth_series: Vec::new(),
             no_session_drops: 0,
+            no_session_by_type: std::collections::BTreeMap::new(),
         }
     }
     fn stats(&mut self, i: usize) -> &mut NodeStats {
@@ -189,12 +218,17 @@ impl Kpis {
                     s.active_us = Some(t);
                 }
             }
-            Event::ChunkPlayed { ok, .. } => {
+            Event::ChunkPlayed { ok, backfill, .. } => {
                 s.played += 1;
                 if *ok {
                     s.played_ok += 1;
                 }
-                if s.first_chunk_us.is_some() {
+                if *backfill {
+                    s.backfill_played += 1;
+                    if *ok {
+                        s.backfill_ok += 1;
+                    }
+                } else if s.first_chunk_us.is_some() {
                     s.steady_played += 1;
                     if !ok {
                         s.steady_starved += 1;
@@ -211,7 +245,26 @@ impl Kpis {
             }
             Event::LayerShed { .. } => s.sheds += 1,
             Event::JoinRoundFailed { .. } => s.failed_join_rounds += 1,
+            Event::DhtLookup {
+                hops, ms, queried, ..
+            } => {
+                s.dht_lookups += 1;
+                s.dht_hops += *hops as u64;
+                s.dht_lookup_ms += *ms as u64;
+                s.dht_queried += *queried as u64;
+            }
+            Event::DhtServed { rpc } => {
+                s.dht_served += 1;
+                if *rpc == "get_peers" {
+                    s.dht_get_peers_served += 1;
+                }
+            }
             Event::BlockRejected { .. } => s.blocks_rejected += 1,
+            Event::PullSent { .. } => s.pulls_sent += 1,
+            Event::PullServed { .. } => s.pulls_served += 1,
+            Event::PullRefused { .. } => s.pulls_refused += 1,
+            Event::PullUnheld { .. } => s.pulls_unheld += 1,
+            Event::BlockPulled { .. } => s.blocks_pulled += 1,
             _ => {}
         }
     }

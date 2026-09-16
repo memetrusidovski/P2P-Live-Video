@@ -241,6 +241,19 @@ impl Network {
     pub fn regions(&self) -> u8 {
         self.spec.regions.max(1)
     }
+    /// Hosts with the most datagrams dropped by egress queue overflow: (addr, drops, upload_kbps).
+    pub fn top_queue_drops(&self, n: usize) -> Vec<(SocketAddr, u64, u32)> {
+        let mut v: Vec<(SocketAddr, u64, u32)> = self
+            .endpoints
+            .iter()
+            .filter(|(_, e)| e.queue_drops > 0)
+            .map(|(a, e)| (*a, e.queue_drops, e.upload_kbps))
+            .collect();
+        v.sort_by_key(|x| std::cmp::Reverse(x.1));
+        v.truncate(n);
+        v
+    }
+
     /// Sum of bytes by kind over alive and dead hosts.
     pub fn totals(&self) -> (u64, u64, u64, u64) {
         let mut m = 0;
@@ -263,5 +276,6 @@ fn channel_code(c: Channel) -> u8 {
         Channel::Control => 1,
         Channel::Tree(t) => 16 + t.0,
         Channel::Datagram => 2,
+        Channel::Pull => 3,
     }
 }

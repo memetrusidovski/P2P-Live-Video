@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, rust_2018_idioms)]
 
+pub mod dht;
 pub mod forest;
 pub mod io;
 pub mod join;
@@ -27,7 +28,7 @@ pub mod swarm;
 pub mod time;
 
 pub use io::{Channel, Command, Event, Input, Output, PeerAddr};
-pub use node::{Node, NodeConfig, Role};
+pub use node::{DiscoveryMode, Node, NodeConfig, Role};
 pub use params::Params;
 pub use time::{Duration, Instant};
 

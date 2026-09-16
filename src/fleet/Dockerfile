@@ -8,7 +8,7 @@ RUN cargo build --release -p bs-node
 # Stage 2: slim runtime with iproute2 so netem.sh can shape the container's link.
 FROM debian:bookworm-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends iproute2 ca-certificates \
+ && apt-get install -y --no-install-recommends iproute2 ca-certificates ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/bsnode /usr/local/bin/bsnode
 COPY fleet/entrypoint.sh /usr/local/bin/entrypoint.sh

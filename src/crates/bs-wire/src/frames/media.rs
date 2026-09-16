@@ -573,3 +573,76 @@ impl Decode for StreamDescriptor {
         })
     }
 }
+
+/// BUFFER_STATE_BITFIELD (0x15): `[SegmentSeq 4][StartingBlockIndex 2][N 2][bits N]`
+/// (Ch4 §4.3.2). Bit `i` (MSB first) of the data is block `start + i`; 1 = held
+/// and verified. One frame covers one chunk's blocks (block indices of different
+/// chunks are 4096 apart), so a segment takes up to four frames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BufferStateBitfield {
+    /// Segment.
+    pub segment: SegmentSeq,
+    /// First block index the bitfield describes.
+    pub start: BlockIndex,
+    /// Bit per block from `start`, MSB first.
+    pub bits: Bytes,
+}
+impl BufferStateBitfield {
+    /// Whether block `idx` is marked held.
+    pub fn has(&self, idx: BlockIndex) -> bool {
+        let Some(off) = idx.0.checked_sub(self.start.0) else {
+            return false;
+        };
+        let (byte, bit) = ((off / 8) as usize, 7 - (off % 8));
+        self.bits
+            .get(byte)
+            .map(|b| b & (1 << bit) != 0)
+            .unwrap_or(false)
+    }
+    /// Build from a slice of `held` flags for blocks `start..start+held.len()`.
+    pub fn from_flags(segment: SegmentSeq, start: BlockIndex, held: &[bool]) -> Self {
+        let mut bits = vec![0u8; held.len().div_ceil(8)];
+        for (i, h) in held.iter().enumerate() {
+            if *h {
+                bits[i / 8] |= 1 << (7 - (i % 8));
+            }
+        }
+        Self {
+            segment,
+            start,
+            bits: Bytes::from(bits),
+        }
+    }
+    /// Blocks described.
+    pub fn len(&self) -> usize {
+        self.bits.len() * 8
+    }
+    /// Whether it describes no blocks.
+    pub fn is_empty(&self) -> bool {
+        self.bits.is_empty()
+    }
+}
+impl Encode for BufferStateBitfield {
+    fn encoded_len(&self) -> usize {
+        8 + self.bits.len()
+    }
+    fn encode<B: BufMut>(&self, buf: &mut B) {
+        buf.put_u32(self.segment.0);
+        buf.put_u16(self.start.0);
+        buf.put_u16(self.bits.len() as u16);
+        buf.put_slice(&self.bits);
+    }
+}
+impl Decode for BufferStateBitfield {
+    fn decode<B: Buf>(buf: &mut B) -> Result<Self> {
+        let segment = SegmentSeq(get_u32(buf, "Bitfield.segment")?);
+        let start = BlockIndex(get_u16(buf, "Bitfield.start")?);
+        let n = get_u16(buf, "Bitfield.len")? as usize;
+        let bits = Bytes::from(get_vec(buf, n, "Bitfield.bits")?);
+        Ok(Self {
+            segment,
+            start,
+            bits,
+        })
+    }
+}

@@ -41,6 +41,10 @@ pub struct Params {
     pub probe_timeout: Duration,
     /// Failed join rounds before a layer is shed.
     pub shed_after_failed_rounds: u32,
+    /// Consecutive join rounds a WARMING candidate may exempt from the shed
+    /// counter before warming is treated as saturation (ISSUE-063; the spec's
+    /// exemption is unbounded).
+    pub warming_exempt_rounds: u32,
     /// Hysteresis before re-joining a shed layer.
     pub shed_hysteresis: Duration,
     /// Greedy upward-migration evaluation interval (Ch1 §1.2.3).
@@ -53,6 +57,10 @@ pub struct Params {
     pub c_a: usize,
     /// c_p: Passive Set target.
     pub c_p: usize,
+    /// TTL_active: FORWARD_JOIN random-walk hops.
+    pub ttl_active: u8,
+    /// PR_gossip: hop count at which walkers file the joiner into their Passive Set.
+    pub pr_gossip: u8,
     /// D_max: maximum hop depth.
     pub d_max: u8,
     /// Δ_buffer: playout deadline behind the live edge.
@@ -63,6 +71,18 @@ pub struct Params {
     pub w_pull_max: Duration,
     /// r_pull: fraction of upload reserved for PULL service.
     pub r_pull: f64,
+    /// S/Kademlia bucket capacity `k` (App B).
+    pub dht_k: usize,
+    /// Lookup concurrency `α`: disjoint paths per lookup (Ch2 §2.1.2).
+    pub dht_alpha: usize,
+    /// Plain-UDP DHT RPC timeout.
+    pub dht_rpc_timeout: Duration,
+    /// How long a resolved guardian set is reused before a fresh lookup.
+    pub dht_guardian_cache: Duration,
+    /// A registration is active for this long after its last refresh (App B: 135 s).
+    pub registration_active: Duration,
+    /// Registration sample target `N_0` (App B).
+    pub n0_register: u32,
     /// f_frame: framing overhead fraction on media bytes.
     pub f_frame: f64,
     /// Leaf share of base-layer slots.
@@ -113,17 +133,30 @@ impl Default for Params {
             tau_ttl: Duration::from_secs(180),
             probe_timeout: Duration::from_millis(200),
             shed_after_failed_rounds: 2,
+            warming_exempt_rounds: 4,
             shed_hysteresis: Duration::from_secs(10),
             tau_migrate: Duration::from_secs(5),
             join_backoff: Duration::from_millis(250),
             c_a: 8,
             c_p: 32,
+            ttl_active: 4,
+            pr_gossip: 2,
             d_max: 8,
             delta_buffer: Duration::from_secs(3),
             w_pull_min: Duration::from_millis(1500),
             w_pull_max: Duration::from_millis(2000),
             r_pull: 0.10,
-            f_frame: 0.03,
+            dht_k: 20,
+            dht_alpha: 3,
+            dht_rpc_timeout: Duration::from_millis(400),
+            dht_guardian_cache: Duration::from_secs(30),
+            registration_active: Duration::from_secs(135),
+            n0_register: 10_000,
+            // Ch1 §1.2 §1.3 fixes f_frame = 0.085 (Ω = 1.15 at the parity floor); App B
+            // still says 0.03 (ISSUE-062 addendum). Measured per-symbol framing is ~6–7 %,
+            // and the remaining ~2 % is the only headroom the control plane (bitfields,
+            // gossip, proofs) gets, since the PULL reserve is spent on pulls.
+            f_frame: 0.085,
             leaf_share: 0.20,
             preempt_margin: 1.25,
             forest_ladder_relays: vec![0, 6, 12, 24, 48, 96],

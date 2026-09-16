@@ -29,6 +29,51 @@ fn vb(seed: u8) -> ValidationBlock {
     }
 }
 
+fn sr_fixture() -> StreamRecord {
+    StreamRecord {
+        publisher_pubkey: PublicKeyBytes([0x88; 32]),
+        manifest_version: 9,
+        slicing_mode: SlicingMode::SvcSpatial,
+        register_sample_log2: 0,
+        swarm_size: 120,
+        relay_count: 80,
+        live_edge_segment: SegmentSeq(41),
+        live_edge_manifest_hash: Hash([0xCC; 32]),
+        live_edge_timestamp_us: 1_700_000_000_250_000,
+        effective_segment: SegmentSeq(0),
+        descriptor_version: 1,
+        descriptor_hash: Hash([0x5D; 32]),
+        trees: vec![
+            TreeMappingEntry {
+                tree_id: TreeId(1),
+                layer: 0,
+                stripe_index: 0,
+                stripe_count: 1,
+                priority: 2,
+                bitrate_kbps: 1500,
+            },
+            TreeMappingEntry {
+                tree_id: TreeId(2),
+                layer: 1,
+                stripe_index: 0,
+                stripe_count: 1,
+                priority: 1,
+                bitrate_kbps: 1500,
+            },
+            TreeMappingEntry {
+                tree_id: TreeId(3),
+                layer: 2,
+                stripe_index: 0,
+                stripe_count: 1,
+                priority: 0,
+                bitrate_kbps: 3000,
+            },
+        ],
+        trees_next: vec![],
+        signature: SignatureBytes([0x99; 64]),
+    }
+}
+
 fn fixtures() -> Vec<(&'static str, &'static str, Frame)> {
     let sid = StreamId([0xAA; 32]);
     let nid = NodeId([0x11; 32]);
@@ -256,6 +301,88 @@ fn fixtures() -> Vec<(&'static str, &'static str, Frame)> {
             }),
         ),
         (
+            "buffer_state_bitfield",
+            "Ch4 §4.3.2",
+            Frame::BufferStateBitfield(BufferStateBitfield::from_flags(
+                SegmentSeq(42),
+                BlockIndex::new(2, 0).unwrap(),
+                &[
+                    true, true, false, true, true, true, true, false, true, true, true, true,
+                ],
+            )),
+        ),
+        (
+            "forward_join",
+            "App D §D.4.5",
+            Frame::ForwardJoin(ForwardJoin {
+                origin: PeerRecord {
+                    node_id: NodeId([0x31; 32]),
+                    node_class: NodeClass::Relay,
+                    assigned_trees: TreeSet(0b0000_0100),
+                    flags: PeerFlags {
+                        reachability: Reachability::Cone,
+                        relay_capable: false,
+                        source: false,
+                        source_ingress: false,
+                    },
+                    addr: WireAddr(SocketAddr::new(Ipv4Addr::new(192, 0, 2, 31).into(), 4031)),
+                },
+                ttl: 4,
+                pr_gossip: 2,
+            }),
+        ),
+        (
+            "shuffle",
+            "Ch3 §3.2.1",
+            Frame::Shuffle(Shuffle {
+                origin: NodeId([0x32; 32]),
+                ttl: 3,
+                wanted_trees: TreeSet(0b101),
+                records: vec![
+                    PeerRecord {
+                        node_id: NodeId([0x33; 32]),
+                        node_class: NodeClass::Relay,
+                        assigned_trees: TreeSet(0b0000_0001),
+                        flags: PeerFlags::PUBLIC,
+                        addr: WireAddr(SocketAddr::new(Ipv4Addr::new(192, 0, 2, 33).into(), 4033)),
+                    },
+                    PeerRecord {
+                        node_id: NodeId([0x34; 32]),
+                        node_class: NodeClass::Relay,
+                        assigned_trees: TreeSet(0b0000_0100),
+                        flags: PeerFlags::PUBLIC,
+                        addr: WireAddr(SocketAddr::new(Ipv4Addr::new(192, 0, 2, 34).into(), 4034)),
+                    },
+                ],
+            }),
+        ),
+        (
+            "gossip_exchange",
+            "App D §D.4.10",
+            Frame::GossipExchange(GossipExchange {
+                sender: NodeId([0x35; 32]),
+                sequence: 17,
+                wanted_trees: TreeSet(0b010),
+                records: vec![
+                    PeerRecord {
+                        node_id: NodeId([0x36; 32]),
+                        node_class: NodeClass::Relay,
+                        assigned_trees: TreeSet(0b0000_0010),
+                        flags: PeerFlags::PUBLIC,
+                        addr: WireAddr(SocketAddr::new(Ipv4Addr::new(192, 0, 2, 36).into(), 4036)),
+                    },
+                    PeerRecord {
+                        node_id: NodeId([0x37; 32]),
+                        node_class: NodeClass::Leaf,
+                        assigned_trees: TreeSet(0),
+                        flags: PeerFlags::PUBLIC,
+                        addr: WireAddr(SocketAddr::new(Ipv4Addr::new(192, 0, 2, 37).into(), 4037)),
+                    },
+                ],
+                hmac: Hash([0x77; 32]),
+            }),
+        ),
+        (
             "register_peer",
             "Ch2 §2.3.3",
             Frame::RegisterPeer(RegisterPeer {
@@ -388,6 +515,77 @@ fn fixtures() -> Vec<(&'static str, &'static str, Frame)> {
                     },
                 ],
                 signature: SignatureBytes([0xD5; 64]),
+            }),
+        ),
+        (
+            "find_node_request",
+            "App D §D.4.6",
+            Frame::FindNode(FindFrame::Request(FindRequest {
+                validation: vb(0x70),
+                target: NodeId([0x3C; 32]),
+            })),
+        ),
+        (
+            "find_node_response",
+            "App D §D.4.6",
+            Frame::FindNode(FindFrame::Response(FindResponse {
+                responder: NodeId([0x71; 32]),
+                result: FindResult::Nodes(vec![
+                    PeerRecord {
+                        node_id: NodeId([0x3D; 32]),
+                        node_class: NodeClass::Relay,
+                        assigned_trees: TreeSet(0b0000_0010),
+                        flags: PeerFlags {
+                            reachability: Reachability::Public,
+                            relay_capable: true,
+                            source: false,
+                            source_ingress: false,
+                        },
+                        addr: WireAddr(SocketAddr::new(Ipv4Addr::new(10, 0, 0, 3).into(), 4003)),
+                    },
+                    PeerRecord {
+                        node_id: NodeId([0x3E; 32]),
+                        node_class: NodeClass::Relay,
+                        assigned_trees: TreeSet(0b0000_0001),
+                        flags: PeerFlags {
+                            reachability: Reachability::Cone,
+                            relay_capable: false,
+                            source: false,
+                            source_ingress: false,
+                        },
+                        addr: WireAddr(SocketAddr::new(Ipv4Addr::new(10, 0, 0, 4).into(), 4004)),
+                    },
+                ]),
+            })),
+        ),
+        (
+            "find_value_response",
+            "App D §D.4.6",
+            Frame::FindValue(FindFrame::Response(FindResponse {
+                responder: NodeId([0x72; 32]),
+                result: FindResult::Value(Box::new(sr_fixture())),
+            })),
+        ),
+        (
+            "store_record",
+            "Ch2 §2.3.3",
+            Frame::StoreRecord(StoreRecord {
+                validation: vb(0x80),
+                record: Box::new(sr_fixture()),
+            }),
+        ),
+        (
+            "store_record_ack",
+            "Ch2 §2.3.3",
+            Frame::StoreRecordAck(StoreRecordAck {
+                guardian: NodeId([0x73; 32]),
+                accepted: true,
+                resp_flags: 0,
+                query_count: 17,
+                active_count: 1200,
+                relay_count: 700,
+                per_tree_relay: [230, 231, 239, 0, 0, 0],
+                starved: [0, 0, 3, 0, 0, 0],
             }),
         ),
     ]

@@ -24,6 +24,9 @@ pub enum Channel {
     Tree(TreeId),
     /// Unreliable datagram (media symbols).
     Datagram,
+    /// A reliable stream for bulk pull responses (`BLOCK_TRANSMISSION`), kept off
+    /// the control stream so 16 KB blocks never head-of-line block NEIGHBOR / ACCEPTED.
+    Pull,
 }
 
 /// Something the driver tells the node.
@@ -44,6 +47,9 @@ pub enum Input {
         peer: PeerAddr,
         /// Peer identity learned at the handshake.
         node_id: NodeId,
+        /// Transient symmetric key both ends derive from the handshake (TLS exporter);
+        /// keys the gossip HMAC of Ch3 §3.2.2.
+        session_key: [u8; 32],
     },
     /// A session closed (by the peer, by timeout, or after `CloseSession`).
     SessionClosed {
@@ -258,6 +264,8 @@ pub enum Event {
         ok: bool,
         /// Blocks missing (all layers).
         missing_blocks: u16,
+        /// Backfilled chunk (best effort, excluded from steady-state starvation).
+        backfill: bool,
     },
     /// First fully played chunk after start (startup join latency marker).
     FirstChunk {
@@ -279,6 +287,67 @@ pub enum Event {
         tree: u8,
         /// Microseconds from loss to new parent's first block.
         duration_us: u64,
+    },
+    /// A PULL_REQUEST went out.
+    PullSent {
+        /// Segment.
+        segment: u32,
+        /// Block.
+        block: u16,
+        /// Time to deadline, ms.
+        urgency_ms: u16,
+        /// Rarity broadcast.
+        broadcast: bool,
+    },
+    /// A PULL_REQUEST was answered.
+    PullServed {
+        /// Segment.
+        segment: u32,
+        /// Block.
+        block: u16,
+        /// Requester.
+        to: String,
+    },
+    /// A PULL_REQUEST was refused for lack of PULL budget.
+    PullRefused {
+        /// Segment.
+        segment: u32,
+        /// Block.
+        block: u16,
+    },
+    /// A PULL_REQUEST arrived for a block this node does not hold verified (a stale
+    /// or optimistic bitfield at the requester); it is answered with silence.
+    PullUnheld {
+        /// Segment.
+        segment: u32,
+        /// Block.
+        block: u16,
+    },
+    /// A block was completed through the pull path.
+    BlockPulled {
+        /// Segment.
+        segment: u32,
+        /// Block.
+        block: u16,
+    },
+    /// A DHT lookup finished (Ch2 §2.1).
+    DhtLookup {
+        /// `self`, `guardians` or `value`.
+        purpose: &'static str,
+        /// Longest path, in hops.
+        hops: u8,
+        /// FIND requests sent.
+        queried: u16,
+        /// Contacts that answered.
+        found: u16,
+        /// Wall time, ms.
+        ms: u32,
+    },
+    /// This node answered a DHT RPC as a server (`find_node`, `find_value`,
+    /// `register`, `get_peers`, `store`).
+    DhtServed {
+        /// RPC kind.
+        rpc: &'static str,
     },
     /// Free-form diagnostic.
     Note {

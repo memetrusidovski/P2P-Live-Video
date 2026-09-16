@@ -1,7 +1,7 @@
 //! Per-tree overlay state: the parent link, child links, depth and slots
 //! (Ch1 §1.2).
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use bs_wire::{NodeClass, NodeId, SegmentSeq, TreeId, TreeSet};
 
@@ -75,8 +75,8 @@ pub struct TreeState {
     /// new parent's first block arrives, then receives `DISCONNECT_CHOKE`
     /// (Ch1 §1.2.2 The Drain Path, step 3).
     pub old_parent: Option<ParentLink>,
-    /// Children, by address.
-    pub children: HashMap<PeerAddr, ChildLink>,
+    /// Children, by address (ordered: iteration order must be deterministic).
+    pub children: BTreeMap<PeerAddr, ChildLink>,
     /// Our hop depth from the source (0 = source; `u8::MAX` = unknown/unparented).
     pub depth: u8,
     /// Slot count `K_v(m)`.
@@ -106,7 +106,7 @@ impl TreeState {
             id,
             parent: None,
             old_parent: None,
-            children: HashMap::new(),
+            children: BTreeMap::new(),
             depth: u8::MAX,
             k_v: 0,
             assigned: false,

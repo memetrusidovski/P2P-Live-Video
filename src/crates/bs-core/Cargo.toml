@@ -10,6 +10,7 @@ description = "BitStream sans-I/O peer state machine: lifecycle, forest, swarm b
 bs-wire = { workspace = true, features = ["serde"] }
 bs-crypto.workspace = true
 bs-media.workspace = true
+blake3.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

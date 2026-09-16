@@ -3,7 +3,7 @@
 //! registrations whose `AssignedTrees` intersect the wanted set — plus the
 //! publisher's latest signed Stream Record.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use bs_wire::{NodeId, PeerRecord, StreamRecord, TreeSet};
 use rand::seq::SliceRandom;
@@ -12,7 +12,7 @@ use rand_chacha::ChaCha8Rng;
 /// The oracle.
 #[derive(Default)]
 pub struct Oracle {
-    records: HashMap<NodeId, PeerRecord>,
+    records: BTreeMap<NodeId, PeerRecord>,
     /// Latest Stream Record.
     pub stream_record: Option<StreamRecord>,
     /// Queries served.

@@ -143,6 +143,8 @@ pub struct Harness {
     pub traces: HashMap<SocketAddr, Vec<(Instant, TraceItem)>>,
     /// Frames whose sender is in this set are silently dropped.
     pub drop_from: HashSet<SocketAddr>,
+    /// RaptorQ symbols of these (segment, block index) keys are dropped on the wire.
+    pub drop_symbols_of: HashSet<(u32, u16)>,
     /// Corrupt source symbol 0 of this block in flight.
     pub poison: Option<(SegmentSeq, BlockIndex)>,
     /// Corrupt source symbol 0 of every block sent by this node (a poisoning relay).
@@ -174,6 +176,7 @@ impl Harness {
             stream_record: None,
             traces: HashMap::new(),
             drop_from: HashSet::new(),
+            drop_symbols_of: HashSet::new(),
             poison: None,
             poison_all_from: None,
             source: None,
@@ -203,6 +206,8 @@ impl Harness {
             upload_kbps,
             addr: a,
             stream_id: StreamId::ZERO,
+            bootstrap: Vec::new(),
+            discovery: bs_core::DiscoveryMode::Oracle,
             params: self.params.clone(),
             seed,
         });
@@ -232,6 +237,8 @@ impl Harness {
             upload_kbps,
             addr: a,
             stream_id: sid,
+            bootstrap: Vec::new(),
+            discovery: bs_core::DiscoveryMode::Oracle,
             params: self.params.clone(),
             seed,
         });
@@ -251,6 +258,18 @@ impl Harness {
     /// Begin feeding the publisher one chunk every 250 ms, starting now.
     pub fn start_publishing(&mut self) {
         self.next_publish = Some(self.now);
+    }
+
+    /// Open a session on `to` from an external peer `from` (no node behind it).
+    pub fn open_session_from(&mut self, to: SocketAddr, from: SocketAddr, node_id: NodeId) {
+        self.feed(
+            to,
+            Input::SessionOpened {
+                peer: from,
+                node_id,
+                session_key: [7u8; 32],
+            },
+        );
     }
 
     /// Inject a frame into `to` as if sent by `from`, immediately.
@@ -307,6 +326,11 @@ impl Harness {
                     return;
                 }
                 let mut frame = frame;
+                if let Frame::RaptorQSymbol(s) = &frame {
+                    if self.drop_symbols_of.contains(&(s.segment.0, s.block.0)) {
+                        return;
+                    }
+                }
                 if let Frame::RaptorQSymbol(s) = &mut frame {
                     let targeted = self
                         .poison
@@ -324,6 +348,7 @@ impl Harness {
                     Channel::Udp => 0,
                     Channel::Control => 1,
                     Channel::Datagram => 2,
+                    Channel::Pull => 3,
                     Channel::Tree(t) => 16 + t.0,
                 };
                 let tail = self.fifo.entry((from, to, code)).or_insert(Instant::ZERO);
@@ -477,6 +502,7 @@ impl Harness {
                                     Input::SessionOpened {
                                         peer: a,
                                         node_id: ida,
+                                        session_key: [7u8; 32],
                                     },
                                 );
                                 self.feed(
@@ -484,6 +510,7 @@ impl Harness {
                                     Input::SessionOpened {
                                         peer: b,
                                         node_id: idb,
+                                        session_key: [7u8; 32],
                                     },
                                 );
                             }

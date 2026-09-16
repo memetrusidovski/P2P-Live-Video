@@ -10,6 +10,8 @@ Usage: fleet/report.py [--out results/fleet] [--psr-max 0.001] [--sjl-max-ms 150
 """
 from __future__ import annotations
 
+RUN_ID_FILTER: str | None = None
+
 import argparse
 import json
 import pathlib
@@ -33,7 +35,11 @@ def copy_results(dest: pathlib.Path) -> None:
 def build_verdict(raw: pathlib.Path, psr_max: float, sjl_max_ms: float, seed: int, profile: str, start_delay_s: float = 0.0) -> dict:
     """Fold bsnode result.json files (bs_node::RunReport) into the simulator's verdict schema."""
     results = []
-    for p in sorted(raw.glob("*/result.json")):
+    # Results are laid out /results/<run-id>/<hostname>/result.json; report the newest
+    # run only (or the one named by --run-id).
+    runs = sorted(d for d in raw.iterdir() if d.is_dir() and any(d.glob("*/result.json")))
+    chosen = RUN_ID_FILTER or (runs[-1].name if runs else None)
+    for p in sorted(raw.glob(f"{chosen}/*/result.json")) if chosen else []:
         try:
             r = json.loads(p.read_text())
             r["container"] = p.parent.name
@@ -86,7 +92,10 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--profile", default="clean")
     ap.add_argument("--raw", help="already-copied results dir (skip docker copy)")
+    ap.add_argument("--run-id", help="report this run id (default: newest)")
     a = ap.parse_args()
+    global RUN_ID_FILTER
+    RUN_ID_FILTER = a.run_id
     out = pathlib.Path(a.out)
     if a.raw:
         raw = pathlib.Path(a.raw)

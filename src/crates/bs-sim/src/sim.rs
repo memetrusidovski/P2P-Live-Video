@@ -207,6 +207,8 @@ impl Sim {
             upload_kbps: sim.scenario.publisher.upload_kbps,
             addr: pub_addr,
             stream_id: bs_wire::StreamId::ZERO,
+            bootstrap: Vec::new(),
+            discovery: sim.scenario.discovery,
             params: params.clone(),
             seed: sim.scenario.seed,
         });
@@ -288,6 +290,8 @@ impl Sim {
                 upload_kbps: upload,
                 addr,
                 stream_id,
+                bootstrap: vec![self.nodes[0].addr],
+                discovery: self.scenario.discovery,
                 params: params.clone(),
                 seed: self
                     .scenario
@@ -335,6 +339,18 @@ impl Sim {
                     channel,
                     frame,
                 } => {
+                    // A connection closed while data was in flight discards it (QUIC).
+                    let to_addr = self.nodes[to].addr;
+                    if !matches!(channel, Channel::Udp) && !self.network.has_session(from, to_addr)
+                    {
+                        self.kpis.no_session_drops += 1;
+                        *self
+                            .kpis
+                            .no_session_by_type
+                            .entry(format!("{}(rx)", frame.frame_type().name()))
+                            .or_default() += 1;
+                        continue;
+                    }
                     if self.nodes[to].alive {
                         self.feed(
                             to,
@@ -352,11 +368,13 @@ impl Sim {
                         self.network.open_session(aa, ab);
                         let ida = self.nodes[a].node.node_id();
                         let idb = self.nodes[b].node.node_id();
+                        let key = session_key(self.scenario.seed, aa, ab);
                         self.feed(
                             b,
                             Input::SessionOpened {
                                 peer: aa,
                                 node_id: ida,
+                                session_key: key,
                             },
                         );
                         self.feed(
@@ -364,6 +382,7 @@ impl Sim {
                             Input::SessionOpened {
                                 peer: ab,
                                 node_id: idb,
+                                session_key: key,
                             },
                         );
                     } else if self.nodes[a].alive {
@@ -559,7 +578,9 @@ impl Sim {
         // Reschedule the timer.
         let next = self.nodes[i].node.next_timer();
         if let Some(t) = next {
-            let t = if t < now { now } else { t };
+            // A timer in the past fires at now + 1 µs, never at now: a node whose
+            // timer never advances would otherwise pin virtual time forever.
+            let t = if t <= now { Instant(now.0 + 1) } else { t };
             if self.nodes[i].timer_at.map(|cur| t < cur).unwrap_or(true) {
                 self.nodes[i].timer_at = Some(t);
                 self.schedule(t, Kind::Timer(i));
@@ -611,6 +632,18 @@ impl Sim {
                 // Session-bound channels need a session.
                 if !matches!(channel, Channel::Udp) && !self.network.has_session(from, to) {
                     self.kpis.no_session_drops += 1;
+                    *self
+                        .kpis
+                        .no_session_by_type
+                        .entry(ty.name().to_string())
+                        .or_default() += 1;
+                    if self.kpis.no_session_drops <= 200 {
+                        self.log.note(
+                            self.now,
+                            i,
+                            &format!("no session for {} to node {j} ({channel:?})", ty.name()),
+                        );
+                    }
                     return;
                 }
                 match self
@@ -733,4 +766,15 @@ impl Source for FileSourceOffset {
     fn layer_hashes(&self) -> Vec<bs_wire::Hash> {
         self.inner.layer_hashes()
     }
+}
+
+/// Both ends of a simulated session derive the same transient key (stands in for the
+/// TLS exporter secret of the real runtime).
+fn session_key(seed: u64, a: SocketAddr, b: SocketAddr) -> [u8; 32] {
+    let (x, y) = if a < b { (a, b) } else { (b, a) };
+    let mut h = blake3::Hasher::new();
+    h.update(&seed.to_le_bytes());
+    h.update(x.to_string().as_bytes());
+    h.update(y.to_string().as_bytes());
+    *h.finalize().as_bytes()
 }

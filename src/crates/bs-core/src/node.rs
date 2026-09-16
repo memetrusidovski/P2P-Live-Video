@@ -2,7 +2,7 @@
 //! publisher components and emits outputs. Section references are to the
 //! protocol specification.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use bs_crypto::pow::Difficulty;
 use bs_crypto::{rendezvous, Identity, Signer};
@@ -25,6 +25,15 @@ use crate::publisher::Publisher;
 use crate::swarm::{ManifestVerdict, SwarmBuffer, VerifiedBlock};
 use crate::time::{Duration, Instant};
 use crate::Lifecycle;
+
+mod dht;
+mod membership;
+mod pull;
+
+use dht::DhtState;
+pub use dht::DiscoveryMode;
+pub use membership::MembershipState;
+pub use pull::PullState;
 
 /// What this node is.
 #[derive(Debug, Clone)]
@@ -60,6 +69,10 @@ pub struct NodeConfig {
     pub params: Params,
     /// RNG seed.
     pub seed: u64,
+    /// Bootstrap contacts for the DHT (Ch2 §2.1.3); empty for the first node.
+    pub bootstrap: Vec<PeerAddr>,
+    /// How peers are discovered.
+    pub discovery: DiscoveryMode,
 }
 
 #[derive(Debug)]
@@ -68,6 +81,7 @@ struct Session {
     open: bool,
     last_rx: Instant,
     ping_sent_at: Option<Instant>,
+    session_key: Option<[u8; 32]>,
 }
 
 /// A peer.
@@ -88,8 +102,8 @@ pub struct Node {
     top_layer: u8,
     shed_retry_at: Option<Instant>,
     swarm: SwarmBuffer,
-    sessions: HashMap<PeerAddr, Session>,
-    passive: HashMap<NodeId, PeerRecord>,
+    sessions: BTreeMap<PeerAddr, Session>,
+    passive: BTreeMap<NodeId, PeerRecord>,
     /// Peers that delivered blocks failing verification; never chosen again this run.
     bad_peers: HashSet<NodeId>,
     source_record: Option<PeerRecord>,
@@ -106,6 +120,18 @@ pub struct Node {
     descriptor: Option<StreamDescriptor>,
     /// Children already sent the current descriptor version.
     descriptor_sent: HashSet<(u32, PeerAddr)>,
+    /// PULL zone state (Ch4 §4.3).
+    pull: PullState,
+    /// HyParView membership (Ch3 §3.1–3.2).
+    membership: MembershipState,
+    /// Per tree, the (segment, chunk) of the first BLOCK_PROOF its parent pushed to us.
+    /// A chunk is steady-state only once every wanted tree has pushed a *later* chunk;
+    /// everything before is join-time backfill and best effort.
+    first_push_chunk: BTreeMap<u8, (SegmentSeq, u8)>,
+    /// DHT state (Ch2).
+    dht: DhtState,
+    /// Registration sampling exponent last seen in a verified Stream Record.
+    known_sample_log2: u8,
     now: Instant,
 }
 
@@ -132,6 +158,12 @@ impl Node {
             Role::Viewer { top_layer } => top_layer,
             Role::Publisher { ref ladder, .. } => ladder.len().saturating_sub(1) as u8,
         };
+        let dht = DhtState::new(
+            identity.node_id(),
+            cfg.discovery,
+            cfg.bootstrap.clone(),
+            params.dht_k,
+        );
         Self {
             rng: ChaCha8Rng::seed_from_u64(cfg.seed),
             identity,
@@ -147,8 +179,8 @@ impl Node {
             top_layer,
             shed_retry_at: None,
             swarm,
-            sessions: HashMap::new(),
-            passive: HashMap::new(),
+            sessions: BTreeMap::new(),
+            passive: BTreeMap::new(),
             bad_peers: HashSet::new(),
             source_record: None,
             discovery_inflight: false,
@@ -161,6 +193,11 @@ impl Node {
             ending: false,
             descriptor: None,
             descriptor_sent: HashSet::new(),
+            pull: PullState::default(),
+            membership: MembershipState::default(),
+            first_push_chunk: BTreeMap::new(),
+            dht,
+            known_sample_log2: 0,
             now: Instant::ZERO,
             cfg,
         }
@@ -211,6 +248,28 @@ impl Node {
     pub fn matrix(&self) -> Option<&SlicingMatrix> {
         self.matrix.as_ref()
     }
+    /// HyParView Active Set size.
+    pub fn active_set_len(&self) -> usize {
+        self.membership.active.len()
+    }
+    /// Passive Set size.
+    pub fn passive_len(&self) -> usize {
+        self.passive.len()
+    }
+    /// Active Set target `c_a_eff`.
+    pub fn active_set_target(&self) -> usize {
+        self.active_target()
+    }
+    /// Membership counters: (exchanges accepted, exchanges rejected, shuffles, forward joins).
+    pub fn membership_stats(&self) -> (u64, u64, u64, u64) {
+        let m = &self.membership;
+        (
+            m.exchanges,
+            m.exchanges_rejected,
+            m.shuffles,
+            m.forward_joins,
+        )
+    }
     /// Node class.
     pub fn node_class(&self) -> NodeClass {
         self.cfg.node_class
@@ -253,6 +312,9 @@ impl Node {
         };
         m(self.swarm.next_deadline());
         m(self.shed_retry_at);
+        m(self.pull_next_timer());
+        m(self.membership_next_timer());
+        m(self.dht_next_timer());
         for tree in &self.trees {
             match &tree.join {
                 JoinState::Probing { deadline, .. } => m(Some(*deadline)),
@@ -274,7 +336,11 @@ impl Node {
         }
         match input {
             Input::Cmd(cmd) => self.handle_cmd(cmd),
-            Input::SessionOpened { peer, node_id } => self.on_session_opened(peer, node_id),
+            Input::SessionOpened {
+                peer,
+                node_id,
+                session_key,
+            } => self.on_session_opened(peer, node_id, session_key),
             Input::SessionClosed { peer } => self.on_session_closed(peer, "session closed"),
             Input::Frame {
                 from,
@@ -315,6 +381,11 @@ impl Node {
     fn start(&mut self) {
         self.started_at = Some(self.now);
         self.next_liveness = self.now;
+        self.pull.next_gossip = self.now + self.params.tau_gossip;
+        self.membership.next_gossip = self.now + self.params.tau_gossip;
+        self.membership.next_shuffle = self.now + self.params.tau_gossip * 3;
+        self.pull.next_sched = self.now + self.params.tau_sched;
+        self.pull.budget_at = self.now;
         let d = Difficulty {
             c1: self.params.c1,
             c2_min: self.params.c2_min,
@@ -338,19 +409,24 @@ impl Node {
                     t.depth = 0;
                 }
                 self.recompute_slots();
-                let rec = self.peer_record();
-                self.out.push_back(Output::Register(rec));
+                self.dht_start();
+                self.register_self();
                 self.store_record();
                 self.set_state(Lifecycle::Active);
             }
             Role::Viewer { .. } => {
                 self.set_state(Lifecycle::Discovery);
+                self.dht_start();
                 self.request_discovery(TreeSet::EMPTY);
             }
         }
     }
 
     fn store_record(&mut self) {
+        if self.dht.mode == DiscoveryMode::Dht {
+            self.dht_store_record();
+            return;
+        }
         let (n, r, now) = (self.swarm_size, self.relay_count, self.now);
         if let Some(p) = self.publisher.as_mut() {
             let rec = p.stream_record(n, r, now);
@@ -394,6 +470,10 @@ impl Node {
                 starved.insert(t.id);
             }
         }
+        if self.dht.mode == DiscoveryMode::Dht {
+            self.dht_discover(wanted, starved);
+            return;
+        }
         self.out.push_back(Output::Discover {
             wanted_trees: wanted,
             starved_trees: starved,
@@ -407,13 +487,7 @@ impl Node {
     ) {
         self.discovery_inflight = false;
         for r in records {
-            if r.node_id == self.node_id() {
-                continue;
-            }
-            if r.flags.source {
-                self.source_record = Some(r);
-            }
-            self.passive.insert(r.node_id, r);
+            self.passive_insert(r);
         }
         if let Some(sr) = stream_record {
             if self.publisher.is_none() {
@@ -432,6 +506,7 @@ impl Node {
                     self.publisher_key = Some(sr.publisher_pubkey);
                     self.swarm_size = sr.swarm_size;
                     self.relay_count = sr.relay_count;
+                    self.known_sample_log2 = sr.register_sample_log2;
                     let layer_count = sr.trees.iter().map(|t| t.layer + 1).max().unwrap_or(1);
                     let m = SlicingMatrix::from_entries(
                         sr.manifest_version.min(255) as u8,
@@ -446,14 +521,19 @@ impl Node {
                         self.setup_trees();
                         self.configure_tree_roles();
                         self.recompute_slots();
-                        let rec = self.peer_record();
-                        self.out.push_back(Output::Register(rec));
+                        self.register_self();
                     }
                 }
             }
         }
         if self.state == Lifecycle::Discovery && self.matrix.is_some() {
-            self.set_state(Lifecycle::Connecting);
+            // JOINING (Ch1 §1.3.1): HyParView handshakes first; CONNECTING once the
+            // Active Set reaches θ_join or after a bounded wait (membership_timers).
+            self.set_state(Lifecycle::Joining);
+            self.begin_joining();
+        }
+        if self.state == Lifecycle::Joining {
+            return;
         }
         // Advance every tree waiting on discovery, and start joins for detached trees.
         let ids: Vec<TreeId> = self.trees.iter().map(|t| t.id).collect();
@@ -504,6 +584,7 @@ impl Node {
         let mut v: Vec<PeerRecord> = self
             .passive
             .values()
+            .chain(self.membership.active.values().map(|a| &a.record))
             .filter(|r| r.relays(tree))
             .filter(|r| r.flags.reachability != bs_wire::Reachability::Symmetric)
             .filter(|r| r.node_id != self.node_id())
@@ -520,6 +601,7 @@ impl Node {
             }
         }
         v.sort_by_key(|r| r.node_id);
+        v.dedup_by_key(|r| r.node_id);
         v
     }
 
@@ -722,7 +804,19 @@ impl Node {
     fn join_round_failed(&mut self, tree: TreeId, saturated: usize) {
         let idx = tree.index();
         let candidates = saturated;
-        if !self.join_stats[idx].saw_warming && saturated > 0 {
+        // A WARMING candidate exempts the round (Ch1 §1.2.2 table) because capacity
+        // is imminent, but only for a bounded run of rounds: under sustained churn at
+        // capacity there is always someone warming, and an unbounded exemption keeps
+        // the joiner probing forever instead of shedding (ISSUE-063).
+        let saw_warming = self.join_stats[idx].saw_warming;
+        let exempt =
+            saw_warming && self.join_stats[idx].warming_rounds < self.params.warming_exempt_rounds;
+        if saw_warming {
+            self.join_stats[idx].warming_rounds += 1;
+        } else {
+            self.join_stats[idx].warming_rounds = 0;
+        }
+        if !exempt && (saturated > 0 || saw_warming) {
             self.join_stats[idx].failed_rounds += 1;
         }
         let failed = self.join_stats[idx].failed_rounds;
@@ -752,7 +846,7 @@ impl Node {
         // and the drain window is only five segments.
         let repairing = self.trees[idx].repairing
             || self.trees[idx].parent.is_none() && self.trees[idx].lost_at.is_some();
-        let steps = if repairing || self.join_stats[idx].saw_warming {
+        let steps = if repairing || exempt {
             0
         } else {
             failed.min(2)
@@ -783,6 +877,7 @@ impl Node {
                 t.repairing = false;
                 t.lost_at = None;
                 self.join_stats[id.index()].failed_rounds = 0;
+                self.join_stats[id.index()].warming_rounds = 0;
                 if let Some(p) = t.detach_parent(self.now) {
                     t.lost_at = None;
                     let old = t.old_parent.take();
@@ -837,7 +932,8 @@ impl Node {
 
     fn on_accepted(&mut self, from: PeerAddr, a: Accepted) {
         if a.tree_id == TreeId::NONE {
-            return; // membership accept (M3)
+            self.on_membership_accepted(from, &a);
+            return;
         }
         let idx = a.tree_id.index();
         if idx >= self.trees.len() {
@@ -875,6 +971,7 @@ impl Node {
         self.trees[idx].depth = a.hop_depth.saturating_add(1);
         self.trees[idx].join = JoinState::Idle;
         self.join_stats[idx].failed_rounds = 0;
+        self.join_stats[idx].warming_rounds = 0;
         // A warm repair (drain) leaves an old parent: keep taking its blocks until
         // the new parent delivers, then release it (spec step 3).
         if let Some(op) = old_parent {
@@ -888,6 +985,19 @@ impl Node {
             depth: self.trees[idx].depth,
             repair,
         });
+        if !self.is_source() {
+            if self.descriptor.is_none() {
+                let req = ManifestRequest {
+                    segment: SegmentSeq::NONE,
+                    selector: ManifestSelector::Descriptor,
+                };
+                self.send(from, Channel::Control, Frame::ManifestRequest(req), None);
+            }
+            // Late-join backfill (Ch4 §4.3.1): pull the retained segments before the edge.
+            if !repair && self.trees.iter().filter(|t| t.parent.is_some()).count() == 1 {
+                self.backfill_from(from);
+            }
+        }
         if repair && self.trees[idx].lost_at.is_none() {
             self.trees[idx].repairing = false;
         }
@@ -898,6 +1008,9 @@ impl Node {
     fn on_rejected(&mut self, from: PeerAddr, d: &Disconnect) {
         let tree = d.tree_id;
         if !tree.is_tree() {
+            // Membership refusal: forget the contact for now.
+            self.membership.join_contacts.remove(&from);
+            self.maybe_close_session(from);
             return;
         }
         let idx = tree.index();
@@ -959,19 +1072,43 @@ impl Node {
     // ------------------------------------------------------------------ admission (parent side)
 
     fn on_neighbor(&mut self, from: PeerAddr, n: Neighbor) {
-        if let Some(s) = self.sessions.get_mut(&from) {
-            s.node_id.get_or_insert(n.sender);
+        // Admission needs a live session: a NEIGHBOR that raced our own close (an
+        // Active Set eviction) would otherwise be admitted into a dead connection.
+        match self.sessions.get_mut(&from) {
+            Some(s) if s.open => {
+                s.node_id.get_or_insert(n.sender);
+            }
+            _ => return,
         }
         if n.tree_id == TreeId::NONE {
-            // Membership promotion (HyParView, M3): accept for now.
-            let f = Accepted {
-                sender: self.node_id(),
-                accepted_type: AcceptedType::Neighbor,
-                tree_id: TreeId::NONE,
-                hop_depth: 0,
-                pending: false,
+            // HyParView membership promotion (Ch3 §3.1.2): HIGH priority is always
+            // admitted (evicting a random tree-less member if full); LOW only if there
+            // is room. Refusals carry TreeID 0 (App D §D.4.3b).
+            let record = PeerRecord {
+                node_id: n.sender,
+                node_class: n.node_class,
+                assigned_trees: n.assigned_trees,
+                flags: PeerFlags::PUBLIC,
+                addr: WireAddr(from),
             };
-            self.send(from, Channel::Control, Frame::Accepted(f), None);
+            if self.active_add(from, record, n.priority == Priority::High) {
+                let f = Accepted {
+                    sender: self.node_id(),
+                    accepted_type: AcceptedType::Neighbor,
+                    tree_id: TreeId::NONE,
+                    hop_depth: 0,
+                    pending: false,
+                };
+                self.send(from, Channel::Control, Frame::Accepted(f), None);
+            } else {
+                let f = Disconnect {
+                    sender: self.node_id(),
+                    reason: DisconnectReason::RejectedSaturated,
+                    tree_id: TreeId::NONE,
+                };
+                self.send(from, Channel::Control, Frame::Disconnect(f), None);
+                self.maybe_close_session(from);
+            }
             return;
         }
         let idx = n.tree_id.index();
@@ -1118,6 +1255,30 @@ impl Node {
         }
     }
 
+    /// Release every child of `tree` through the drain path (scope: each child).
+    fn drain_children(&mut self, tree: TreeId, reason: DisconnectReason) {
+        let idx = tree.index();
+        let deadline = SegmentSeq(self.swarm.live_edge.0 + self.params.tau_drain_segments);
+        let addrs: Vec<PeerAddr> = self.trees[idx]
+            .children
+            .values()
+            .filter(|c| c.draining_until.is_none())
+            .map(|c| c.addr)
+            .collect();
+        for a in addrs {
+            let d = DrainNotice {
+                tree_id: tree,
+                reason,
+                scope: DrainScope::ThisChild,
+                deadline,
+            };
+            self.send(a, Channel::Tree(tree), Frame::DrainNotice(d), None);
+            if let Some(c) = self.trees[idx].children.get_mut(&a) {
+                c.draining_until = Some(deadline);
+            }
+        }
+    }
+
     /// A drained child left tree `tree`: start serving one pending child, if any.
     fn release_pending(&mut self, tree: TreeId) {
         let idx = tree.index();
@@ -1153,7 +1314,7 @@ impl Node {
         };
         let signed = p.set_descriptor(d);
         self.descriptor = Some(signed);
-        let children: HashSet<PeerAddr> = self
+        let children: BTreeSet<PeerAddr> = self
             .trees
             .iter()
             .flat_map(|t| t.children.values().filter(|c| !c.pending).map(|c| c.addr))
@@ -1185,7 +1346,7 @@ impl Node {
             return;
         }
         self.descriptor = Some(d.clone());
-        let children: HashSet<PeerAddr> = self
+        let children: BTreeSet<PeerAddr> = self
             .trees
             .iter()
             .flat_map(|t| t.children.values().filter(|c| !c.pending).map(|c| c.addr))
@@ -1228,6 +1389,31 @@ impl Node {
         }
     }
 
+    /// Whether (segment, chunk) lies strictly after the first chunk pushed to us in
+    /// every tree we hold a parent for (the boundary of Ch4 §4.3.1 "PUSH delivery
+    /// from X+1 onward"). The source is always steady.
+    fn is_steady_chunk(&self, seg: SegmentSeq, chunk: u8) -> bool {
+        if self.is_source() {
+            return true;
+        }
+        let mut any = false;
+        for t in &self.trees {
+            if !t.wants_parent() {
+                continue;
+            }
+            match self.first_push_chunk.get(&t.id.0) {
+                None => return false,
+                Some(f) => {
+                    any = true;
+                    if (seg, chunk) <= *f {
+                        return false;
+                    }
+                }
+            }
+        }
+        any
+    }
+
     fn remove_child(&mut self, addr: PeerAddr, reason: &str) {
         for t in 0..self.trees.len() {
             if let Some(c) = self.trees[t].children.remove(&addr) {
@@ -1249,8 +1435,7 @@ impl Node {
         // Registration carries class and assigned trees only; K_avail is probed.
         // Re-register when we first become able to serve (warm-up ended) so the
         // oracle/DHT can return us.
-        let rec = self.peer_record();
-        self.out.push_back(Output::Register(rec));
+        self.register_self();
     }
 
     // ------------------------------------------------------------------ sessions
@@ -1261,22 +1446,25 @@ impl Node {
             open: false,
             last_rx: self.now,
             ping_sent_at: None,
+            session_key: None,
         });
         if !s.open {
             self.out.push_back(Output::OpenSession(addr));
         }
     }
 
-    fn on_session_opened(&mut self, peer: PeerAddr, node_id: NodeId) {
+    fn on_session_opened(&mut self, peer: PeerAddr, node_id: NodeId, session_key: [u8; 32]) {
         let s = self.sessions.entry(peer).or_insert(Session {
             node_id: None,
             open: false,
             last_rx: self.now,
             ping_sent_at: None,
+            session_key: None,
         });
         s.open = true;
         s.node_id = Some(node_id);
         s.last_rx = self.now;
+        s.session_key = Some(session_key);
         let ids: Vec<TreeId> = self.trees.iter().map(|t| t.id).collect();
         for id in ids {
             if let JoinState::Requesting {
@@ -1291,10 +1479,17 @@ impl Node {
                 }
             }
         }
+        self.membership_session_opened(peer);
+        if self.membership.pending_neighbor.remove(&peer) {
+            self.membership_send_neighbor(peer);
+        }
     }
 
     fn on_session_closed(&mut self, peer: PeerAddr, reason: &str) {
         self.sessions.remove(&peer);
+        self.active_remove(peer, reason);
+        self.membership.join_contacts.remove(&peer);
+        self.membership.pending_neighbor.remove(&peer);
         self.remove_child(peer, reason);
         let ids: Vec<TreeId> = self.trees.iter().map(|t| t.id).collect();
         for id in ids {
@@ -1321,12 +1516,13 @@ impl Node {
     }
 
     fn maybe_close_session(&mut self, addr: PeerAddr) {
-        let used = self.trees.iter().any(|t| {
-            t.parent.as_ref().map(|p| p.addr) == Some(addr)
-                || t.old_parent.as_ref().map(|p| p.addr) == Some(addr)
-                || t.children.contains_key(&addr)
-                || matches!(&t.join, JoinState::Requesting { current, .. } if *current == addr)
-        });
+        let used = self.membership.active.contains_key(&addr)
+            || self.trees.iter().any(|t| {
+                t.parent.as_ref().map(|p| p.addr) == Some(addr)
+                    || t.old_parent.as_ref().map(|p| p.addr) == Some(addr)
+                    || t.children.contains_key(&addr)
+                    || matches!(&t.join, JoinState::Requesting { current, .. } if *current == addr)
+            });
         if !used && self.sessions.remove(&addr).is_some() {
             self.out.push_back(Output::CloseSession(addr));
         }
@@ -1404,16 +1600,24 @@ impl Node {
             Frame::StreamEnd(e) => self.on_stream_end(from, e),
             Frame::StreamDescriptor(d) => self.on_descriptor(from, d),
             Frame::ManifestRequest(r) => self.on_manifest_request(from, r),
-            Frame::Join(_)
-            | Frame::ChokeState(_)
-            | Frame::PullRequest(_)
-            | Frame::ManifestUpdate(_)
-            | Frame::BlockTransmission(_) => {
+            Frame::BufferStateBitfield(bf) => self.on_bitfield(from, bf),
+            Frame::Join(j) => self.on_join(from, j),
+            Frame::ForwardJoin(fj) => self.on_forward_join(from, fj),
+            Frame::Shuffle(sh) => self.on_shuffle(from, sh),
+            Frame::GossipExchange(g) => self.on_gossip_exchange(from, g),
+            Frame::PullRequest(r) => self.on_pull_request(from, r),
+            Frame::BlockTransmission(bt) => self.on_block_transmission(from, bt),
+            Frame::ChokeState(_) | Frame::ManifestUpdate(_) => {
                 // M3.
             }
-            Frame::RegisterPeer(_) | Frame::GetPeers(_) => {
-                // Discovery frames are answered by the guardian in the driver (M2) or the
-                // DHT module (M3), never by the peer core.
+            Frame::RegisterPeer(_)
+            | Frame::GetPeers(_)
+            | Frame::FindNode(_)
+            | Frame::FindValue(_)
+            | Frame::StoreRecord(_)
+            | Frame::StoreRecordAck(_) => {
+                // DHT frames (Ch2): routed to the DHT module.
+                self.on_dht_frame(from, frame);
             }
             Frame::Raw { .. } => {}
         }
@@ -1463,7 +1667,8 @@ impl Node {
         );
     }
 
-    fn on_pong(&mut self, from: PeerAddr, _p: Pong) {
+    fn on_pong(&mut self, from: PeerAddr, p: Pong) {
+        self.dht_on_pong(from, &p);
         if let Some(s) = self.sessions.get_mut(&from) {
             if let Some(t0) = s.ping_sent_at.take() {
                 let sample = self.now.duration_since(t0);
@@ -1579,7 +1784,7 @@ impl Node {
             .trees
             .iter()
             .flat_map(|t| t.children.keys().copied())
-            .collect::<HashSet<_>>()
+            .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
         for c in children {
@@ -1598,7 +1803,14 @@ impl Node {
         let (Some(pk), Some(matrix)) = (self.publisher_key, self.matrix.clone()) else {
             return;
         };
+        let behind_edge = self.swarm.live_edge.is_some() && m.body.segment < self.swarm.live_edge;
         let verdict = self.swarm.accept_manifest(&m, &pk, &matrix, self.now);
+        if verdict == ManifestVerdict::Accepted {
+            // The sender of a manifest holds, or is about to hold, that chunk's blocks:
+            // it is the first place to pull from before its bitfield arrives.
+            let _ = behind_edge;
+            self.note_implicit_provider(from, &m.body);
+        }
         match verdict {
             ManifestVerdict::Accepted => {
                 self.emit(Event::ManifestAccepted {
@@ -1624,7 +1836,7 @@ impl Node {
     }
 
     fn forward_manifest(&mut self, m: &Manifest, except: Option<PeerAddr>) {
-        let children: HashSet<PeerAddr> = self
+        let children: BTreeSet<PeerAddr> = self
             .trees
             .iter()
             .flat_map(|t| t.children.values().filter(|c| !c.pending).map(|c| c.addr))
@@ -1645,7 +1857,22 @@ impl Node {
     }
 
     fn on_block_proof(&mut self, from: PeerAddr, channel: Channel, bp: BlockProof) {
-        let Channel::Tree(tree) = channel else { return };
+        let Channel::Tree(tree) = channel else {
+            // Pull path (Ch4 §4.1.2): a repair responder precedes its symbols with the
+            // proof on the control stream. No depth or liveness semantics attach.
+            let sender = self
+                .sessions
+                .get(&from)
+                .and_then(|s| s.node_id)
+                .unwrap_or(NodeId::ZERO);
+            if self
+                .swarm
+                .add_proof(bp.segment, bp.block, bp.siblings, u8::MAX, sender, self.now)
+            {
+                self.try_verify(bp.segment, bp.block, Some(from));
+            }
+            return;
+        };
         let idx = tree.index();
         if idx >= self.trees.len() {
             return;
@@ -1656,10 +1883,28 @@ impl Node {
         if !is_current && !is_old {
             return;
         }
+        if is_current {
+            self.first_push_chunk
+                .entry(tree.0)
+                .or_insert((bp.segment, bp.block.chunk()));
+        }
         let sender = if is_current {
             // Depth propagation (Ch1 §1.2.2): h_self = SenderHopDepth + 1 on every block.
+            let was = self.trees[idx].depth;
+            self.trees[idx].depth = bp.sender_hop_depth.saturating_add(1);
+            let now_depth = self.trees[idx].depth;
+            let d_max = self.params.d_max;
+            if now_depth >= d_max && was < d_max {
+                // Depth Propagation rule: at h >= D_max stop accepting and drain the
+                // children of this tree (reason DEPTH); they re-select with their scores
+                // now penalising this branch. Also re-select our own parent at once.
+                self.drain_children(tree, DisconnectReason::Depth);
+                if !self.trees[idx].join.is_active() {
+                    self.trees[idx].repairing = true;
+                    self.begin_probing(tree);
+                }
+            }
             let t = &mut self.trees[idx];
-            t.depth = bp.sender_hop_depth.saturating_add(1);
             let p = t.parent.as_mut().unwrap();
             p.parent_depth = bp.sender_hop_depth;
             let id = p.node_id;
@@ -1914,7 +2159,7 @@ impl Node {
             signature: bs_wire::SignatureBytes::ZERO,
         };
         e.signature = self.identity.sign(&e.signable_bytes());
-        let children: HashSet<PeerAddr> = self
+        let children: BTreeSet<PeerAddr> = self
             .trees
             .iter()
             .flat_map(|t| t.children.keys().copied())
@@ -1926,7 +2171,7 @@ impl Node {
     }
 
     fn quit(&mut self) {
-        let peers: HashSet<PeerAddr> = self
+        let peers: BTreeSet<PeerAddr> = self
             .trees
             .iter()
             .flat_map(|t| {
@@ -1952,6 +2197,7 @@ impl Node {
 
     fn run_timers(&mut self) {
         let now = self.now;
+        self.dht_timers();
         // Join deadlines.
         let ids: Vec<TreeId> = self.trees.iter().map(|t| t.id).collect();
         for id in ids {
@@ -1981,7 +2227,8 @@ impl Node {
                         && self.trees[idx].wants_parent()
                         && (self.trees[idx].parent.is_none() || self.trees[idx].repairing)
                         && self.matrix.is_some()
-                        && self.state != Lifecycle::Discovery =>
+                        && self.state != Lifecycle::Discovery
+                        && self.state != Lifecycle::Joining =>
                 {
                     self.begin_probing(id);
                 }
@@ -1998,6 +2245,10 @@ impl Node {
             self.next_liveness = now + self.params.tau_ping.div_by(4);
             self.liveness();
         }
+        // HyParView membership (Ch3 §3.1–3.2).
+        self.membership_timers();
+        // PULL zone: bitfield gossip and the repair scheduler (Ch4 §4.3).
+        self.pull_timers();
         // Playout.
         if self
             .swarm
@@ -2017,6 +2268,8 @@ impl Node {
                     layers_subscribed: subscribed.min(p.layers_total),
                     ok,
                     missing_blocks: p.missing,
+                    backfill: p.backfill
+                        || !self.is_steady_chunk(p.chunk.segment, p.chunk.chunk_index),
                 });
                 if ok && !self.first_ok_chunk {
                     self.first_ok_chunk = true;
@@ -2103,7 +2356,7 @@ impl Node {
                 }
             }
         }
-        let mut sent: HashSet<PeerAddr> = HashSet::new();
+        let mut sent: BTreeSet<PeerAddr> = BTreeSet::new();
         for (tree, addr, id) in hb {
             if sent.insert(addr) {
                 self.send_ping(addr);

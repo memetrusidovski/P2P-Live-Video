@@ -26,8 +26,14 @@ pub enum BlockSlot {
         /// Verification attempts that failed (poisoned data from a parent).
         failures: u8,
     },
-    /// Verified bytes.
-    Verified(Bytes),
+    /// Verified bytes with the Merkle siblings, kept so the block can be served
+    /// on the pull path (`BLOCK_TRANSMISSION` carries the proof inline).
+    Verified {
+        /// Block bytes.
+        bytes: Bytes,
+        /// Sister hashes leaf → root.
+        siblings: Vec<Hash>,
+    },
 }
 
 /// One chunk's buffer.
@@ -51,6 +57,9 @@ pub struct ChunkBuf {
     pub accepted_at: Instant,
     /// The source signature, kept so the manifest can be re-served.
     pub signature: bs_wire::SignatureBytes,
+    /// Accepted behind the live edge (late-join backfill), so its blocks are pulled,
+    /// never pushed; playout statistics treat it as best effort.
+    pub backfill: bool,
 }
 
 impl ChunkBuf {
@@ -60,7 +69,7 @@ impl ChunkBuf {
             .iter()
             .zip(&self.tree_of)
             .filter(|(_, t)| **t == tree)
-            .all(|(b, _)| matches!(b, BlockSlot::Verified(_)))
+            .all(|(b, _)| matches!(b, BlockSlot::Verified { .. }))
     }
     /// Blocks of `tree` in this chunk.
     pub fn block_count_for_tree(&self, tree: TreeId) -> usize {
@@ -72,7 +81,7 @@ impl ChunkBuf {
             .iter()
             .zip(&self.layer_of)
             .filter(|(_, ll)| **ll == l)
-            .all(|(b, _)| matches!(b, BlockSlot::Verified(_)))
+            .all(|(b, _)| matches!(b, BlockSlot::Verified { .. }))
     }
     /// Missing block count.
     pub fn missing(&self) -> u16 {
@@ -81,8 +90,24 @@ impl ChunkBuf {
     /// Verified bytes of block `j`.
     pub fn block(&self, j: u16) -> Option<&Bytes> {
         match self.blocks.get(j as usize) {
-            Some(BlockSlot::Verified(b)) => Some(b),
+            Some(BlockSlot::Verified { bytes, .. }) => Some(bytes),
             _ => None,
+        }
+    }
+    /// Verified bytes and proof of block `j`.
+    pub fn block_with_proof(&self, j: u16) -> Option<(Bytes, Vec<Hash>)> {
+        match self.blocks.get(j as usize) {
+            Some(BlockSlot::Verified { bytes, siblings }) => {
+                Some((bytes.clone(), siblings.clone()))
+            }
+            _ => None,
+        }
+    }
+    /// Symbols held for a pending block (0 if verified or unknown).
+    pub fn symbols_held(&self, j: u16) -> usize {
+        match self.blocks.get(j as usize) {
+            Some(BlockSlot::Pending { collector, .. }) => collector.count(),
+            _ => 0,
         }
     }
 }
@@ -108,6 +133,23 @@ pub struct VerifiedBlock {
     pub decoded: bool,
 }
 
+/// A block the scheduler may pull.
+#[derive(Debug, Clone)]
+pub struct MissingBlock {
+    /// Segment.
+    pub segment: SegmentSeq,
+    /// Block index.
+    pub index: BlockIndex,
+    /// Playout deadline of its chunk.
+    pub deadline: Instant,
+    /// Symbols already held (0..16).
+    pub symbols_held: usize,
+    /// Tree that carries it.
+    pub tree: TreeId,
+    /// Chunk accepted behind the live edge (best effort).
+    pub backfill: bool,
+}
+
 /// A chunk at its deadline.
 #[derive(Debug)]
 pub struct PlayedChunk {
@@ -119,6 +161,8 @@ pub struct PlayedChunk {
     pub layers_total: u8,
     /// Missing blocks across all layers.
     pub missing: u16,
+    /// Backfilled (accepted behind the live edge).
+    pub backfill: bool,
 }
 
 /// Why a manifest was refused.
@@ -267,6 +311,7 @@ impl SwarmBuffer {
                 !self.played_through.is_some() && !self.any_played && (seg, c) > (s0, c0)
             }
         };
+        let backfill = self.live_edge.is_some() && seg < self.live_edge && built.is_none();
         if newer {
             self.anchor = Some((seg, c, now));
             let keys: Vec<u32> = self.segments.keys().copied().collect();
@@ -294,7 +339,11 @@ impl SwarmBuffer {
             Some(b) => b
                 .blocks
                 .iter()
-                .map(|x| BlockSlot::Verified(x.clone()))
+                .enumerate()
+                .map(|(j, x)| BlockSlot::Verified {
+                    bytes: x.clone(),
+                    siblings: b.tree.proof(j),
+                })
                 .collect(),
             None => (0..n)
                 .map(|_| BlockSlot::Pending {
@@ -315,6 +364,7 @@ impl SwarmBuffer {
             deadline,
             played: false,
             accepted_at: now,
+            backfill,
             signature,
         };
         let slot = self
@@ -478,7 +528,10 @@ impl SwarmBuffer {
             *proof = None;
             return Err((e, Some(from)));
         }
-        cb.blocks[j] = BlockSlot::Verified(bytes.clone());
+        cb.blocks[j] = BlockSlot::Verified {
+            bytes: bytes.clone(),
+            siblings: siblings.clone(),
+        };
         cb.verified += 1;
         Ok(Some(VerifiedBlock {
             segment: seg,
@@ -571,6 +624,120 @@ impl SwarmBuffer {
     pub fn orphan_count(&self) -> usize {
         self.orphans.len()
     }
+
+    /// Pull path: a whole block with its inline proof (`BLOCK_TRANSMISSION`).
+    /// Verifies against the manifest and stores it; returns the block for forwarding.
+    pub fn add_full_block(
+        &mut self,
+        seg: SegmentSeq,
+        idx: BlockIndex,
+        bytes: Bytes,
+        siblings: Vec<Hash>,
+        from: NodeId,
+    ) -> Result<Option<VerifiedBlock>, (MediaError, Option<NodeId>)> {
+        let Some(cb) = self.chunk_mut(seg, idx.chunk()) else {
+            return Ok(None);
+        };
+        let j = idx.j() as usize;
+        if j >= cb.blocks.len() || matches!(cb.blocks[j], BlockSlot::Verified { .. }) {
+            return Ok(None);
+        }
+        let tree = cb.tree_of[j];
+        let layer = cb.layer_of[j];
+        let mut padded = bytes;
+        if padded.len() < BLOCK_SIZE {
+            let mut v = padded.to_vec();
+            v.resize(BLOCK_SIZE, 0);
+            padded = Bytes::from(v);
+        }
+        if let Err(e) = verify_block(&cb.manifest, idx, &padded, &siblings) {
+            return Err((e, Some(from)));
+        }
+        cb.blocks[j] = BlockSlot::Verified {
+            bytes: padded.clone(),
+            siblings: siblings.clone(),
+        };
+        cb.verified += 1;
+        Ok(Some(VerifiedBlock {
+            segment: seg,
+            index: idx,
+            tree,
+            layer,
+            bytes: padded,
+            siblings,
+            sender_depth: u8::MAX,
+            decoded: false,
+        }))
+    }
+
+    /// Verified bytes and proof for serving a `PULL_REQUEST`.
+    pub fn block_with_proof(&self, seg: SegmentSeq, idx: BlockIndex) -> Option<(Bytes, Vec<Hash>)> {
+        self.chunk(seg, idx.chunk())
+            .and_then(|c| c.block_with_proof(idx.j()))
+    }
+
+    /// The availability bitfield of one chunk (Ch4 §4.3.2), if its manifest is held.
+    pub fn bitfield(
+        &self,
+        seg: SegmentSeq,
+        chunk: u8,
+    ) -> Option<bs_wire::frames::BufferStateBitfield> {
+        let cb = self.chunk(seg, chunk)?;
+        let held: Vec<bool> = cb
+            .blocks
+            .iter()
+            .map(|b| matches!(b, BlockSlot::Verified { .. }))
+            .collect();
+        let start = BlockIndex::new(chunk, 0).ok()?;
+        Some(bs_wire::frames::BufferStateBitfield::from_flags(
+            seg, start, &held,
+        ))
+    }
+
+    /// Chunks of the most recent `segments` segments that hold a manifest.
+    pub fn recent_chunks(&self, segments: u32) -> Vec<(SegmentSeq, u8)> {
+        let floor = self.live_edge.0.saturating_sub(segments.saturating_sub(1));
+        self.segments
+            .range(floor..)
+            .flat_map(|(s, chunks)| {
+                chunks
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(c, cb)| cb.as_ref().map(|_| (SegmentSeq(*s), c as u8)))
+            })
+            .collect()
+    }
+
+    /// Blocks still missing in chunks whose deadline is within `window` (the PULL
+    /// zone of Ch4 §4.3.1), oldest deadline first.
+    pub fn missing_in_window(&self, now: Instant, window: Duration) -> Vec<MissingBlock> {
+        let mut out = Vec::new();
+        for (s, chunks) in &self.segments {
+            for cb in chunks.iter().flatten() {
+                if cb.played || cb.deadline <= now || cb.deadline.duration_since(now) > window {
+                    continue;
+                }
+                for (j, slot) in cb.blocks.iter().enumerate() {
+                    if let BlockSlot::Pending { collector, .. } = slot {
+                        if let Ok(index) = BlockIndex::new(cb.manifest.chunk_index, j as u16) {
+                            out.push(MissingBlock {
+                                segment: SegmentSeq(*s),
+                                index,
+                                deadline: cb.deadline,
+                                symbols_held: collector.count(),
+                                tree: cb.tree_of[j],
+                                backfill: cb.backfill,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        // Live chunks first (they are what the viewer is about to render), then
+        // best-effort backfill; within each, the closest deadline first.
+        out.sort_by_key(|m| (m.backfill, m.deadline));
+        out
+    }
 }
 
 /// Build the delivered chunk: leading complete layers only, each stripped of its
@@ -610,5 +777,6 @@ fn assemble(cb: &ChunkBuf) -> PlayedChunk {
         layers_complete: complete,
         layers_total,
         missing: cb.missing(),
+        backfill: cb.backfill,
     }
 }

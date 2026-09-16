@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use bs_core::Params;
+use bs_core::{DiscoveryMode, Params};
 use bs_media::{Ladder, Layer};
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +34,8 @@ pub struct Scenario {
     pub kpis: KpiThresholds,
     /// Protocol parameter overrides (Appendix B names).
     pub params: Params,
+    /// How viewers find peers: the S/Kademlia DHT (default) or the M1 oracle.
+    pub discovery: DiscoveryMode,
     /// Write every node's events (large) or only summary events.
     pub log_all_events: bool,
 }
@@ -53,6 +55,7 @@ impl Default for Scenario {
             events: Vec::new(),
             kpis: KpiThresholds::default(),
             params: Params::for_simulation(),
+            discovery: DiscoveryMode::Dht,
             log_all_events: true,
         }
     }

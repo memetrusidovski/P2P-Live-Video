@@ -218,6 +218,7 @@ SLICING_MODE = {0x01: "SVC_SPATIAL", 0x02: "MDC"}
 CONTENT_TYPE = {0x01: "VIDEO_CMAF", 0x02: "VIDEO_ANNEXB", 0x03: "AUDIO", 0x7F: "OPAQUE"}
 LAYER_MODE = {0x01: "SVC_SPATIAL", 0x02: "SVC_TEMPORAL", 0x03: "SIMULCAST", 0x04: "INDEPENDENT"}
 GET_PEERS_REQUEST_LEN = VALIDATION_BLOCK_LEN + 32 + 4
+FIND_REQUEST_LEN = VALIDATION_BLOCK_LEN + 32
 
 
 def decode_stream_record(c: Cursor) -> dict[str, Any]:
@@ -376,6 +377,45 @@ def decode_payload(ft: int, payload: bytes) -> dict[str, Any]:
             layers.append(layer)
         out["layers"] = layers
         out["signature"] = c.take(64)
+    elif name == "FORWARD_JOIN":
+        # App D sec. D.4.5: [Origin PeerRecord 42/54][TTL 1][PR_gossip 1]
+        out["origin"] = decode_peer_record(c)
+        out["ttl"] = c.u8("ttl")
+        out["pr_gossip"] = c.u8("pr_gossip")
+    elif name == "SHUFFLE":
+        # Ch3 sec. 3.2.1: [Origin Sender ID 32][TTL 1][Count 1][WantedTrees 1][Reserved 1][PeerRecord x N]
+        out["origin"] = c.take(32, "origin")
+        out["ttl"] = c.u8("ttl")
+        count = c.u8("count")
+        out["wanted_trees"] = tree_set(c.u8("wanted_trees"))
+        c.skip(1)
+        out["records"] = [decode_peer_record(c) for _ in range(count)]
+        out["direct_request"] = out["ttl"] == 0
+    elif name == "GOSSIP_EXCHANGE":
+        # App D sec. D.4.10: [Sender NodeID 32][SequenceNumber 4][NeighborCount 1][WantedTrees 1]
+        #                    [Reserved 2][PeerRecord x N][HMAC-Blake3 32]
+        out["sender"] = c.take(32, "sender")
+        out["sequence"] = c.u32("sequence")
+        count = c.u8("neighbor_count")
+        out["wanted_trees"] = tree_set(c.u8("wanted_trees"))
+        c.skip(2)
+        out["records"] = [decode_peer_record(c) for _ in range(count)]
+        out["hmac"] = c.take(32, "hmac")
+    elif name == "BUFFER_STATE_BITFIELD":
+        # Ch4 sec. 4.3.2: [SegmentSeq 4][StartingBlockIndex 2][BitfieldByteLength 2][bits N]
+        # bit i (MSB first) of the data = block start + i, 1 = available.
+        out["segment"] = c.u32("segment")
+        start = c.u16("start_block_index")
+        out["start_block_index"] = start
+        out["chunk"] = start >> 12
+        n = c.u16("bitfield_len")
+        bits = c.take(n, "bitfield")
+        out["bitfield"] = bits
+        held = []
+        for i in range(n * 8):
+            if bits[i // 8] & (1 << (7 - (i % 8))):
+                held.append(start + i)
+        out["held_blocks"] = held
     elif name == "BLOCK_PROOF":
         out["segment"] = c.u32()
         bi = c.u16()
@@ -436,6 +476,46 @@ def decode_payload(ft: int, payload: bytes) -> dict[str, Any]:
                 sub.done()
             else:
                 out["stream_record"] = None
+    elif name in ("FIND_NODE", "FIND_VALUE"):
+        # App D sec. D.4.6: request [VB 152][Target 32]; response
+        # [Responder 32][ResultKind 1][Count 1][PeerRecord x Count | Stream Record]
+        if len(payload) == FIND_REQUEST_LEN:
+            out["direction"] = "request"
+            out["validation"] = decode_validation_block(c)
+            out["target"] = c.take(32)
+        else:
+            out["direction"] = "response"
+            out["responder"] = c.take(32)
+            kind = c.u8()
+            count = c.u8()
+            if kind == 0:
+                out["result_kind"] = "nodes"
+                out["records"] = [decode_peer_record(c) for _ in range(count)]
+            elif kind == 1:
+                if count != 1:
+                    raise WireError(f"value result with count {count}")
+                out["result_kind"] = "value"
+                out["stream_record"] = decode_stream_record(c)
+            else:
+                raise WireError(f"bad result kind {kind}")
+    elif name == "STORE_RECORD":
+        # Ch2 sec. 2.3.3: [VB 152][Stream Record]
+        out["validation"] = decode_validation_block(c)
+        out["stream_record"] = decode_stream_record(c)
+    elif name == "STORE_RECORD_ACK":
+        # Ch2 sec. 2.3.3: [Guardian 32][Accepted 1][RespFlags 1][QueryCount 2]
+        # [ActiveCount 4][RelayCount 4][PerTreeRelayCount 6x2][StarvedCount 6x2]
+        out["guardian"] = c.take(32)
+        acc = c.u8()
+        if acc not in (0, 1):
+            raise WireError(f"bad Accepted {acc}")
+        out["accepted"] = bool(acc)
+        out["resp_flags"] = c.u8()
+        out["query_count"] = c.u16()
+        out["active_count"] = c.u32()
+        out["relay_count"] = c.u32()
+        out["per_tree_relay"] = [c.u16() for _ in range(6)]
+        out["starved"] = [c.u16() for _ in range(6)]
     else:
         out["raw"] = payload
         return out

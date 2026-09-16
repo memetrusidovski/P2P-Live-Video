@@ -25,7 +25,7 @@ def decode(v):
 
 
 def test_every_vector_decodes(vectors):
-    assert len(vectors) == 23
+    assert len(vectors) == 32
     for v in vectors.values():
         decode(v)
 
@@ -267,3 +267,105 @@ def test_manifest_request_descriptor_selector():
     raw = bytes([0x01, 0x1D, 0x00, 0x08]) + (0).to_bytes(4, "big") + bytes([0xFD, 0, 0, 0])
     _, b = decode_frame(raw)
     assert b["selector"] == "DESCRIPTOR"
+
+
+def test_buffer_state_bitfield(vectors):
+    # Ch4 sec. 4.3.2: 12 blocks of chunk 2, pattern 1101 1110 1111 -> 0xDE 0xF0
+    h, b = decode(vectors["buffer_state_bitfield"])
+    assert h.frame_type == 0x15 and h.name == "BUFFER_STATE_BITFIELD"
+    assert b["segment"] == 42
+    assert b["start_block_index"] == 2 << 12 and b["chunk"] == 2
+    assert b["bitfield"] == bytes([0xDE, 0xF0])
+    start = 2 << 12
+    assert b["held_blocks"] == [start + i for i in (0, 1, 3, 4, 5, 6, 8, 9, 10, 11)]
+    assert h.payload_len == 4 + 2 + 2 + 2
+
+
+def test_forward_join(vectors):
+    # App D sec. D.4.5: origin record (IPv4, 42 bytes) then TTL 4 and PR_gossip 2.
+    h, b = decode(vectors["forward_join"])
+    assert h.frame_type == 0x09 and h.name == "FORWARD_JOIN"
+    o = b["origin"]
+    assert o.node_id == bytes([0x31]) * 32
+    assert o.node_class == "RELAY"
+    assert o.assigned_trees == [3]
+    assert o.flags["reachability"] == "CONE"
+    assert (o.ip, o.port) == ("192.0.2.31", 4031)
+    assert b["ttl"] == 4 and b["pr_gossip"] == 2
+    assert h.payload_len == 42 + 2
+
+
+def test_shuffle(vectors):
+    # Ch3 sec. 3.2.1: TTL 3 random walk carrying two full peer records.
+    h, b = decode(vectors["shuffle"])
+    assert h.frame_type == 0x06 and h.name == "SHUFFLE"
+    assert b["origin"] == bytes([0x32]) * 32
+    assert b["ttl"] == 3 and b["direct_request"] is False
+    assert b["wanted_trees"] == [1, 3]
+    assert [r.node_id[0] for r in b["records"]] == [0x33, 0x34]
+    assert [r.assigned_trees for r in b["records"]] == [[1], [3]]
+    assert [(r.ip, r.port) for r in b["records"]] == [("192.0.2.33", 4033), ("192.0.2.34", 4034)]
+    assert h.payload_len == 36 + 2 * 42
+
+
+def test_gossip_exchange(vectors):
+    # App D sec. D.4.10: sequence 17, two records, HMAC trailer.
+    h, b = decode(vectors["gossip_exchange"])
+    assert h.frame_type == 0x14 and h.name == "GOSSIP_EXCHANGE"
+    assert b["sender"] == bytes([0x35]) * 32
+    assert b["sequence"] == 17
+    assert b["wanted_trees"] == [2]
+    assert [r.node_id[0] for r in b["records"]] == [0x36, 0x37]
+    assert [r.node_class for r in b["records"]] == ["RELAY", "LEAF"]
+    assert b["records"][1].assigned_trees == []
+    assert b["hmac"] == bytes([0x77]) * 32
+    assert h.payload_len == 40 + 2 * 42 + 32
+
+
+def test_find_node_request(vectors):
+    _, b = decode(vectors["find_node_request"])
+    assert b["direction"] == "request"
+    vb_check(b["validation"], 0x70)
+    assert b["target"] == b"\x3c" * 32
+
+
+def test_find_node_response(vectors):
+    _, b = decode(vectors["find_node_response"])
+    assert b["direction"] == "response"
+    assert b["responder"] == b"\x71" * 32
+    assert b["result_kind"] == "nodes"
+    recs = b["records"]
+    assert len(recs) == 2
+    assert recs[0].node_id == b"\x3d" * 32
+    assert recs[0].assigned_trees == [2]
+    assert recs[0].flags["relay_capable"] is True
+    assert (recs[1].ip, recs[1].port) == ("10.0.0.4", 4004)
+
+
+def test_find_value_response(vectors):
+    h, b = decode(vectors["find_value_response"])
+    assert h.frame_type == 0x0D
+    assert b["result_kind"] == "value"
+    sr = b["stream_record"]
+    assert sr["publisher_pubkey"] == b"\x88" * 32
+    assert sr["live_edge_segment"] == 41
+    assert [t["bitrate_kbps"] for t in sr["trees"]] == [1500, 1500, 3000]
+
+
+def test_store_record(vectors):
+    _, b = decode(vectors["store_record"])
+    vb_check(b["validation"], 0x80)
+    assert b["stream_record"]["manifest_version"] == 9
+    assert b["stream_record"]["signature"] == b"\x99" * 64
+
+
+def test_store_record_ack(vectors):
+    _, b = decode(vectors["store_record_ack"])
+    assert b["guardian"] == b"\x73" * 32
+    assert b["accepted"] is True
+    assert b["query_count"] == 17
+    assert b["active_count"] == 1200
+    assert b["relay_count"] == 700
+    assert b["per_tree_relay"] == [230, 231, 239, 0, 0, 0]
+    assert b["starved"] == [0, 0, 3, 0, 0, 0]
+

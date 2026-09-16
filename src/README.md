@@ -26,7 +26,7 @@ bs-node, bs-player-api), `py/`, `clients/`, `fleet/`, `scenarios/`, `scripts/`, 
 
 ```sh
 cargo build -p bs-node
-# publisher: streams a file byte-exact as opaque data and acts as bootstrap guardian
+# publisher: streams a file byte-exact as opaque data and is the DHT bootstrap seed
 ./target/debug/bsnode publish --file testdata/generated/sample.mp4 --listen 127.0.0.1:4000 --start-delay-s 3
 # viewers (any number), each writes the reassembled bytes and checks the hash
 H=$(./target/debug/bsnode hash testdata/generated/sample.mp4)
@@ -41,3 +41,5 @@ open http://127.0.0.1:8080
 fleet/up.sh --viewers 6 --file movie.mp4 --max-bytes 6000000 --duration 45 --profile lossy
 python3 fleet/report.py --out results/fleet && fleet/down.sh
 ```
+
+http://localhost:9000/ is the fleet dashboard.
