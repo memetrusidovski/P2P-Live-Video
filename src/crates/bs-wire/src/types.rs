@@ -30,6 +30,13 @@ macro_rules! byte_array_newtype {
             }
         }
         impl From<[u8; $len]> for $name { fn from(b: [u8; $len]) -> Self { Self(b) } }
+        impl core::str::FromStr for $name {
+            type Err = WireError;
+            /// Parse the lowercase or uppercase hex form that `Display` prints.
+            fn from_str(s: &str) -> Result<Self> {
+                Ok(Self(parse_hex::<$len>(s, stringify!($name))?))
+            }
+        }
         impl AsRef<[u8]> for $name { fn as_ref(&self) -> &[u8] { &self.0 } }
         impl fmt::Debug for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -67,6 +74,24 @@ macro_rules! byte_array_newtype {
             }
         }
     };
+}
+
+/// Decode exactly `N` bytes of hex. Surrounding whitespace is not accepted.
+fn parse_hex<const N: usize>(s: &str, context: &'static str) -> Result<[u8; N]> {
+    let err = || WireError::InvalidHex {
+        context,
+        len: N * 2,
+    };
+    let b = s.as_bytes();
+    if b.len() != N * 2 {
+        return Err(err());
+    }
+    let nibble = |c: u8| (c as char).to_digit(16).map(|d| d as u8).ok_or_else(err);
+    let mut out = [0u8; N];
+    for (i, pair) in b.chunks_exact(2).enumerate() {
+        out[i] = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+    }
+    Ok(out)
 }
 
 #[cfg(feature = "serde")]
@@ -526,5 +551,24 @@ impl TreeState {
     /// Bits 5–6 value.
     pub fn to_flags_bits(self) -> u8 {
         (self as u8) << 5
+    }
+}
+
+#[cfg(test)]
+mod hex_tests {
+    use super::*;
+
+    #[test]
+    fn newtypes_parse_their_display_form() {
+        let id = StreamId([0xab; 32]);
+        assert_eq!(id.to_string().parse::<StreamId>().unwrap(), id);
+        assert_eq!(
+            id.to_string().to_uppercase().parse::<StreamId>().unwrap(),
+            id
+        );
+        assert!("ab".repeat(31).parse::<StreamId>().is_err());
+        assert!("zz".repeat(32).parse::<StreamId>().is_err());
+        assert!(format!(" {id}").parse::<StreamId>().is_err());
+        assert_eq!(Hash::ZERO.to_string().parse::<Hash>().unwrap(), Hash::ZERO);
     }
 }

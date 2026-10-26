@@ -608,6 +608,8 @@ impl Node {
                     //       unknown; the first accepted manifest supplies it.
                     let m = SlicingMatrix { version: 0, ..m };
                     if self.matrix.is_none() {
+                        // A viewer can ask for more layers than exist to mean "all".
+                        self.top_layer = self.top_layer.min(layer_count.saturating_sub(1));
                         self.matrix = Some(m);
                         self.setup_trees();
                         self.configure_tree_roles();
@@ -2773,7 +2775,7 @@ impl Node {
             .unwrap_or(false)
         {
             let played = self.swarm.play_due(now);
-            let subscribed = self.top_layer + 1;
+            let subscribed = self.top_layer.saturating_add(1);
             for p in played {
                 let ok = p.layers_complete >= 1;
                 let (seg, c) = (p.chunk.segment.0, p.chunk.chunk_index);

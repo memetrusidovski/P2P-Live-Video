@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BitStream</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>BitStream</h1>
+  <div id="status" class="status">no node running</div>
+</header>
+<main>
+  <section class="panel">
+    <h2>Join a stream</h2>
+    <label>Share link
+      <input id="link" placeholder="bs://host:port/stream-id-hex" spellcheck="false">
+    </label>
+    <label>Upload kbps
+      <input id="view-kbps" type="number" value="20000" min="100">
+    </label>
+    <div class="row">
+      <button id="start-viewer">Start viewer</button>
+    </div>
+  </section>
+  <section class="panel">
+    <h2>Publish a file</h2>
+    <label>File path
+      <input id="path" placeholder="/path/to/video.mp4" spellcheck="false">
+    </label>
+    <label>Ingest
+      <select id="ingest">
+        <option value="video">Video through ffmpeg</option>
+        <option value="raw">Raw bytes (no picture)</option>
+      </select>
+    </label>
+    <label>Renditions, lowest first
+      <input id="renditions" value="360p:800,720p:2500" spellcheck="false">
+    </label>
+    <label>Upload kbps
+      <input id="pub-kbps" type="number" value="100000" min="100">
+    </label>
+    <div class="row">
+      <button id="start-publisher">Start publisher</button>
+    </div>
+  </section>
+  <section class="panel">
+    <h2>Node</h2>
+    <div class="row">
+      <button id="stop" disabled>Stop</button>
+    </div>
+    <label>Share link
+      <span class="copyable">
+        <input id="share-link" readonly spellcheck="false" placeholder="-">
+        <button id="copy-link" disabled>Copy</button>
+      </span>
+    </label>
+    <label>Player URL
+      <span class="copyable">
+        <input id="player-url" readonly spellcheck="false" placeholder="-">
+        <button id="copy-player" disabled>Copy</button>
+      </span>
+    </label>
+    <div id="error" class="error"></div>
+  </section>
+</main>
+<iframe id="player" title="BitStream player" hidden></iframe>
+<script src="main.js"></script>
+</body>
+</html>

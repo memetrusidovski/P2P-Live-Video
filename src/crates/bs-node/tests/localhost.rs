@@ -116,3 +116,81 @@ async fn publisher_and_two_viewers_stream_a_file_byte_exact() {
     assert_eq!(pub_report.chunks_published, 8);
     assert_eq!(pub_report.guardian_peers, Some(3));
 }
+
+/// The library surface a client builds on: constructors, the player API address the
+/// OS picked, live status on the handle, a visible bootstrap failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn handle_reports_player_address_status_and_bootstrap_errors() {
+    let _ = tracing_subscriber::fmt().with_env_filter("warn").try_init();
+    let file = temp_file("short.bin", 750_000, 9);
+
+    let mut cfg = RunConfig::publisher(
+        Media::File {
+            path: file,
+            repeat: false,
+            max_bytes: None,
+        },
+        Ladder::reference(),
+    );
+    cfg.listen = "127.0.0.1:0".parse().unwrap();
+    cfg.start_delay_s = 1.0;
+    cfg.duration_s = Some(20.0);
+    cfg.player = Some("127.0.0.1:0".parse().unwrap());
+    let publisher = start(cfg).await.expect("publisher starts");
+    let player = publisher.player_addr.expect("player bound");
+    assert_ne!(player.port(), 0);
+    assert_eq!(publisher.advertise_addr, publisher.local_addr);
+    assert_eq!(publisher.status.borrow().role, "publisher");
+
+    let mut cfg = RunConfig::viewer(publisher.local_addr, publisher.stream_id);
+    cfg.listen = "127.0.0.1:0".parse().unwrap();
+    cfg.duration_s = Some(15.0);
+    cfg.seed = 21;
+    let viewer = start(cfg).await.expect("viewer starts");
+    assert!(viewer.player_addr.is_none());
+    let mut status = viewer.status.clone();
+    let played = tokio::time::timeout(std::time::Duration::from_secs(12), async {
+        loop {
+            status.changed().await.unwrap();
+            let s = status.borrow().clone();
+            if s.played > 0 {
+                break s;
+            }
+        }
+    })
+    .await
+    .expect("the viewer played a chunk");
+    assert_eq!(played.layers, 3, "{played:?}");
+    assert!(played.first_chunk_s.is_some(), "{played:?}");
+    assert!(played.last_error.is_none(), "{played:?}");
+
+    // A bootstrap that nobody listens on: discovery gets no answer and the viewer
+    // reports the silence.
+    let dead = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let dead_addr = dead.local_addr().unwrap();
+    drop(dead);
+    let mut cfg = RunConfig::viewer(dead_addr, publisher.stream_id);
+    cfg.listen = "127.0.0.1:0".parse().unwrap();
+    cfg.duration_s = Some(20.0);
+    cfg.seed = 22;
+    let lost = start(cfg).await.expect("viewer starts");
+    let mut status = lost.status.clone();
+    let err = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            status.changed().await.unwrap();
+            if let Some(e) = status.borrow().last_error.clone() {
+                break e;
+            }
+        }
+    })
+    .await
+    .expect("the bootstrap failure surfaces");
+    assert!(err.starts_with(&format!("bootstrap {dead_addr}")), "{err}");
+
+    let _ = lost.stop.send(true);
+    let _ = viewer.stop.send(true);
+    let _ = publisher.stop.send(true);
+    assert!(lost.done.await.unwrap().is_ok());
+    assert!(viewer.done.await.unwrap().is_ok());
+    assert!(publisher.done.await.unwrap().is_ok());
+}

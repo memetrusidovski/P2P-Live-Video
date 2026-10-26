@@ -206,6 +206,15 @@ events and the node's next timer, and translates `Output`s into socket writes.
 `bsnode publish --file x.mp4` and `bsnode watch --out y.mp4 --expect-hash H`
 are the M2 smoke test.
 
+As a library, `bs_node::start` returns a `Handle`. It holds the bound and
+advertised addresses, the player API address, a `watch` receiver of the live
+`Status` (state, counters, `last_error`) and the stop sender.
+`RunConfig::publisher` and `RunConfig::viewer` carry the CLI defaults.
+Discovery runs over plain UDP, so a silent bootstrap produces no error on its
+own. The driver reports 5 s of silence in `last_error`, and a session the
+bootstrap rejects (a proof-of-work mismatch) the same way. `clients/desktop`
+builds on this surface.
+
 ### 2.7 bs-ingest and bs-player-api
 
 `bs-ingest` produces `LayeredChunk`s from real media: the M1 file pacer, then

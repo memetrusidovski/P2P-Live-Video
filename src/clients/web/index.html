@@ -23,7 +23,7 @@
 <body>
 <main>
   <section>
-    <video id="v" controls autoplay muted playsinline></video>
+    <video id="v" controls autoplay muted playsinline hidden></video>
   </section>
   <aside>
     <h1>BitStream Player</h1>
@@ -102,6 +102,8 @@
     if (!MediaSource.isTypeSupported(type)) { log('codec unsupported: ' + type); return false; }
     ms = new MediaSource();
     video.src = URL.createObjectURL(ms);
+    // Shown only once media exists: an opaque-bytes stream has nothing to draw.
+    video.hidden = false;
     ms.addEventListener('sourceopen', () => {
       sb = ms.addSourceBuffer(type);
       sb.mode = 'segments';
@@ -202,7 +204,6 @@
     $('s-bytes').textContent = (s.bytes || 0).toLocaleString();
     $('s-hash').textContent = s.hash_so_far ? s.hash_so_far.slice(0, 24) + '…' : '-';
     $('s-integrity').textContent = (s.blocks_rejected || 0) + ' / ' + (s.parent_lost || 0) + (s.chunks_ok != null ? '   (chunks ok ' + s.chunks_ok + ')' : '');
-    if (s.role === 'publisher') { document.getElementById('v').style.display = 'none'; }
     if (s.layers && s.layers !== layers) {
       layers = s.layers;
       const sel = $('cap');

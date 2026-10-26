@@ -1,0 +1,19 @@
+:root { color-scheme: dark; }
+body { margin: 0; background: #0f1115; color: #d7dae0; font: 14px system-ui, sans-serif; display: flex; flex-direction: column; height: 100vh; }
+header { display: flex; align-items: baseline; gap: 16px; padding: 10px 12px; border-bottom: 1px solid #222634; }
+h1 { font-size: 16px; margin: 0; }
+h2 { font-size: 13px; margin: 0 0 8px; color: #8b93a5; text-transform: uppercase; letter-spacing: 0.04em; }
+.status { font: 12px ui-monospace, monospace; color: #8b93a5; white-space: pre-wrap; }
+main { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; padding: 12px; }
+.panel { background: #171a21; border-radius: 6px; padding: 12px; }
+label { display: block; margin-bottom: 8px; color: #8b93a5; font-size: 12px; }
+input, select { display: block; width: 100%; box-sizing: border-box; margin-top: 3px; background: #222634; color: #d7dae0; border: 1px solid #333a4a; border-radius: 4px; padding: 5px 6px; font: 13px ui-monospace, monospace; }
+input:disabled { opacity: 0.5; }
+.copyable { display: flex; gap: 6px; margin-top: 3px; }
+.copyable input { margin-top: 0; flex: 1; min-width: 0; }
+button { background: #222634; color: inherit; border: 1px solid #333a4a; border-radius: 4px; padding: 5px 10px; cursor: pointer; }
+button:disabled { opacity: 0.5; cursor: default; }
+.row { display: flex; gap: 8px; margin-bottom: 8px; }
+.error { color: #ff7b72; font-size: 12px; white-space: pre-wrap; }
+iframe { flex: 1; border: 0; margin: 0 12px 12px; border-radius: 6px; background: #000; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; } }

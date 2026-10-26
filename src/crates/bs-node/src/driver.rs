@@ -16,6 +16,7 @@ use bs_core::{
 use bs_crypto::pow::Difficulty;
 use bs_media::source::Source;
 use bs_media::{FileSource, Ladder, LayeredChunk, SyntheticSource};
+use bs_player_api::Status;
 use bs_wire::{Frame, FrameType, NodeClass, NodeId, StreamId};
 use bytes::{Buf, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
@@ -107,6 +108,66 @@ pub struct RunConfig {
     /// Serve the player page / status API here (either role).
     pub player: Option<SocketAddr>,
 }
+
+impl RunConfig {
+    /// A publisher with the `bsnode publish` defaults: UDP port `PUBLISH_PORT` on every
+    /// interface, public reachability, forest size 3, simulation PoW parameters.
+    ///
+    /// `ladder` must match what `media` produces. The caller overrides fields after.
+    pub fn publisher(media: Media, ladder: Ladder) -> Self {
+        Self {
+            role: Role::Publisher {
+                ladder: ladder.clone(),
+                forest_size: 3,
+            },
+            node_class: NodeClass::Relay,
+            reachability: Some(bs_wire::Reachability::Public),
+            listen: SocketAddr::from(([0, 0, 0, 0], PUBLISH_PORT)),
+            advertise_ip: None,
+            bootstrap: None,
+            stream_id: None,
+            upload_kbps: 100_000,
+            ladder,
+            media,
+            params: Params::for_simulation(),
+            seed: 1,
+            duration_s: None,
+            start_delay_s: 3.0,
+            result_path: None,
+            player: None,
+        }
+    }
+
+    /// A relay-class viewer with the `bsnode watch` defaults: any UDP port, reachability
+    /// decided from PONGs, every layer wanted, simulation PoW parameters, no output
+    /// file. Set `player` to serve the web player.
+    pub fn viewer(bootstrap: SocketAddr, stream_id: StreamId) -> Self {
+        Self {
+            role: Role::Viewer { top_layer: u8::MAX },
+            node_class: NodeClass::Relay,
+            reachability: None,
+            listen: SocketAddr::from(([0, 0, 0, 0], 0)),
+            advertise_ip: None,
+            bootstrap: Some(bootstrap),
+            stream_id: Some(stream_id),
+            upload_kbps: 20_000,
+            ladder: Ladder::reference(),
+            media: Media::Output {
+                path: None,
+                expect_hash: None,
+            },
+            params: Params::for_simulation(),
+            seed: 2,
+            duration_s: None,
+            start_delay_s: 0.0,
+            result_path: None,
+            player: None,
+        }
+    }
+}
+
+/// UDP port `RunConfig::publisher` binds.
+pub const PUBLISH_PORT: u16 = 4000;
 
 /// What a run produced.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,6 +280,8 @@ pub struct IncentiveCounters {
 enum Ev {
     /// A paced datagram could not be queued.
     DatagramSendError,
+    /// The ffmpeg ingest did not start.
+    IngestFailed(String),
     Connected {
         peer: SocketAddr,
         node_id: NodeId,
@@ -265,10 +328,10 @@ fn tag_channel(t: u8) -> Channel {
     }
 }
 
-/// Senders into the player API: deliveries, status, descriptor.
+/// Senders into the player API: deliveries and descriptor. Status has its own channel
+/// because the node publishes status with or without a player.
 type PlayerHandles = (
     tokio::sync::broadcast::Sender<bs_player_api::Delivered>,
-    tokio::sync::watch::Sender<bs_player_api::Status>,
     tokio::sync::watch::Sender<Option<bs_player_api::DescriptorInfo>>,
 );
 
@@ -276,10 +339,18 @@ type PlayerHandles = (
 pub struct Handle {
     /// Bound address.
     pub local_addr: SocketAddr,
+    /// The address peers are told to reach the node at: the advertised or detected
+    /// IP with the bound port.
+    pub advertise_addr: SocketAddr,
+    /// Where the player page and API listen, if `RunConfig::player` or
+    /// `Media::Play` asked for one.
+    pub player_addr: Option<SocketAddr>,
     /// Stream id.
     pub stream_id: StreamId,
     /// NodeID.
     pub node_id: NodeId,
+    /// Live counters and state, updated on every lifecycle, tree and chunk event.
+    pub status: tokio::sync::watch::Receiver<Status>,
     /// Completion.
     pub done: tokio::task::JoinHandle<anyhow::Result<RunReport>>,
     /// Ask the node to stop.
@@ -340,14 +411,46 @@ pub async fn start(cfg: RunConfig) -> anyhow::Result<Handle> {
     endpoint.set_default_client_config(client_cfg);
 
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let (status_tx, status_rx) = tokio::sync::watch::channel(Status {
+        role: if matches!(cfg.role, Role::Publisher { .. }) {
+            "publisher".into()
+        } else {
+            "viewer".into()
+        },
+        node_id: node_id.to_string(),
+        state: format!("{:?}", node.state()),
+        layers: node
+            .matrix()
+            .map(|m| m.layer_count)
+            .unwrap_or(cfg.ladder.len() as u8),
+        ..Status::default()
+    });
+    // The player API binds before the node task starts, so the handle can report
+    // the port the OS picked.
+    let player_addr = cfg.player.or(match &cfg.media {
+        Media::Play { addr, .. } => Some(*addr),
+        _ => None,
+    });
+    let mut player = None;
+    let mut player_bound = None;
+    if let Some(addr) = player_addr {
+        let (state, dtx, xtx) = bs_player_api::PlayerState::with_status(status_rx.clone());
+        let (bound, _task) = bs_player_api::serve(addr, state).await?;
+        info!("player: open http://{bound}/");
+        player = Some((dtx, xtx));
+        player_bound = Some(bound);
+    }
     let driver = Driver::new(
-        cfg, node, identity, sock, endpoint, plain_rx, local_addr, stop_rx,
+        cfg, node, identity, sock, endpoint, plain_rx, local_addr, stop_rx, status_tx, player,
     )?;
     let done = tokio::spawn(driver.run());
     Ok(Handle {
         local_addr,
+        advertise_addr: addr,
+        player_addr: player_bound,
         stream_id,
         node_id,
+        status: status_rx,
         done,
         stop: stop_tx,
     })
@@ -364,7 +467,10 @@ fn node_seed(cfg: &RunConfig, addr: SocketAddr) -> [u8; 32] {
 /// The IP peers will see us from: the bind IP if explicit, else the source IP the
 /// OS picks toward the bootstrap (viewers) or toward a public address (publisher).
 /// `connect` on a UDP socket sends nothing; it only resolves the route.
-async fn detect_ip(bootstrap: Option<SocketAddr>, local: SocketAddr) -> std::net::IpAddr {
+///
+/// Behind a NAT the result is the LAN address, so a publisher that wants a
+/// public link must set `RunConfig::advertise_ip` or forward the port.
+pub async fn detect_ip(bootstrap: Option<SocketAddr>, local: SocketAddr) -> std::net::IpAddr {
     if !local.ip().is_unspecified() {
         return local.ip();
     }
@@ -427,10 +533,21 @@ struct Driver {
     end_at: Option<tokio::time::Instant>,
     /// Live chunks from ffmpeg (publisher, `Media::Ffmpeg`).
     live_rx: Option<mpsc::Receiver<LayeredChunk>>,
-    /// Player API senders (status, deliveries, descriptor).
+    /// Player API senders (deliveries, descriptor).
     player: Option<PlayerHandles>,
+    /// Live status for `Handle::status` and the player page.
+    status_tx: tokio::sync::watch::Sender<Status>,
+    /// See `Status::last_error`.
+    last_error: Option<String>,
+    /// Whether any frame ever arrived from the bootstrap contact.
+    bootstrap_answered: bool,
     layers_complete_last: u8,
 }
+
+/// A viewer whose bootstrap stayed silent this long reports the address as the
+/// problem. Longer than one DHT round trip plus a retry, short enough to read as
+/// an answer to "is the link right?".
+const BOOTSTRAP_SILENCE: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Driver {
     #[allow(clippy::too_many_arguments)]
@@ -443,6 +560,8 @@ impl Driver {
         plain_rx: mpsc::UnboundedReceiver<PlainDatagram>,
         local_addr: SocketAddr,
         stop_rx: tokio::sync::watch::Receiver<bool>,
+        status_tx: tokio::sync::watch::Sender<Status>,
+        player: Option<PlayerHandles>,
     ) -> anyhow::Result<Self> {
         let (ev_tx, ev_rx) = mpsc::unbounded_channel();
         let difficulty = Difficulty {
@@ -532,7 +651,10 @@ impl Driver {
             pub_bytes: 0,
             end_at: None,
             live_rx: None,
-            player: None,
+            player,
+            status_tx,
+            last_error: None,
+            bootstrap_answered: false,
             layers_complete_last: 0,
         })
     }
@@ -568,7 +690,8 @@ impl Driver {
         });
 
         let is_pub = matches!(self.cfg.role, Role::Publisher { .. });
-        self.setup_live_media().await?;
+        self.publish_status();
+        self.setup_ingest()?;
         let live = self.live_rx.is_some();
         self.feed(Input::Cmd(Command::Start));
         let mut publish = tokio::time::interval(std::time::Duration::from_micros(
@@ -581,6 +704,7 @@ impl Driver {
             .cfg
             .duration_s
             .map(|d| self.epoch + std::time::Duration::from_secs_f64(d));
+        let mut housekeeping = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
             let next_timer = self
                 .node
@@ -602,6 +726,7 @@ impl Driver {
                 Some(p) = self.plain_rx.recv() => self.on_plain(p),
                 Some(ev) = self.ev_rx.recv() => self.on_ev(ev),
                 _ = timer => self.feed(Input::Tick),
+                _ = housekeeping.tick() => self.check_bootstrap_silence(),
                 _ = publish.tick(), if is_pub && !self.ended && !live => {
                     if tokio::time::Instant::now() >= start_media_at {
                         self.publish_tick();
@@ -610,7 +735,6 @@ impl Driver {
                 c = async { self.live_rx.as_mut().unwrap().recv().await }, if is_pub && live && !self.ended => {
                     match c {
                         Some(c) => {
-                            self.chunks_published += 1;
                             self.chunks_published += 1;
                             self.note_published(&c);
                             self.feed(Input::Cmd(Command::PublishChunk(c)));
@@ -642,25 +766,8 @@ impl Driver {
         Ok(report)
     }
 
-    /// Start ffmpeg ingest (publisher, after `start_delay_s`) and the player API (viewer).
-    async fn setup_live_media(&mut self) -> anyhow::Result<()> {
-        let player_addr = self.cfg.player.or(match &self.cfg.media {
-            Media::Play { addr, .. } => Some(*addr),
-            _ => None,
-        });
-        if let Some(addr) = player_addr {
-            let (state, dtx, stx, xtx) = bs_player_api::PlayerState::new();
-            let layers = self
-                .node
-                .matrix()
-                .map(|m| m.layer_count)
-                .unwrap_or(self.cfg.ladder.len() as u8);
-            stx.send_modify(|s| s.layers = layers);
-            let (bound, _task) = bs_player_api::serve(addr, state).await?;
-            info!("player: open http://{bound}/");
-            self.player = Some((dtx, stx, xtx));
-            self.publish_status();
-        }
+    /// Start ffmpeg ingest (publisher, after `start_delay_s`).
+    fn setup_ingest(&mut self) -> anyhow::Result<()> {
         match self.cfg.media.clone() {
             Media::Ffmpeg {
                 input,
@@ -670,12 +777,14 @@ impl Driver {
                 let specs = bs_ingest::RenditionSpec::parse_list(&renditions.join(","))?;
                 let (tx, rx) = mpsc::channel::<LayeredChunk>(16);
                 let delay = std::time::Duration::from_secs_f64(self.cfg.start_delay_s);
+                let ev_tx = self.ev_tx.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(delay).await;
                     let mut src = match bs_ingest::FfmpegSource::spawn(input, specs, fps).await {
                         Ok(s) => s,
                         Err(e) => {
                             warn!("ffmpeg ingest failed to start: {e:#}");
+                            let _ = ev_tx.send(Ev::IngestFailed(format!("{e:#}")));
                             return;
                         }
                     };
@@ -716,9 +825,6 @@ impl Driver {
     }
 
     fn publish_status(&mut self) {
-        let Some((_, stx, _)) = self.player.as_ref() else {
-            return;
-        };
         let depth: Vec<u8> = self.node.trees().iter().map(|t| t.depth).collect();
         let is_pub = matches!(self.cfg.role, Role::Publisher { .. });
         let (bytes, hash_so_far) = if is_pub {
@@ -767,8 +873,9 @@ impl Driver {
             starved: self.steady_starved,
             chunks_full: self.full,
             first_chunk_s: self.first_chunk,
+            last_error: self.last_error.clone(),
         };
-        let _ = stx.send(st);
+        let _ = self.status_tx.send(st);
     }
 
     fn feed(&mut self, input: Input) {
@@ -781,7 +888,7 @@ impl Driver {
 
     /// Hand a descriptor to the player page (init segments ride kind-1 frames).
     fn publish_descriptor(&mut self, d: &bs_wire::frames::StreamDescriptor) {
-        let Some((_, _, xtx)) = self.player.as_ref() else {
+        let Some((_, xtx)) = self.player.as_ref() else {
             return;
         };
         let info = bs_player_api::DescriptorInfo {
@@ -919,6 +1026,41 @@ impl Driver {
         }
     }
 
+    /// Discovery runs over plain UDP, so a bootstrap that is down or behind a
+    /// firewall fails without an error. Silence past `BOOTSTRAP_SILENCE` is the
+    /// signal, and the first frame from the contact clears the report.
+    fn check_bootstrap_silence(&mut self) {
+        let Some(bootstrap) = self.cfg.bootstrap else {
+            return;
+        };
+        if self.bootstrap_answered || self.epoch.elapsed() < BOOTSTRAP_SILENCE {
+            return;
+        }
+        let msg = format!(
+            "bootstrap {bootstrap}: no answer in {} s",
+            self.epoch.elapsed().as_secs()
+        );
+        if self.last_error.as_deref() != Some(&msg) {
+            self.last_error = Some(msg);
+            self.publish_status();
+        }
+    }
+
+    fn note_bootstrap_answered(&mut self, from: SocketAddr) {
+        if self.bootstrap_answered || self.cfg.bootstrap != Some(from) {
+            return;
+        }
+        self.bootstrap_answered = true;
+        if self
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("bootstrap "))
+        {
+            self.last_error = None;
+            self.publish_status();
+        }
+    }
+
     fn on_plain(&mut self, p: PlainDatagram) {
         let frame = match Frame::from_slice(&p.data) {
             Ok(f) => f,
@@ -927,6 +1069,7 @@ impl Driver {
                 return;
             }
         };
+        self.note_bootstrap_answered(p.from);
         // Every plain frame, DHT RPCs included, is the core's (Ch2 lives in bs-core).
         self.feed(Input::Frame {
             from: p.from,
@@ -938,12 +1081,17 @@ impl Driver {
     fn on_ev(&mut self, ev: Ev) {
         match ev {
             Ev::DatagramSendError => self.datagram_send_errors += 1,
+            Ev::IngestFailed(err) => {
+                self.last_error = Some(format!("ingest: {err}"));
+                self.publish_status();
+            }
             Ev::Connected {
                 peer,
                 node_id,
                 conn,
             } => {
                 self.sessions += 1;
+                self.note_bootstrap_answered(peer);
                 // Gossip HMAC key (Ch3 §3.2.2) from the TLS exporter: identical on both ends.
                 let mut session_key = [0u8; 32];
                 if conn
@@ -969,6 +1117,12 @@ impl Driver {
             }
             Ev::ConnectFailed { peer, err } => {
                 debug!("connect to {peer} failed: {err}");
+                // A bootstrap that answers DHT lookups but rejects the session is
+                // most often a parameter mismatch (proof-of-work difficulty).
+                if self.cfg.bootstrap == Some(peer) {
+                    self.last_error = Some(format!("bootstrap {peer}: {err}"));
+                    self.publish_status();
+                }
                 self.feed(Input::SessionClosed { peer });
             }
             Ev::StreamFrame {
@@ -1230,7 +1384,7 @@ impl Driver {
                 .collect();
             self.checkpoint(chunk.segment.0, chunk.chunk_index, &complete);
         }
-        if let Some((tx, _, _)) = self.player.as_ref() {
+        if let Some((tx, _)) = self.player.as_ref() {
             if layers_complete >= 1 {
                 let _ = tx.send(bs_player_api::Delivered {
                     segment: chunk.segment.0,
@@ -1243,8 +1397,8 @@ impl Driver {
                         .collect(),
                 });
             }
-            self.publish_status();
         }
+        self.publish_status();
         let full = layers_complete >= layers_subscribed.max(1);
         if !self.sink.started {
             if !full {
@@ -1271,15 +1425,13 @@ impl Driver {
     }
 
     fn on_event(&mut self, e: Event) {
-        if self.player.is_some()
-            && matches!(
-                e,
-                Event::State { .. }
-                    | Event::ParentAttached { .. }
-                    | Event::ParentLost { .. }
-                    | Event::ChunkPlayed { .. }
-            )
-        {
+        if matches!(
+            e,
+            Event::State { .. }
+                | Event::ParentAttached { .. }
+                | Event::ParentLost { .. }
+                | Event::ChunkPlayed { .. }
+        ) {
             self.publish_status_after(&e);
         }
         match &e {

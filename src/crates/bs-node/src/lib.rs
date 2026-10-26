@@ -9,4 +9,5 @@ pub mod driver;
 pub mod tls;
 pub mod transport;
 
-pub use driver::{file_hash, start, Handle, Media, RunConfig, RunReport};
+pub use bs_player_api::Status;
+pub use driver::{detect_ip, file_hash, start, Handle, Media, RunConfig, RunReport, PUBLISH_PORT};

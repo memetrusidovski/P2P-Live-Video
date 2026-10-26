@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::response::{Html, IntoResponse};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use bs_ingest::container::{decode, RecordType};
@@ -94,6 +94,10 @@ pub struct Status {
     /// Recent per-chunk checkpoints (newest last, bounded).
     #[serde(default)]
     pub checkpoints: Vec<Checkpoint>,
+    /// Last failure that needs the user, such as a bootstrap that does not answer or
+    /// an ingest process that did not start. Cleared on recovery.
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 /// One layer of the STREAM_DESCRIPTOR as the page sees it.
@@ -147,17 +151,29 @@ impl PlayerState {
         watch::Sender<Status>,
         watch::Sender<Option<DescriptorInfo>>,
     ) {
-        let (dtx, _) = broadcast::channel(64);
         let (stx, srx) = watch::channel(Status::default());
+        let (state, dtx, xtx) = Self::with_status(srx);
+        (state, dtx, stx, xtx)
+    }
+
+    /// Create the delivery and descriptor channels around a status channel the
+    /// node already owns. Returns the state plus the node-side senders.
+    pub fn with_status(
+        status: watch::Receiver<Status>,
+    ) -> (
+        Arc<Self>,
+        broadcast::Sender<Delivered>,
+        watch::Sender<Option<DescriptorInfo>>,
+    ) {
+        let (dtx, _) = broadcast::channel(64);
         let (xtx, xrx) = watch::channel(None);
         (
             Arc::new(Self {
                 deliveries: dtx.clone(),
-                status: srx,
+                status,
                 descriptor: xrx,
             }),
             dtx,
-            stx,
             xtx,
         )
     }
@@ -173,6 +189,7 @@ pub async fn serve(
         .route("/api/status", get(status))
         .route("/api/descriptor", get(descriptor))
         .route("/ws", get(ws_upgrade))
+        .layer(axum::middleware::from_fn(allow_any_origin))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
@@ -183,6 +200,18 @@ pub async fn serve(
         }
     });
     Ok((bound, task))
+}
+
+/// Add `Access-Control-Allow-Origin: *` so a page from another origin, such as a
+/// desktop shell, can read the API. The server binds loopback and serves nothing
+/// private, so every origin is allowed.
+async fn allow_any_origin(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let mut res = next.run(req).await;
+    res.headers_mut().insert(
+        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        axum::http::HeaderValue::from_static("*"),
+    );
+    res
 }
 
 async fn index() -> Html<&'static str> {
@@ -326,5 +355,10 @@ mod tests {
         .unwrap();
         assert!(body.contains("\"state\":\"Active\""), "{body}");
         assert!(body.contains("\"layers\":2"));
+        assert!(
+            body.to_ascii_lowercase()
+                .contains("access-control-allow-origin: *"),
+            "{body}"
+        );
     }
 }

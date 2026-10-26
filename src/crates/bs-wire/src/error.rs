@@ -19,6 +19,14 @@ pub enum WireError {
     /// The frame type code is not in the registry.
     #[error("unknown frame type {0:#04x}")]
     UnknownFrameType(u8),
+    /// A text form was not the hex string the type prints.
+    #[error("{context}: expected {len} hex characters")]
+    InvalidHex {
+        /// Type being parsed.
+        context: &'static str,
+        /// Hex characters required.
+        len: usize,
+    },
     /// A field held a value outside its legal range.
     #[error("invalid value {value} for field {field}")]
     InvalidField {

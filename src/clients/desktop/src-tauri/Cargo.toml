@@ -1,0 +1,28 @@
+[package]
+name = "bitstream-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "BitStream desktop client: a Tauri shell around the bs-node library"
+license = "MIT"
+
+# The package sits inside the protocol workspace directory but is not a member of
+# it; an empty table makes cargo treat the package as its own root.
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+bs-node = { path = "../../../crates/bs-node" }
+bs-ingest = { path = "../../../crates/bs-ingest" }
+bs-media = { path = "../../../crates/bs-media" }
+bs-wire = { path = "../../../crates/bs-wire" }
+
+tauri = { version = "2", features = [] }
+tokio = { version = "1.47", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

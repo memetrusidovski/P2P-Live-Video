@@ -115,10 +115,20 @@ into a decision is the usual cause, and it happened once on 2026-09-10).
 
 ## Level 5: real network
 
-Two-node localhost test (M2), part of `cargo test`:
+Localhost tests (M2), part of `cargo test`: a publisher and two viewers stream a
+file byte-exact, and the library handle reports the player address, live status
+and a silent bootstrap:
 
 ```
 cargo test -p bs-node --test localhost
+```
+
+The desktop client is not a workspace member, so its tests run from its own
+directory. They cover the share link, a raw-bytes publisher feeding a viewer,
+and a video publisher through ffmpeg (skipped when ffmpeg is not on PATH):
+
+```
+cd clients/desktop/src-tauri && cargo test
 ```
 
 Docker fleet (M2) for tens of real nodes with netem-shaped links:

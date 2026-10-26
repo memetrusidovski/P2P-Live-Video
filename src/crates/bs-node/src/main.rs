@@ -82,6 +82,10 @@ enum Cmd {
         /// Frame rate of the input (default: probe with ffprobe).
         #[arg(long)]
         fps: Option<u32>,
+        /// NAT class: public, cone or symmetric. A publisher behind a NAT sends through
+        /// ingress relays, so viewers need another bootstrap contact.
+        #[arg(long, default_value = "public")]
+        nat: String,
     },
     /// Join a stream through a DHT bootstrap seed and write the reassembled bytes.
     Watch {
@@ -190,6 +194,16 @@ fn publisher_stream_id(seed: u64, port: u16, spec_pow: bool) -> StreamId {
     bs_crypto::stream_id(&id.public_key())
 }
 
+/// `--nat` value to a reachability; `auto` and unknown words give `None`.
+fn reachability(nat: &str) -> Option<bs_wire::Reachability> {
+    match nat.to_ascii_lowercase().as_str() {
+        "public" => Some(bs_wire::Reachability::Public),
+        "cone" => Some(bs_wire::Reachability::Cone),
+        "symmetric" => Some(bs_wire::Reachability::Symmetric),
+        _ => None,
+    }
+}
+
 /// Stop the node gracefully on Ctrl-C or SIGTERM (docker stop), so result.json is
 /// written and child processes (ffmpeg) are reaped.
 fn stop_on_signal(stop: tokio::sync::watch::Sender<bool>) {
@@ -247,6 +261,7 @@ async fn main() -> anyhow::Result<()> {
             input,
             renditions,
             fps,
+            nat,
         } => {
             let (media, lad) = if ingest.eq_ignore_ascii_case("ffmpeg") {
                 let input = input
@@ -282,7 +297,7 @@ async fn main() -> anyhow::Result<()> {
                     forest_size: forest,
                 },
                 node_class: NodeClass::Relay,
-                reachability: Some(bs_wire::Reachability::Public),
+                reachability: Some(reachability(&nat).unwrap_or(bs_wire::Reachability::Public)),
                 listen,
                 advertise_ip,
                 bootstrap: None,
@@ -331,13 +346,7 @@ async fn main() -> anyhow::Result<()> {
                 .next()
                 .with_context(|| format!("resolving {bootstrap}"))?;
             let stream_id = match stream {
-                Some(h) => {
-                    let v = hex::decode(h).context("stream id hex")?;
-                    StreamId(
-                        v.try_into()
-                            .map_err(|_| anyhow::anyhow!("stream id must be 32 bytes"))?,
-                    )
-                }
+                Some(h) => h.trim().parse::<StreamId>().context("--stream")?,
                 None => publisher_stream_id(publisher_seed, publisher_port, cli.spec_pow),
             };
             let cfg = RunConfig {
@@ -347,12 +356,7 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     NodeClass::Relay
                 },
-                reachability: match nat.to_ascii_lowercase().as_str() {
-                    "public" => Some(bs_wire::Reachability::Public),
-                    "cone" => Some(bs_wire::Reachability::Cone),
-                    "symmetric" => Some(bs_wire::Reachability::Symmetric),
-                    _ => None,
-                },
+                reachability: reachability(&nat),
                 listen,
                 advertise_ip,
                 bootstrap: Some(bootstrap),
