@@ -3,7 +3,8 @@
 use bs_crypto::{Identity, Signer};
 use bs_media::chunk::BuiltChunk;
 use bs_media::{ChunkBuilder, Ladder, LayeredChunk, MediaError, SlicingMatrix};
-use bs_wire::{Hash, SegmentSeq, SignatureBytes, SlicingMode, StreamRecord};
+use bs_wire::frames::ManifestBody;
+use bs_wire::{Hash, SegmentSeq, SignatureBytes, SlicingMode, StreamRecord, TreeMappingEntry};
 
 use crate::time::Instant;
 
@@ -27,6 +28,10 @@ pub struct Publisher {
     pub last_ts_us: u64,
     /// The STREAM_DESCRIPTOR in force, if the application set one.
     pub descriptor: Option<bs_wire::frames::StreamDescriptor>,
+    /// The announced matrix and its switch segment, until the switch.
+    pub pending: Option<(Vec<TreeMappingEntry>, SegmentSeq)>,
+    /// Body of the last chunk built; a `MANIFEST_UPDATE` carries it.
+    pub last_body: Option<ManifestBody>,
 }
 
 impl Publisher {
@@ -44,7 +49,14 @@ impl Publisher {
             last_root: Hash::ZERO,
             last_ts_us: 0,
             descriptor: None,
+            pending: None,
+            last_body: None,
         })
+    }
+
+    /// Cut later chunks under matrix version `v`.
+    pub fn set_matrix_version(&mut self, v: u8) {
+        self.builder.set_matrix_version(v);
     }
 
     /// Cut, hash and sign a chunk.
@@ -53,6 +65,7 @@ impl Publisher {
         self.last_segment = chunk.segment;
         self.last_root = built.manifest.body.merkle_root;
         self.last_ts_us = chunk.timestamp_us;
+        self.last_body = Some(built.manifest.body.clone());
         Ok(built)
     }
 
@@ -79,7 +92,11 @@ impl Publisher {
             live_edge_segment: self.last_segment,
             live_edge_manifest_hash: self.last_root,
             live_edge_timestamp_us: self.last_ts_us,
-            effective_segment: SegmentSeq::NONE,
+            effective_segment: self
+                .pending
+                .as_ref()
+                .map(|(_, e)| *e)
+                .unwrap_or(SegmentSeq::NONE),
             descriptor_version: self.descriptor.as_ref().map(|d| d.version).unwrap_or(0),
             descriptor_hash: self
                 .descriptor
@@ -87,7 +104,11 @@ impl Publisher {
                 .map(|d| bs_crypto::blake3_hash(&bs_wire::Encode::to_vec(d)))
                 .unwrap_or(Hash::ZERO),
             trees: self.matrix.to_entries(),
-            trees_next: Vec::new(),
+            trees_next: self
+                .pending
+                .as_ref()
+                .map(|(t, _)| t.clone())
+                .unwrap_or_default(),
             signature: SignatureBytes::ZERO,
         };
         r.signature = self.identity.sign(&r.signable_bytes());

@@ -62,6 +62,8 @@ pub struct ChildLink {
     /// Admitted with `ACCEPTED.PENDING`: not served until a draining child leaves
     /// (sequential handover, Ch1 §1.2.2 "Handover budget").
     pub pending: bool,
+    /// Rank the child proved at admission (Θ^rate / B); 0 without a proof.
+    pub rank: f64,
 }
 
 /// State of one tree at this node.
@@ -79,6 +81,18 @@ pub struct TreeState {
     pub children: BTreeMap<PeerAddr, ChildLink>,
     /// Our hop depth from the source (0 = source; `u8::MAX` = unknown/unparented).
     pub depth: u8,
+    /// Depth held before the parent was lost (cycle guard while children remain).
+    pub last_depth: u8,
+    /// Last pushed block verified from the current parent (data-stall detection).
+    pub last_block_at: Option<Instant>,
+    /// A probe round for a shallower parent is in progress (Ch1 §1.2.3 migration).
+    pub migrating: bool,
+    /// A parent the next join must not pick (left on purpose by `shop_parent`).
+    pub avoid_parent: Option<NodeId>,
+    /// This relay leaves the tree at the next forest switch; its children drain.
+    pub reassigning: bool,
+    /// Held only to bridge it to NAT-blocked peers (Ch6 §6.3.1).
+    pub bridging: bool,
     /// Slot count `K_v(m)`.
     pub k_v: u16,
     /// Whether we relay this tree (assigned) — leaves never do.
@@ -108,6 +122,12 @@ impl TreeState {
             old_parent: None,
             children: BTreeMap::new(),
             depth: u8::MAX,
+            last_depth: u8::MAX,
+            last_block_at: None,
+            migrating: false,
+            avoid_parent: None,
+            reassigning: false,
+            bridging: false,
             k_v: 0,
             assigned: false,
             subscribed: false,
@@ -120,9 +140,21 @@ impl TreeState {
         }
     }
 
+    /// Whether a parent search is due: no parent, or the parent is the one that is
+    /// draining us. A parent attached as the repair itself is given its first block.
+    ///
+    /// WHY: A probe before the repair parent pushed anything made a node leave it
+    ///      on every timer pass and re-join the same parent in a loop.
+    pub fn needs_parent_search(&self) -> bool {
+        match &self.parent {
+            None => true,
+            Some(p) => self.repairing && !p.attached_as_repair,
+        }
+    }
+
     /// Whether this node should hold a parent here (subscribed or assigned).
     pub fn wants_parent(&self) -> bool {
-        self.subscribed || self.assigned
+        self.subscribed || self.assigned || self.bridging
     }
 
     /// Free slots advertised to joiners: 0 while warming (Ch1 §1.2.2 warm-up gating),
@@ -165,7 +197,11 @@ impl TreeState {
         let p = self.parent.take();
         if p.is_some() {
             self.lost_at = Some(now);
+            if self.depth != u8::MAX {
+                self.last_depth = self.depth;
+            }
             self.depth = u8::MAX;
+            self.last_block_at = None;
         }
         p
     }

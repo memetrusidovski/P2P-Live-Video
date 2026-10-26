@@ -263,13 +263,29 @@ impl Invariants {
                     );
                 }
                 if let Some(p) = &t.parent {
-                    edges.entry((p.addr, n.addr)).or_default().push(t.id.0);
+                    // A link the parent drains is on its way out (a relay that moves at
+                    // a resize). It is not a second edge to the same child.
+                    let draining = index
+                        .get(&p.addr)
+                        .and_then(|&pi| nodes[pi].node.trees().get(t.id.index()))
+                        .and_then(|pt| pt.children.get(&n.addr))
+                        .map(|c| c.draining_until.is_some())
+                        .unwrap_or(false);
+                    if !draining {
+                        edges.entry((p.addr, n.addr)).or_default().push(t.id.0);
+                    }
                     // Parent must relay the tree.
                     if let Some(&pi) = index.get(&p.addr) {
                         let pn = &nodes[pi];
                         if pn.alive {
                             let pt = &pn.node.trees()[t.id.index()];
-                            if !pt.assigned {
+                            // A bridge is out-degree one in a tree the relay is not
+                            // assigned to (Ch6 §6.3.1). A parent that already dropped
+                            // the link has a DISCONNECT in flight: not a violation.
+                            if !pt.assigned
+                                && !pn.node.is_bridge_child(n.addr, t.id)
+                                && pt.children.contains_key(&n.addr)
+                            {
                                 self.violation(
                                     now,
                                     i,
@@ -280,9 +296,11 @@ impl Invariants {
                                 );
                             }
                             // Depth consistency: child depth = parent depth + 1 once blocks flow.
+                            // An ingress relay is hop 0 like the source it fronts.
                             if t.depth != u8::MAX
                                 && pt.depth != u8::MAX
                                 && t.depth != pt.depth + 1
+                                && !n.node.is_ingress()
                                 && p.first_block_at.is_some()
                             {
                                 self.violation(
@@ -317,11 +335,18 @@ impl Invariants {
         }
         for ((p, c), trees) in &edges {
             if trees.len() > 1 {
+                // An ingress relay is a root like the source it fronts (Ch6 §6.3.3).
                 let is_source = index
                     .get(p)
-                    .map(|&pi| nodes[pi].node.is_source())
+                    .map(|&pi| nodes[pi].node.is_source() || nodes[pi].node.is_ingress())
                     .unwrap_or(false);
-                if !is_source {
+                // A peer bridged through one relay in several trees has correlated
+                // parents by design (Ch6 §6.3.1).
+                let bridged = index
+                    .get(c)
+                    .map(|&ci| nodes[ci].node.is_bridged())
+                    .unwrap_or(false);
+                if !is_source && !bridged {
                     let ci = index.get(c).copied().unwrap_or(0);
                     self.violation(
                         now,
@@ -343,6 +368,7 @@ impl Invariants {
                 let mut cur = i;
                 let mut hops = 0;
                 let mut seen = HashSet::new();
+                let mut chain: Vec<String> = vec![format!("{i}")];
                 loop {
                     let node = &nodes[cur];
                     if node.node.is_source() {
@@ -352,12 +378,16 @@ impl Invariants {
                         break;
                     };
                     let Some(&pi) = index.get(&p.addr) else { break };
+                    chain.push(format!(
+                        "{pi}(d{})",
+                        nodes[pi].node.trees()[t.id.index()].depth
+                    ));
                     if !seen.insert(pi) || hops > nodes.len() {
                         self.violation(
                             now,
                             i,
                             "tree_cycle",
-                            format!("tree {} parent chain cycles", t.id),
+                            format!("tree {} parent chain cycles: {}", t.id, chain.join(" -> ")),
                             true,
                             log,
                         );

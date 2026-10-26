@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use bs_media::chunk::{verify_block, verify_manifest, BuiltChunk};
 use bs_media::{LayeredChunk, MediaError, SlicingMatrix, SymbolCollector};
-use bs_wire::consts::{BLOCK_SIZE, CHUNKS_PER_SEGMENT};
+use bs_wire::consts::{BLOCK_SIZE, CHUNKS_PER_SEGMENT, K_BLOCK};
 use bs_wire::frames::{Manifest, ManifestBody};
 use bs_wire::{BlockIndex, Hash, NodeId, PublicKeyBytes, SegmentSeq, TreeId};
 use bytes::Bytes;
@@ -131,6 +131,8 @@ pub struct VerifiedBlock {
     pub sender_depth: u8,
     /// Whether RaptorQ decoding was needed.
     pub decoded: bool,
+    /// Symbols held when the block verified (loss estimation, Ch5 §5.2.3 `LossRate`).
+    pub symbols_received: u16,
 }
 
 /// A block the scheduler may pull.
@@ -186,6 +188,8 @@ pub struct SwarmBuffer {
     segments: BTreeMap<u32, Vec<Option<ChunkBuf>>>,
     /// Highest segment for which a manifest was accepted.
     pub live_edge: SegmentSeq,
+    /// When the live edge last advanced.
+    live_edge_at: Option<Instant>,
     /// Playout anchor: (segment, chunk, when the first manifest arrived).
     anchor: Option<(SegmentSeq, u8, Instant)>,
     /// Symbols and proofs that arrived before their manifest, keyed by (segment, block index).
@@ -213,6 +217,7 @@ impl SwarmBuffer {
         Self {
             segments: BTreeMap::new(),
             live_edge: SegmentSeq::NONE,
+            live_edge_at: None,
             anchor: None,
             orphans: HashMap::new(),
             played_through: SegmentSeq::NONE,
@@ -278,7 +283,17 @@ impl SwarmBuffer {
         if seg <= self.played_through {
             return ManifestVerdict::OutsideWindow;
         }
-        if self.live_edge.is_some() && seg.0 > self.live_edge.0 + self.window_ahead {
+        // RULE: The window ahead grows with the time since the edge last moved. The
+        //       source is honestly that far ahead of a stale edge. A starved peer would
+        //       otherwise refuse every current manifest (ISSUE-070).
+        let segment = Duration(self.chunk_period.0 * CHUNKS_PER_SEGMENT as u64);
+        let elapsed_segments = self
+            .live_edge_at
+            .map(|t| now.duration_since(t).as_micros() / segment.as_micros().max(1))
+            .unwrap_or(0) as u32;
+        if self.live_edge.is_some()
+            && seg.0 > self.live_edge.0 + self.window_ahead + elapsed_segments
+        {
             return ManifestVerdict::OutsideWindow;
         }
         if m.body.slicing_matrix_version != matrix.version {
@@ -326,6 +341,7 @@ impl SwarmBuffer {
         }
         if seg > self.live_edge {
             self.live_edge = seg;
+            self.live_edge_at = Some(now);
         }
         let n = body.block_count() as usize;
         let mut tree_of = Vec::with_capacity(n);
@@ -517,9 +533,13 @@ impl SwarmBuffer {
             return Ok(None);
         }
         let decoded = !collector.all_source();
+        let symbols_received = collector.count().min(u16::MAX as usize) as u16;
         let bytes = match collector.decode() {
             Ok(b) => b,
-            Err(e) => return Err((e, Some(from))),
+            // WHY: RaptorQ decodes from exactly K symbols about 99 % of the time
+            //      (RFC 6330 §B). A failed decode is not corruption. Keep the symbols
+            //      and wait for one more. The PULL zone asks for it if the push stops.
+            Err(_) => return Ok(None),
         };
         if let Err(e) = verify_block(&manifest, idx, &bytes, &siblings) {
             // Poisoned: drop everything from this attempt and wait for a re-push/pull.
@@ -542,6 +562,7 @@ impl SwarmBuffer {
             siblings,
             sender_depth,
             decoded,
+            symbols_received,
         }))
     }
 
@@ -667,6 +688,7 @@ impl SwarmBuffer {
             siblings,
             sender_depth: u8::MAX,
             decoded: false,
+            symbols_received: K_BLOCK as u16,
         }))
     }
 

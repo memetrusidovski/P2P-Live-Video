@@ -143,6 +143,9 @@ pub struct Harness {
     pub traces: HashMap<SocketAddr, Vec<(Instant, TraceItem)>>,
     /// Frames whose sender is in this set are silently dropped.
     pub drop_from: HashSet<SocketAddr>,
+    /// Drop every frame of this type sent by this address (a peer that withholds
+    /// receipts or PULL service).
+    pub drop_types: HashSet<(SocketAddr, bs_wire::FrameType)>,
     /// RaptorQ symbols of these (segment, block index) keys are dropped on the wire.
     pub drop_symbols_of: HashSet<(u32, u16)>,
     /// Corrupt source symbol 0 of this block in flight.
@@ -176,6 +179,7 @@ impl Harness {
             stream_record: None,
             traces: HashMap::new(),
             drop_from: HashSet::new(),
+            drop_types: HashSet::new(),
             drop_symbols_of: HashSet::new(),
             poison: None,
             poison_all_from: None,
@@ -208,6 +212,7 @@ impl Harness {
             stream_id: StreamId::ZERO,
             bootstrap: Vec::new(),
             discovery: bs_core::DiscoveryMode::Oracle,
+            reachability: Some(bs_wire::Reachability::Public),
             params: self.params.clone(),
             seed,
         });
@@ -239,11 +244,16 @@ impl Harness {
             stream_id: sid,
             bootstrap: Vec::new(),
             discovery: bs_core::DiscoveryMode::Oracle,
+            reachability: Some(bs_wire::Reachability::Public),
             params: self.params.clone(),
             seed,
         });
         self.nodes.insert(a, node);
         self.order.push(a);
+    }
+
+    pub fn node_mut(&mut self, a: SocketAddr) -> &mut Node {
+        self.nodes.get_mut(&a).expect("unknown node")
     }
 
     pub fn node(&self, a: SocketAddr) -> &Node {
@@ -323,6 +333,9 @@ impl Harness {
                     },
                 );
                 if self.drop_from.contains(&from) || !self.nodes.contains_key(&to) {
+                    return;
+                }
+                if self.drop_types.contains(&(from, frame.frame_type())) {
                     return;
                 }
                 let mut frame = frame;

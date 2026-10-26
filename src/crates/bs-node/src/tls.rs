@@ -235,6 +235,13 @@ pub fn quic_configs(
     transport.datagram_receive_buffer_size(Some(8 << 20));
     transport.datagram_send_buffer_size(8 << 20);
     transport.max_concurrent_bidi_streams(64u32.into());
+    // Symbols ride QUIC DATAGRAM frames, which are congestion controlled (RFC 9221).
+    // A loss-based controller reads random link loss as congestion: at 2 % loss and
+    // 40 ms RTT Cubic settles near 2 Mbps per connection, below one stripe. BBR paces
+    // on delivery rate and tolerates random loss, which is what FEC-protected media
+    // over a lossy link needs.
+    transport.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+    transport.initial_mtu(1280);
     let transport = Arc::new(transport);
 
     let qc =

@@ -1,0 +1,54 @@
+# Ch1 §1.2.2 Rank Admission Rule, case 2. Ten relays with no uplink to speak of
+# ("leeches": rank 0, they can serve nobody) join first and fill the publisher's
+# five slots in the top-layer tree. Forty contributors join later: the publisher's
+# base-layer slots hold ten of them, the rest attach under contributors, so
+# contributors earn receipts. They are refused the top layer at first and must then
+# preempt the leeches out of the top-layer slots with a RANK_PROOF.
+seed = 23
+duration_s = 120.0
+forest_size = 3
+
+[publisher]
+upload_kbps = 60000
+
+[[viewers]]
+label = "leeches"
+count = 10
+class = "relay"
+upload_kbps = { min = 1500.0, max = 2000.0 }
+top_layer = 2
+join_s = { min = 1.0, max = 3.0 }
+
+[[viewers]]
+label = "contributors"
+count = 40
+class = "relay"
+upload_kbps = { min = 15000.0, max = 25000.0 }
+top_layer = 2
+join_s = { min = 5.0, max = 15.0 }
+
+[network]
+regions = 2
+
+[kpis]
+# Leeches lose the top layer when preempted; that is the point, so the swarm-wide
+# starvation bound is loose and the quality gates are per label. Contributors shed the
+# top layer first and regrow it after the hysteresis, which the join and repair tails
+# reflect.
+psr_max = 0.05
+# Forty joiners in ten seconds against five top-layer slots: the tail waits for a
+# preemption window, which is the contention this scenario exists to create.
+sjl_mean_max_s = 6.0
+sjl_p95_max_s = 12.0
+active_fraction_min = 0.95
+repair_median_max_s = 3.0
+repair_p95_max_s = 5.0
+
+[kpis.facts_min]
+rank_proofs_verified = 10
+preemptions = 5
+# Contributors end the run at the quality they asked for.
+"attached_all:contributors" = 0.9
+
+[kpis.facts_max]
+"psr:contributors" = 0.02

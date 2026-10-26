@@ -263,18 +263,26 @@ impl Node {
                 // Every holder has been asked once: start another round.
                 tried.clear();
             }
-            let mut providers: Vec<(Duration, PeerAddr)> = holders
+            // Providers that have unchoked us first (Ch5 §5.1); a request to a choked
+            // provider is refused but is the "waiting" signal its bootstrap queue needs.
+            let mut providers: Vec<(bool, Duration, PeerAddr)> = holders
                 .iter()
                 .filter(|p| !tried.contains(p))
-                .map(|p| (self.peer_srtt(*p), *p))
+                .map(|p| {
+                    (
+                        !self.incentive.unchoked_by.contains(p),
+                        self.peer_srtt(*p),
+                        *p,
+                    )
+                })
                 .collect();
             providers.sort();
             // Spread load: any provider within 20 ms of the best RTT is as good.
-            let chosen = providers.first().map(|(best, _)| {
+            let chosen = providers.first().map(|(choked, best, _)| {
                 let near: Vec<PeerAddr> = providers
                     .iter()
-                    .filter(|(rtt, _)| *rtt <= *best + Duration::from_millis(20))
-                    .map(|(_, p)| *p)
+                    .filter(|(c, rtt, _)| c == choked && *rtt <= *best + Duration::from_millis(20))
+                    .map(|(_, _, p)| *p)
                     .collect();
                 near[self.rng.random_range(0..near.len())]
             });
@@ -392,6 +400,13 @@ impl Node {
 
     /// Queue a `PULL_REQUEST`; the scheduler serves the most urgent first (Ch4 §4.3.3).
     pub(super) fn on_pull_request(&mut self, from: PeerAddr, r: PullRequest) {
+        // Tit-for-Tat (Ch5 §5.1.2): PULL service goes to unchoked peers only. The
+        // request still marks the peer as waiting, which is what the bootstrap
+        // queue orders by.
+        self.note_pull_want(from);
+        if !self.pull_allowed(from, &r) {
+            return;
+        }
         if self.swarm.block_with_proof(r.segment, r.block).is_none() {
             // A broadcast want we cannot serve stays silent; a directed request we
             // cannot serve means the requester's view of our buffer was wrong.
@@ -532,7 +547,7 @@ impl Node {
                     segment: bt.segment.0,
                     block: bt.block.0,
                 });
-                self.on_verified(vb, Some(from));
+                self.on_verified(vb, Some(from), true);
             }
             Ok(None) => {}
             Err(_) => {

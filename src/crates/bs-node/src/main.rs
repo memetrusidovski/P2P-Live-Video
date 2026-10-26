@@ -112,6 +112,9 @@ enum Cmd {
         /// relay or leaf.
         #[arg(long, default_value = "relay")]
         class: String,
+        /// NAT class: auto (from two PONG reflections), public, cone or symmetric.
+        #[arg(long, default_value = "auto")]
+        nat: String,
         /// Highest layer wanted.
         #[arg(long, default_value_t = 2)]
         top_layer: u8,
@@ -279,6 +282,7 @@ async fn main() -> anyhow::Result<()> {
                     forest_size: forest,
                 },
                 node_class: NodeClass::Relay,
+                reachability: Some(bs_wire::Reachability::Public),
                 listen,
                 advertise_ip,
                 bootstrap: None,
@@ -314,6 +318,7 @@ async fn main() -> anyhow::Result<()> {
             out,
             expect_hash,
             class,
+            nat,
             top_layer,
             upload_kbps,
             seed,
@@ -341,6 +346,12 @@ async fn main() -> anyhow::Result<()> {
                     NodeClass::Leaf
                 } else {
                     NodeClass::Relay
+                },
+                reachability: match nat.to_ascii_lowercase().as_str() {
+                    "public" => Some(bs_wire::Reachability::Public),
+                    "cone" => Some(bs_wire::Reachability::Cone),
+                    "symmetric" => Some(bs_wire::Reachability::Symmetric),
+                    _ => None,
                 },
                 listen,
                 advertise_ip,

@@ -1,0 +1,62 @@
+# Ch8 §8.3 scenario C and Ch6 §6.3. Three quarters of the viewers are behind symmetric
+# NATs: they are leaf-class, are never probed, and can only connect outbound. The relays
+# are cone NATs except a few public ones with 20 Mbps or more, which qualify as emergent
+# relays after a short uptime. Symmetric viewers that find no reachable parent must be
+# bridged through those relays, and no viewer may starve.
+seed = 9
+duration_s = 120.0
+forest_size = 3
+
+[params]
+relay_capable_uptime = 5000000
+
+[publisher]
+upload_kbps = 24000
+
+[[viewers]]
+label = "cone_relays"
+count = 12
+class = "relay"
+upload_kbps = { min = 12000.0, max = 18000.0 }
+top_layer = 2
+join_s = { min = 1.0, max = 10.0 }
+nat = "cone"
+
+[[viewers]]
+label = "superpeers"
+count = 8
+class = "relay"
+upload_kbps = { min = 50000.0, max = 70000.0 }
+top_layer = 2
+join_s = { min = 1.0, max = 6.0 }
+
+[[viewers]]
+label = "symmetric"
+count = 48
+class = "relay"
+upload_kbps = { min = 5000.0, max = 10000.0 }
+top_layer = 1
+join_s = { min = 8.0, max = 40.0 }
+nat = "symmetric"
+
+[network]
+regions = 2
+# Port-restricted cones: most symmetric peers' punches into cone relays fail (Ch6 §6.1).
+symmetric_cone_punch = 0.3
+
+[kpis]
+psr_max = 0.05
+sjl_mean_max_s = 8.0
+sjl_p95_max_s = 16.0
+active_fraction_min = 0.9
+repair_median_max_s = 4.0
+# A bridged link repairs through a new RELAY_PROPOSAL, and the relay may first have
+# to join the tree itself: the tail is the bind timeout plus one join.
+repair_p95_max_s = 15.0
+
+[kpis.facts_min]
+bridges_bound = 5
+"active_fraction:symmetric" = 0.9
+
+[kpis.facts_max]
+"psr:symmetric" = 0.05

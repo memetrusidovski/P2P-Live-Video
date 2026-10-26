@@ -5,14 +5,35 @@ network, with `tc netem` shaping each container's link, and collects every
 node's output hash and starvation counters into a `verdict.json` in the same
 schema the simulator produces.
 
-**Status: scripts are complete but not runnable until M2 lands `bsnode publish`
-and `bsnode watch` (see MILESTONES.md).** Nothing here has been executed yet.
+**Status:** runs end to end. The first `up.sh` builds the image (a release build of
+`bsnode` inside Docker, several minutes); later runs rebuild only what changed. The
+build context is `src/` minus the paths in `src/.dockerignore`: without that file the
+context carried `target/` and the copy failed. Each
+`up.sh` writes `.last_run.env`, and `report.py` reads it for the run id, profile,
+seed and publisher start delay, so `python3 fleet/report.py` with no flags reports
+the last run against the profile's starvation bound (clean 0.1 %, lossy 2 %, cellular
+5 %, matching the simulator gates). Viewers exit after `--duration` (default 60 s);
+the publisher keeps streaming until the file ends, so `fleet/down.sh` stops it.
 
 ```
-fleet/up.sh --viewers 20 --profile lossy --file ~/sample.mp4
-fleet/report.py --profile lossy          # writes results/fleet/verdict.json, exit 1 on failure
+fleet/up.sh --viewers 20 --profile lossy --file ~/sample.mp4 --max-bytes 25000000 --duration 90
+fleet/churn.sh --fraction 0.3 --at 30     # optional: kill 30 % of the viewers after 30 s
+sleep 80
+fleet/down.sh --keep-results              # the publisher writes its report when stopped
+fleet/report.py --profile lossy           # writes results/fleet/verdict.json, exit 1 on failure
 fleet/down.sh
 ```
+
+The hash check compares each viewer that started at segment 1 with the publisher's whole
+stream. The stream must therefore end before the viewers do. `--max-bytes` bounds it
+(25 MB is about a minute of the sample) and `--duration` outlasts it.
+
+`churn.sh` is Ch8 §8.3 scenario A on real nodes. It records the killed containers in
+`.churned`; `report.py` scores the survivors only and adds a `survivors_stalled` KPI
+(a survivor must not starve more than 10 % of its chunks after the churn).
+
+`BS_FLEET=1 scripts/check.sh` runs the lossy profile with that churn as a gate after
+the simulator gates. It needs docker and `fleet/media/sample.mp4` (or `BS_FLEET_FILE`).
 
 Profiles (`profiles/*.env`): `clean`, `lossy` (40 ms +-10, 2 % loss), `cellular`
 (120 ms +-40, 8 % loss, 8 Mbit/s). Add a profile by adding an env file.
@@ -28,8 +49,11 @@ Files:
 | `up.sh` / `down.sh` | scale up under a profile; tear down (`--keep-results` keeps the volume) |
 | `report.py` | copies the results volume out and builds `verdict.json` |
 
-The data-correctness check is the `hash_match_fraction` KPI: every viewer's
-reassembled output must hash equal to the publisher's source file.
+The data-correctness check is the `hash_mismatches` KPI: every viewer that started at
+segment 1 and starved no chunk must hash equal to the publisher's source file. A viewer
+with a starved chunk has a hole in its output; its loss is scored by the PSR gate, not
+counted as corruption. `report.py` keeps the raw results under `results/fleet/raw` and
+lists every viewer under `facts.per_viewer`.
 
 
 ## Watching the fleet

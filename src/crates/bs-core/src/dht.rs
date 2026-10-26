@@ -200,6 +200,8 @@ pub enum Purpose {
     Discovery,
     /// Full FIND_NODE toward `K_s`: the k closest contacts, for `REGISTER_PEER`.
     Guardians,
+    /// FIND_NODE toward one NodeID, to learn its observed address.
+    Resolve,
 }
 
 impl Purpose {
@@ -209,6 +211,7 @@ impl Purpose {
             Purpose::SelfLookup => "self",
             Purpose::Discovery => "discovery",
             Purpose::Guardians => "guardians",
+            Purpose::Resolve => "resolve",
         }
     }
 }

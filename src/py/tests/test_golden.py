@@ -25,7 +25,7 @@ def decode(v):
 
 
 def test_every_vector_decodes(vectors):
-    assert len(vectors) == 32
+    assert len(vectors) == 39
     for v in vectors.values():
         decode(v)
 
@@ -368,4 +368,36 @@ def test_store_record_ack(vectors):
     assert b["relay_count"] == 700
     assert b["per_tree_relay"] == [230, 231, 239, 0, 0, 0]
     assert b["starved"] == [0, 0, 3, 0, 0, 0]
+
+
+def test_proof_of_upload(vectors):
+    _, b = decode(vectors["proof_of_upload"])
+    assert b["segment"] == 41 and b["tree_id"] == 1
+    assert b["rx_flags"] == {"relayed": False, "pull": False}
+    assert b["loss_rate"] == 5
+    assert bin(int.from_bytes(b["bitmap"], "big")).count("1") == 12
+    assert b["k_avail"] == 3 and b["assigned_trees"] == [1] and b["node_class"] == "RELAY"
+    assert b["uploader"] == b"\xa1" * 32 and b["downloader"] == b"\xb1" * 32
+
+
+def test_rank_proof(vectors):
+    _, b = decode(vectors["rank_proof"])
+    assert b["receipt_count"] == 5 and b["commit_segment"] == 40 and b["nonce_segment"] == 41
+    assert len(b["pairs"]) == 2
+    p0, p1 = b["pairs"]
+    assert p0["left"]["downloader"] == b"\xb1" * 32 and p0["right"]["downloader"] == b"\xb2" * 32
+    assert len(p0["signers"]) == 2 and p0["signers"][1][1] == 0x0202020202020202
+    assert len(p0["path"]) == 2
+    assert p1["right"] is None and len(p1["signers"]) == 1
+
+
+def test_audit_gossip(vectors):
+    _, b = decode(vectors["audit_gossip"])
+    assert b["accuser"] == b"\xa1" * 32 and b["rank_proof"] is None
+    assert b["accuser_key"][1] == 0x0202020202020202
+    a = b["accusations"][0]
+    assert a["suspect"] == b"\xb1" * 32 and a["evidence_type"] == "SYMMETRIC_TREE_PAIR"
+    assert a["first"]["downloader"] == b"\xb1" * 32 and a["second"]["downloader"] == b"\xa1" * 32
+    assert a["timestamp_us"] == 1_700_000_000_600_000
+    assert len(a["signers"]) == 2 and a["signers"][1][1] == 0x0202020202020202
 

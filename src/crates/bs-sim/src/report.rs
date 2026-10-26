@@ -243,7 +243,6 @@ pub fn verdict(sim: &mut Sim, scenario_path: &Path, out: &Path) -> Verdict {
         kpi(hard as f64, 0.0, true),
     );
 
-    let passed = kpis.values().all(|l| l.pass);
     facts.insert("nodes".into(), serde_json::json!(nodes.len()));
     facts.insert(
         "alive_at_end".into(),
@@ -273,6 +272,206 @@ pub fn verdict(sim: &mut Sim, scenario_path: &Path, out: &Path) -> Verdict {
         "no_session_by_type".into(),
         serde_json::json!(k.no_session_by_type),
     );
+    facts.insert("freeload_drops".into(), serde_json::json!(k.freeload_drops));
+    facts.insert(
+        "receipts_rejected_by_reason".into(),
+        serde_json::json!(k.receipt_reject_reasons),
+    );
+    {
+        let sum = |f: fn(&crate::kpi::NodeStats) -> u64| k.nodes.iter().map(f).sum::<u64>();
+        facts.insert(
+            "receipts_issued".into(),
+            serde_json::json!(sum(|n| n.receipts_issued)),
+        );
+        facts.insert(
+            "receipts_accepted".into(),
+            serde_json::json!(sum(|n| n.receipts_accepted)),
+        );
+        facts.insert(
+            "receipts_rejected".into(),
+            serde_json::json!(sum(|n| n.receipts_rejected)),
+        );
+        facts.insert(
+            "receipts_missed".into(),
+            serde_json::json!(sum(|n| n.receipts_missed)),
+        );
+        facts.insert("chokes".into(), serde_json::json!(sum(|n| n.chokes)));
+        facts.insert("unchokes".into(), serde_json::json!(sum(|n| n.unchokes)));
+        facts.insert(
+            "optimistic_unchokes".into(),
+            serde_json::json!(sum(|n| n.optimistic)),
+        );
+        facts.insert(
+            "pulls_choked".into(),
+            serde_json::json!(sum(|n| n.pulls_choked)),
+        );
+        facts.insert(
+            "rank_proofs_sent".into(),
+            serde_json::json!(sum(|n| n.rank_proofs_sent)),
+        );
+        facts.insert(
+            "rank_proofs_verified".into(),
+            serde_json::json!(sum(|n| n.rank_proofs_verified)),
+        );
+        facts.insert(
+            "rank_proofs_rejected_by_reason".into(),
+            serde_json::json!(k.rank_reject_reasons),
+        );
+        facts.insert(
+            "preemptions".into(),
+            serde_json::json!(sum(|n| n.preemptions)),
+        );
+        facts.insert(
+            "accusations_made".into(),
+            serde_json::json!(sum(|n| n.accusations_made)),
+        );
+        facts.insert(
+            "accusations_counted".into(),
+            serde_json::json!(sum(|n| n.accusations_counted)),
+        );
+        facts.insert(
+            "accusations_dropped_by_reason".into(),
+            serde_json::json!(k.accusation_drop_reasons),
+        );
+        facts.insert(
+            "forest_updates".into(),
+            serde_json::json!(sum(|n| n.forest_updates)),
+        );
+        facts.insert(
+            "forest_switches".into(),
+            serde_json::json!(sum(|n| n.forest_switches)),
+        );
+        facts.insert(
+            "relay_reassignments".into(),
+            serde_json::json!(sum(|n| n.relay_reassignments)),
+        );
+        facts.insert(
+            "punches_sent".into(),
+            serde_json::json!(sum(|n| n.punches_sent)),
+        );
+        facts.insert(
+            "bridges_proposed".into(),
+            serde_json::json!(sum(|n| n.bridges_proposed)),
+        );
+        facts.insert(
+            "bridges_bound".into(),
+            serde_json::json!(sum(|n| n.bridges_bound)),
+        );
+        facts.insert(
+            "bridges_rejected".into(),
+            serde_json::json!(sum(|n| n.bridges_rejected)),
+        );
+        facts.insert(
+            "bridges_served".into(),
+            serde_json::json!(sum(|n| n.bridges_served)),
+        );
+        facts.insert(
+            "bridges_expired".into(),
+            serde_json::json!(sum(|n| n.bridges_expired)),
+        );
+        facts.insert(
+            "ingress_bound".into(),
+            serde_json::json!(sum(|n| n.ingress_bound)),
+        );
+        facts.insert("nat_drops".into(), serde_json::json!(sim.network.nat_drops));
+        if let Some(m) = nodes.first().and_then(|n| n.node.matrix()) {
+            facts.insert("forest_m".into(), serde_json::json!(m.m()));
+            facts.insert("forest_layers".into(), serde_json::json!(m.layer_count));
+            facts.insert("forest_version".into(), serde_json::json!(m.version));
+        }
+        facts.insert(
+            "subnet_penalties".into(),
+            serde_json::json!(sum(|n| n.subnet_penalties)),
+        );
+        // Consensus evictions by the label of the evicted peer.
+        let id_label: std::collections::HashMap<bs_wire::NodeId, String> = nodes
+            .iter()
+            .map(|n| (n.node.node_id(), n.label.clone()))
+            .collect();
+        let mut ev_by_label: std::collections::BTreeMap<String, u64> = nodes
+            .iter()
+            .filter(|n| !n.node.is_source())
+            .map(|n| (n.label.clone(), 0))
+            .collect();
+        for id in &k.consensus_evictions {
+            let l = id_label
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| "unknown".into());
+            *ev_by_label.entry(l).or_default() += 1;
+        }
+        facts.insert(
+            "consensus_evictions".into(),
+            serde_json::json!(k.consensus_evictions.len()),
+        );
+        for (l, c) in ev_by_label {
+            facts.insert(format!("consensus_evictions:{l}"), serde_json::json!(c));
+        }
+        // Per label: the fraction of viewers that end the run with a parent in every
+        // tree of their configured quality. A shed layer counts as missing.
+        let mut full: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
+        for n in nodes.iter().filter(|n| !n.node.is_source() && n.alive) {
+            let e = full.entry(n.label.clone()).or_default();
+            let top = n.node.configured_top_layer();
+            let ok = n
+                .node
+                .trees()
+                .iter()
+                .filter(|t| {
+                    n.node
+                        .matrix()
+                        .and_then(|m| m.tree(t.id))
+                        .map(|i| i.layer <= top)
+                        .unwrap_or(false)
+                })
+                .all(|t| t.parent.is_some());
+            e.0 += ok as u64;
+            e.1 += 1;
+        }
+        for (l, (a, t)) in full {
+            facts.insert(
+                format!("attached_all:{l}"),
+                serde_json::json!(if t == 0 { 0.0 } else { a as f64 / t as f64 }),
+            );
+        }
+        let (ps, pn) = (sum(|n| n.parity_sum), sum(|n| n.parity_n));
+        facts.insert(
+            "parity_mean".into(),
+            serde_json::json!(if pn > 0 {
+                ps as f64 / pn as f64
+            } else {
+                s.params.default_parity as f64
+            }),
+        );
+        let evictions: u64 = nodes.iter().map(|n| n.node.deadline_evictions()).sum();
+        facts.insert("deadline_evictions".into(), serde_json::json!(evictions));
+        // Per-label steady-state starvation, so an adversarial group can be excluded
+        // from the honest gate (`facts_max = { "psr:honest" = 0.001 }`).
+        let mut labels: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
+        for n in k.nodes.iter().filter(|n| !n.is_publisher) {
+            let e = labels.entry(n.label.clone()).or_default();
+            e.0 += n.steady_starved;
+            e.1 += n.steady_played;
+        }
+        for (l, (st, pl)) in labels {
+            facts.insert(
+                format!("psr:{l}"),
+                serde_json::json!(if pl == 0 { 1.0 } else { st as f64 / pl as f64 }),
+            );
+        }
+        let mut active: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
+        for n in k.nodes.iter().filter(|n| !n.is_publisher) {
+            let e = active.entry(n.label.clone()).or_default();
+            e.0 += n.active_us.is_some() as u64;
+            e.1 += 1;
+        }
+        for (l, (a, t)) in active {
+            facts.insert(
+                format!("active_fraction:{l}"),
+                serde_json::json!(if t == 0 { 0.0 } else { a as f64 / t as f64 }),
+            );
+        }
+    }
     let (_, _, qdrops, ldrops) = sim.network.totals();
     facts.insert("queue_drops".into(), serde_json::json!(qdrops));
     {
@@ -370,6 +569,22 @@ pub fn verdict(sim: &mut Sim, scenario_path: &Path, out: &Path) -> Verdict {
     by_type.sort_by_key(|x| std::cmp::Reverse(x.2));
     facts.insert("frames_by_type".into(), serde_json::json!(by_type));
 
+    // Scenario-declared bounds on facts.
+    for (name, thr) in &th.facts_max {
+        let v = facts
+            .get(name)
+            .and_then(|v| v.as_f64())
+            .unwrap_or(f64::INFINITY);
+        kpis.insert(format!("fact:{name}"), kpi(v, *thr, true));
+    }
+    for (name, thr) in &th.facts_min {
+        let v = facts
+            .get(name)
+            .and_then(|v| v.as_f64())
+            .unwrap_or(f64::NEG_INFINITY);
+        kpis.insert(format!("fact:{name}"), kpi(v, *thr, false));
+    }
+    let passed = kpis.values().all(|l| l.pass);
     let mut hints = Vec::new();
     if !passed {
         for (name, l) in &kpis {

@@ -753,3 +753,216 @@ fn gossip_exchange_hmac_and_replay() {
     let later = h.node(v).membership_stats();
     assert!(later.0 > before.0, "genuine exchanges accepted: {later:?}");
 }
+
+/// Ch5 §5.2: a child signs one PROOF_OF_UPLOAD per segment per tree and the parent
+/// verifies it into its ledger; a child that stops signing is choked from PULL service
+/// and dropped from the tree after three unreceipted segments (`DISCONNECT` EVICTION),
+/// and cannot re-enter that parent's trees during the eviction cooldown.
+#[test]
+fn receipts_flow_and_silent_child_is_evicted() {
+    let mut h = Harness::new();
+    let (p, v) = pub_and_viewer(&mut h);
+    h.run_for(secs(6.0));
+    let issued = h.count_events(v, |e| matches!(e, Event::ReceiptIssued { .. }));
+    let accepted = h.count_events(p, |e| matches!(e, Event::ReceiptAccepted { .. }));
+    assert!(issued >= 3, "viewer issued {issued} receipts");
+    assert!(accepted >= 3, "publisher accepted {accepted} receipts");
+    assert_eq!(
+        h.count_events(p, |e| matches!(e, Event::ReceiptRejected { .. })),
+        0
+    );
+    assert!(h.node(p).receipt_count() >= 3);
+    assert!(
+        h.node(p).theta_rate() > 0.0,
+        "the publisher has rank from its child"
+    );
+    // The viewer goes silent on receipts only; pushes continue.
+    h.drop_types.insert((v, FrameType::PROOF_OF_UPLOAD));
+    h.run_for(secs(6.0));
+    let missed = h.count_events(p, |e| matches!(e, Event::ReceiptMissed { .. }));
+    assert!(missed >= 3, "deadline misses recorded: {missed}");
+    assert_eq!(
+        h.node(p).deadline_evictions(),
+        3,
+        "evicted from each of the three trees"
+    );
+    let evictions = sends_of(&h, p, FrameType::DISCONNECT)
+        .into_iter()
+        .filter(|(_, to, f, _)| {
+            *to == v && matches!(f, Frame::Disconnect(d) if d.reason == DisconnectReason::Eviction)
+        })
+        .count();
+    assert_eq!(evictions, 3);
+    assert!(
+        h.node(p).trees().iter().all(|t| t.children.is_empty()),
+        "publisher dropped the child"
+    );
+    // Re-joins are refused while the cooldown runs.
+    h.run_for(secs(3.0));
+    assert!(
+        h.count_events(
+            p,
+            |e| matches!(e, Event::ChildRejected { reason, .. } if reason == "EvictionCooldown")
+        ) >= 1,
+        "re-join refused during the eviction cooldown"
+    );
+}
+
+/// Ch5 §5.2.2: a relay that uploaded to a child builds a RANK_PROOF the publisher
+/// verifies to a positive rank; a proof with a tampered receipt count fails the Merkle
+/// check and the prover is refused for the eviction cooldown.
+#[test]
+fn rank_proof_round_trip_and_forgery() {
+    let mut h = Harness::new();
+    let (p, r, _l) = chain_topology(&mut h);
+    h.run_for(secs(8.0));
+    assert!(
+        h.node(r).receipt_count() >= 2,
+        "relay holds receipts from its child"
+    );
+    let proof = h.node(r).build_rank_proof().expect("proof built");
+    assert_eq!(proof.pairs.len(), 8);
+    assert!(proof.nonce_segment > proof.commit_segment);
+    h.inject(p, r, Channel::Control, Frame::RankProof(proof.clone()));
+    let verified = h.events(p).iter().rev().find_map(|(_, e)| match e {
+        Event::RankProofVerified { rank, .. } => Some(*rank),
+        _ => None,
+    });
+    assert!(
+        verified.map(|r| r > 0.0).unwrap_or(false),
+        "publisher verified a positive rank: {verified:?}"
+    );
+    let mut forged = proof;
+    forged.receipt_count += 1;
+    h.inject(p, r, Channel::Control, Frame::RankProof(forged));
+    assert!(
+        h.events(p)
+            .iter()
+            .any(|(_, e)| matches!(e, Event::RankProofRejected { .. })),
+        "tampered proof rejected"
+    );
+}
+
+/// Ch1 §1.2.4 §4.5 and §1.1.5 §5.6: a MANIFEST_UPDATE is announced five segments
+/// ahead, accepted by the viewer, and takes effect at EffectiveSegmentSeq on both
+/// sides; a forged update is ignored; a fold removes the top layer and chunks keep
+/// flowing under the new matrix.
+#[test]
+fn forest_resize_and_fold() {
+    let mut h = Harness::new();
+    let (p, v) = pub_and_viewer(&mut h);
+    assert_eq!(h.node(v).matrix().map(|m| m.m()), Some(3));
+    let before = h.delivers(v).len();
+    // Forged: a zero signature never installs a pending layout.
+    let mut forged = ManifestUpdate {
+        body: h.node(p).swarm().manifests_from(SegmentSeq(1))[0]
+            .body
+            .clone(),
+        effective_segment: SegmentSeq(50),
+        trees: h.node(p).matrix().unwrap().to_entries(),
+        signature: SignatureBytes::ZERO,
+    };
+    forged.body.slicing_matrix_version = 9;
+    h.inject(v, p, Channel::Control, Frame::ManifestUpdate(forged));
+    assert!(
+        h.node(v).pending_update().is_none(),
+        "forged update ignored"
+    );
+    // Shrink to two trees.
+    h.node_mut(p).force_forest(2, 3);
+    h.run_for(secs(0.5));
+    let pend = h.node(v).pending_update().expect("update accepted");
+    assert_eq!(pend.matrix.m(), 2);
+    let effective = pend.effective;
+    assert!(
+        effective.0 > h.node(p).swarm().live_edge.0,
+        "announced ahead"
+    );
+    assert_eq!(
+        h.node(p).matrix().map(|m| m.m()),
+        Some(3),
+        "not yet in force"
+    );
+    h.run_for(secs(6.0));
+    assert_eq!(
+        h.node(p).matrix().map(|m| m.m()),
+        Some(2),
+        "source switched"
+    );
+    assert_eq!(
+        h.node(v).matrix().map(|m| m.m()),
+        Some(2),
+        "viewer switched"
+    );
+    assert_eq!(h.node(v).trees().len(), 2, "closed tree removed");
+    assert!(
+        h.count_events(v, |e| matches!(e, Event::ForestSwitched { m: 2, .. })) == 1,
+        "one switch event"
+    );
+    let mid = h.delivers(v).len();
+    assert!(mid > before, "chunks delivered across the resize");
+    // Fold the top layer.
+    h.node_mut(p).force_forest(2, 2);
+    // Five segments to the switch, then the 3 s playout delay.
+    h.run_for(secs(10.0));
+    let m = h.node(v).matrix().unwrap();
+    assert_eq!(m.layer_count, 2, "folded");
+    assert_eq!(h.node(p).matrix().unwrap().layer_count, 2);
+    let after = h.delivers(v);
+    assert!(after.len() > mid, "chunks delivered after the fold");
+    let last = &after[after.len() - 1].1;
+    assert_eq!(last.layers.len(), 2, "the folded layer is not encoded");
+}
+
+/// Ch6 §6.3: a NAT-blocked viewer with no reachable parent proposes a bridge to a
+/// RELAY_CAPABLE peer; the relay binds it, admits the viewer as a bridge child in a
+/// tree it is not assigned to, and the viewer's receipts to it carry the RELAYED flag.
+#[test]
+fn emergent_relay_bridges_a_blocked_viewer() {
+    let mut h = Harness::new();
+    h.params.relay_capable_uptime = Duration::from_secs(0);
+    let p = addr(1);
+    let r = addr(2);
+    let v = addr(3);
+    h.add_publisher(p, 100_000, 1);
+    h.add_viewer(r, NodeClass::Relay, 2, 40_000, 7);
+    h.add_viewer(v, NodeClass::Relay, 2, 10_000, 9);
+    h.start(p);
+    h.start_publishing();
+    h.run_for(secs(0.5));
+    h.start(r);
+    h.run_for(secs(3.0));
+    h.start(v);
+    h.run_for(secs(2.0));
+    assert!(h.node(r).relay_capable(), "40 Mbps public relay qualifies");
+    // Leave tree 1 and ask for a bridge instead of re-joining.
+    h.node_mut(v).shop_parent(TreeId(1));
+    h.node_mut(v).force_bridge(TreeId(1));
+    h.run_for(secs(3.0));
+    assert!(
+        h.count_events(v, |e| matches!(e, Event::BridgeBound { tree: 1, .. })) >= 1,
+        "bridge bound"
+    );
+    assert_eq!(
+        h.node(v).bridged_parent(TreeId(1)),
+        Some(r),
+        "served through the relay"
+    );
+    assert!(
+        h.node(r).is_bridge_child(v, TreeId(1)),
+        "relay holds the bridge slot"
+    );
+    let relayed = sends_of(&h, v, FrameType::PROOF_OF_UPLOAD)
+        .into_iter()
+        .filter(|(_, to, f, _)| {
+            *to == r && matches!(f, Frame::ProofOfUpload(p) if p.rx_flags.relayed && p.tree_id == TreeId(1))
+        })
+        .count();
+    assert!(relayed >= 1, "receipts over the bridge carry RELAYED");
+    let before = h.delivers(v).len();
+    h.run_for(secs(3.0));
+    assert!(
+        h.delivers(v).len() > before,
+        "chunks keep playing through the bridge"
+    );
+}

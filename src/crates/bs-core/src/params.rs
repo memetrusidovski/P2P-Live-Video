@@ -71,6 +71,47 @@ pub struct Params {
     pub w_pull_max: Duration,
     /// r_pull: fraction of upload reserved for PULL service.
     pub r_pull: f64,
+    /// Sustained draw per unchoked PULL slot β_pull, kbps (App B: 0.5 Mbps).
+    pub beta_pull_kbps: u32,
+    /// Reciprocity window for ingress rates (Ch5 §5.1.2: 2 s).
+    pub tft_window: Duration,
+    /// Optimistic unchoke evaluation window (Ch5 §5.1.3: 2 s).
+    pub optimistic_window: Duration,
+    /// Cooldown after a failed optimistic window (Ch5 §5.1.3: 30 s).
+    pub optimistic_cooldown: Duration,
+    /// Threshold_min: ingress rate that earns a regular slot, kbps.
+    pub tft_threshold_min_kbps: u32,
+    /// Consecutive unreceipted segments before a child is evicted (App B: 3).
+    pub receipt_evict_after: u8,
+    /// An evicted NodeID and its /24 (/48) prefix cannot re-enter our trees for this long
+    /// (Ch5 §5.2.1 Known Limitation).
+    pub eviction_cooldown: Duration,
+    /// Receipt age decay λ, 1/s (App B: 0.005).
+    pub receipt_decay_lambda: f64,
+    /// Receipts count toward the rate within this many segments of the live edge (App B: 60).
+    pub rank_window_segments: u32,
+    /// Preemption margin: r_new > margin · r_min (Ch1 §1.2.2 Rank Admission Rule).
+    pub rank_preempt_margin: f64,
+    /// A verified RANK_PROOF stands for this long at the verifier.
+    pub rank_proof_ttl: Duration,
+    /// Collusion detection is suppressed below this swarm size (App B: 20).
+    pub n_collusion: u32,
+    /// Receipts in both directions within this window form a symmetric pair (60 s).
+    pub symmetry_window: Duration,
+    /// Byte values within this fraction count as equal in a symmetric pair (0.1).
+    pub symmetry_tolerance: f64,
+    /// Verified accusations count for this long (App B: 10 min).
+    pub tau_accuse: Duration,
+    /// Minimum accuser rank to be counted (App B: 0.25).
+    pub r_accuser: f64,
+    /// Consensus ban on the first eviction (App B: 10 min), doubled per repeat.
+    pub tau_ban: Duration,
+    /// Longest consensus ban (24 h).
+    pub ban_cap: Duration,
+    /// Accusations accepted per accuser per minute (4).
+    pub accusations_per_minute: u32,
+    /// Resolved signers in one prefix above this share discount a rank proof (0.2).
+    pub subnet_cluster_share: f64,
     /// S/Kademlia bucket capacity `k` (App B).
     pub dht_k: usize,
     /// Lookup concurrency `α`: disjoint paths per lookup (Ch2 §2.1.2).
@@ -89,8 +130,41 @@ pub struct Params {
     pub leaf_share: f64,
     /// Rank preemption margin (1.25).
     pub preempt_margin: f64,
-    /// Forest ladder: relay counts at which M steps to 2..=6.
+    /// Forest ladder: relay counts at which M steps to 2..=6 (index = M).
     pub forest_ladder_relays: Vec<u32>,
+    /// Whether the source resizes and folds the forest at all.
+    pub dynamic_forest: bool,
+    /// Segments between a `MANIFEST_UPDATE` and its switch (the migration window).
+    pub resize_window_segments: u32,
+    /// τ_fold for a starved base layer.
+    pub tau_fold_base: Duration,
+    /// τ_fold for any other starved layer.
+    pub tau_fold: Duration,
+    /// s_fold: starved share of the swarm that triggers a fold.
+    pub s_fold: f64,
+    /// Relay growth since the fold that restores a folded layer.
+    pub unfold_growth: f64,
+    /// τ_nat: a CONE registrant PINGs its guardians this often (App D §D.4.14).
+    pub tau_nat: Duration,
+    /// How long a NAT mapping stays open after the last outbound packet (simulator).
+    pub nat_mapping_ttl: Duration,
+    /// Upload a node needs to be RELAY_CAPABLE, kbps (Ch6 §6.3.1).
+    pub relay_capable_kbps: u32,
+    /// Uptime a node needs to be RELAY_CAPABLE (Ch6 §6.3.1).
+    pub relay_capable_uptime: Duration,
+    /// Rounds without a reachable parent before a bridge is asked for.
+    pub bridge_after_failed_rounds: u32,
+    /// Share of the tree budget a relay may spend on bridges (Ch6 §6.3.1).
+    pub bridge_budget_share: f64,
+    /// How long a proposal waits for RELAY_BIND, and a bound bridge for its child.
+    pub bridge_timeout: Duration,
+    /// Ingress relays a source behind a NAT binds (Ch6 §6.3.3 recommends two).
+    pub ingress_relays: u32,
+    /// Share of the uplink kept free of slots (ISSUE-072).
+    ///
+    /// A relay at the cap runs its link at 100 %, and the queueing delay starves its
+    /// last children.
+    pub slot_headroom: f64,
 
     // ---- Scoring (Ch1 §1.2.2 §2.1.1) ----
     /// w_c: ms of credit per √K_avail.
@@ -146,6 +220,26 @@ impl Default for Params {
             w_pull_min: Duration::from_millis(1500),
             w_pull_max: Duration::from_millis(2000),
             r_pull: 0.10,
+            beta_pull_kbps: 500,
+            tft_window: Duration::from_secs(2),
+            optimistic_window: Duration::from_secs(2),
+            optimistic_cooldown: Duration::from_secs(30),
+            tft_threshold_min_kbps: 64,
+            receipt_evict_after: 3,
+            eviction_cooldown: Duration::from_secs(60),
+            receipt_decay_lambda: 0.005,
+            rank_window_segments: 60,
+            rank_preempt_margin: 1.25,
+            rank_proof_ttl: Duration::from_secs(10),
+            n_collusion: 20,
+            symmetry_window: Duration::from_secs(60),
+            symmetry_tolerance: 0.1,
+            tau_accuse: Duration::from_secs(600),
+            r_accuser: 0.25,
+            tau_ban: Duration::from_secs(600),
+            ban_cap: Duration::from_secs(86_400),
+            accusations_per_minute: 4,
+            subnet_cluster_share: 0.2,
             dht_k: 20,
             dht_alpha: 3,
             dht_rpc_timeout: Duration::from_millis(400),
@@ -159,7 +253,22 @@ impl Default for Params {
             f_frame: 0.085,
             leaf_share: 0.20,
             preempt_margin: 1.25,
-            forest_ladder_relays: vec![0, 6, 12, 24, 48, 96],
+            forest_ladder_relays: vec![0, 0, 0, 12, 18, 24, 30],
+            dynamic_forest: false,
+            resize_window_segments: 5,
+            tau_fold_base: Duration::from_secs(10),
+            tau_fold: Duration::from_secs(30),
+            s_fold: 0.05,
+            unfold_growth: 1.5,
+            tau_nat: Duration::from_secs(25),
+            nat_mapping_ttl: Duration::from_secs(30),
+            relay_capable_kbps: 20_000,
+            relay_capable_uptime: Duration::from_secs(1800),
+            bridge_after_failed_rounds: 2,
+            bridge_budget_share: 0.5,
+            bridge_timeout: Duration::from_secs(12),
+            slot_headroom: 0.05,
+            ingress_relays: 2,
             w_c: 12.0,
             w_h: 20.0,
             lambda_hop: 0.5,
@@ -215,9 +324,9 @@ impl Params {
     /// Forest size M for a relay count, from the ladder (Ch1 §1.2.1 §1.4).
     pub fn forest_size(&self, relay_count: u32) -> u8 {
         let mut m = 2u8;
-        for (i, &thr) in self.forest_ladder_relays.iter().enumerate().skip(2) {
+        for (i, &thr) in self.forest_ladder_relays.iter().enumerate().skip(3) {
             if relay_count >= thr {
-                m = (i + 1) as u8;
+                m = i as u8;
             }
         }
         m.clamp(2, 6)
@@ -236,7 +345,7 @@ impl Params {
             return 0;
         }
         let omega = (1.0 + mean_parity / bs_wire::consts::K_BLOCK as f64) * (1.0 + self.f_frame);
-        let k = (1.0 - self.r_pull) * upload_kbps as f64
+        let k = (1.0 - self.r_pull - self.slot_headroom) * upload_kbps as f64
             / (assigned_tree_count as f64 * tree_bitrate_kbps as f64 * omega);
         k.floor().clamp(0.0, u16::MAX as f64) as u16
     }
@@ -303,9 +412,10 @@ mod tests {
     #[test]
     fn slot_count_example() {
         let p = Params::default();
-        // spec: ⌊7.2 / 0.8625⌋ = 8 with Ω = 1.15; our Ω from parity 1: (1+1/16)(1.03)=1.094
+        // The spec's figure is ⌊7.2 / 0.8625⌋ = 8 with Ω = 1.15 and no headroom. With
+        // the 5 % headroom of ISSUE-072 the same relay holds 7.
         let k = p.slots(8000, 1, 750, 1.0);
-        assert!((8..=9).contains(&k), "got {k}");
+        assert!((7..=9).contains(&k), "got {k}");
         assert_eq!(p.slots(8000, 1, 0, 1.0), 0);
         assert_eq!(p.leaf_slots(6), 2);
         assert_eq!(p.leaf_slots(1), 1);

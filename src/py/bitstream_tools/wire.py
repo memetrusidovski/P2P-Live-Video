@@ -252,6 +252,36 @@ def decode_stream_record(c: Cursor) -> dict[str, Any]:
     return rec
 
 
+def _rank_path_len(count: int) -> int:
+    n = max(count, 2)
+    return max((n - 1).bit_length() - 1, 0)
+
+
+def _pou(c: Cursor) -> dict[str, Any]:
+    # App D sec. D.4.12: [SegmentSeq 4][TreeID 1][RxFlags 1][LossRate 1][BitmapLen 1][Bitmap L]
+    # [K_avail 2][AssignedTrees 1][NodeClass 1][K_s 32][Uploader 32][Downloader 32][Timestamp 8][Sig 64]
+    r: dict[str, Any] = {"segment": c.u32(), "tree_id": c.u8()}
+    fl = c.u8()
+    if fl & ~0x03:
+        raise WireError(f"bad RxFlags {fl}")
+    r["rx_flags"] = {"relayed": bool(fl & 1), "pull": bool(fl & 2)}
+    r["loss_rate"] = c.u8()
+    l = c.u8()
+    if l > 64:
+        raise WireError(f"bitmap too long {l}")
+    r["bitmap"] = c.take(l)
+    r["k_avail"] = c.u16()
+    r["assigned_trees"] = tree_set(c.u8())
+    r["node_class"] = NODE_CLASS[c.u8()]
+    r["stream_key"] = c.take(32)
+    r["uploader"] = c.take(32)
+    r["downloader"] = c.take(32)
+    r["timestamp_us"] = c.u64()
+    r["signature"] = c.take(64)
+    c.done()
+    return r
+
+
 def decode_payload(ft: int, payload: bytes) -> dict[str, Any]:
     c = Cursor(payload)
     name = FRAME_NAMES[ft]
@@ -451,6 +481,29 @@ def decode_payload(ft: int, payload: bytes) -> dict[str, Any]:
         out["flags"] = decode_peer_flags(c.u8())
         c.skip(2)
         out["signature"] = c.take(64)
+    elif name == "PUNCH_REQUEST":
+        # App D sec. D.4.14: request [VB][Target 32][StreamID 32]; forward [VB][PeerRecord][StreamID 32]
+        out["validation"] = decode_validation_block(c)
+        if len(payload) == VALIDATION_BLOCK_LEN + 64:
+            out["form"] = "request"
+            out["target"] = c.take(32)
+        else:
+            out["form"] = "forward"
+            out["requester"] = decode_peer_record(c)
+        out["stream_id"] = c.take(32)
+    elif name == "RELAY_PROPOSAL":
+        # Ch6 sec. 6.3.3: [Target 32][TargetPort 2][TreeID 1][BindFlags 1]
+        out["target"] = c.take(32)
+        out["target_port"] = c.u16()
+        out["tree_id"] = c.u8()
+        out["bind_flags"] = c.u8()
+    elif name == "RELAY_BIND":
+        # Ch6 sec. 6.3.3: [ClientA 32][ClientB 32][TreeID 1][BindFlags 1][Reserved 2]
+        out["client_a"] = c.take(32)
+        out["client_b"] = c.take(32)
+        out["tree_id"] = c.u8()
+        out["bind_flags"] = c.u8()
+        c.skip(2)
     elif name == "GET_PEERS":
         if len(payload) == GET_PEERS_REQUEST_LEN:
             # App D sec. D.4.6b request: [VB 152][K_s 32][StarvedTrees 1][WantedTrees 1][ReqFlags 1][Reserved 1]
@@ -502,6 +555,57 @@ def decode_payload(ft: int, payload: bytes) -> dict[str, Any]:
         # Ch2 sec. 2.3.3: [VB 152][Stream Record]
         out["validation"] = decode_validation_block(c)
         out["stream_record"] = decode_stream_record(c)
+    elif name == "PROOF_OF_UPLOAD":
+        out.update(_pou(c))
+    elif name == "RANK_PROOF":
+        # App D sec. D.4.17
+        out["receipt_count"] = c.u32()
+        out["commit_segment"] = c.u32()
+        out["root"] = c.take(32)
+        out["prover"] = c.take(32)
+        out["signature"] = c.take(64)
+        out["nonce_segment"] = c.u32()
+        out["nonce_chunk"] = c.u8()
+        pair_count = c.u8()
+        c.skip(2)
+        plen = _rank_path_len(out["receipt_count"])
+        pairs = []
+        for _ in range(pair_count):
+            ll = c.u16()
+            left = _pou(Cursor(c.take(ll, "left")))
+            rl = c.u16()
+            right = _pou(Cursor(c.take(rl, "right"))) if rl else None
+            ns = c.u8()
+            signers = [(c.take(32), c.u64()) for _ in range(ns)]
+            path = [c.take(32) for _ in range(plen)]
+            pairs.append({"left": left, "right": right, "signers": signers, "path": path})
+        out["pairs"] = pairs
+    elif name == "REPUTATION_AUDIT_GOSSIP":
+        # App D sec. D.4.18
+        out["accuser"] = c.take(32)
+        out["accuser_key"] = (c.take(32), c.u64())
+        count = c.u8()
+        if count > 2:
+            raise WireError(f"too many accusations {count}")
+        c.skip(1)
+        plen = c.u16()
+        out["rank_proof"] = decode_payload(0x19, c.take(plen, "rank_proof")) if plen else None
+        accs = []
+        for _ in range(count):
+            a: dict[str, Any] = {"suspect": c.take(32)}
+            et = c.u8()
+            a["evidence_type"] = {1: "SYMMETRIC_TREE_PAIR", 2: "EQUIVOCATION"}[et]
+            c.skip(1)
+            elen = c.u16()
+            ev = Cursor(c.take(elen, "evidence"))
+            l1 = ev.u16(); a["first"] = _pou(Cursor(ev.take(l1, "first")))
+            l2 = ev.u16(); a["second"] = _pou(Cursor(ev.take(l2, "second")))
+            a["signers"] = [(ev.take(32), ev.u64()) for _ in range(ev.u8())]
+            ev.done()
+            a["timestamp_us"] = c.u64()
+            a["signature"] = c.take(64)
+            accs.append(a)
+        out["accusations"] = accs
     elif name == "STORE_RECORD_ACK":
         # Ch2 sec. 2.3.3: [Guardian 32][Accepted 1][RespFlags 1][QueryCount 2]
         # [ActiveCount 4][RelayCount 4][PerTreeRelayCount 6x2][StarvedCount 6x2]

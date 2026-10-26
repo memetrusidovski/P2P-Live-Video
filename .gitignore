@@ -8,6 +8,7 @@
 *.fdb_latexmk
 *.blg
 *.bbl
+*.mp4
 
 # === Rust ===
 /target/

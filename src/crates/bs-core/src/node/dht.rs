@@ -21,6 +21,12 @@ use crate::dht::{in_register_sample, stream_key, Key, Lookup, LookupKind, Purpos
 use crate::io::{Channel, Event, Output, PeerAddr};
 use crate::time::{Duration, Instant};
 
+/// How long after a request its late answer is still used to learn contacts.
+///
+/// WHY: A contact behind a saturated uplink answers after the RPC timeout. A joiner
+///      that discards those answers keeps re-asking the one contact it knows.
+const LATE_ANSWER_WINDOW: Duration = Duration::from_secs(5);
+
 /// How a node finds peers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -147,9 +153,17 @@ pub struct DhtState {
     /// Guardian storage for our stream.
     pub store: GuardianStore,
     next_register: Option<Instant>,
-    registered: Option<PeerRecord>,
+    pub(super) registered: Option<PeerRecord>,
     /// Retry of the initial discovery while no Stream Record has arrived.
     next_discovery_retry: Option<Instant>,
+    /// FIND requests sent, by target, so an answer after the timeout still teaches us.
+    find_asked: BTreeMap<PeerAddr, (PeerRecord, Instant)>,
+    /// GET_PEERS requests sent, by target, so a late answer is still used.
+    peers_asked: BTreeMap<PeerAddr, Instant>,
+    /// Guardians that hold our current registration.
+    registered_with: BTreeSet<NodeId>,
+    /// Their addresses, for the CONE keep-alive.
+    registered_addrs: Vec<PeerAddr>,
     /// STORE_RECORD_ACKs collected since the last record (publisher).
     acks: Vec<StoreRecordAck>,
     /// Counters.
@@ -181,6 +195,10 @@ impl DhtState {
             next_register: None,
             registered: None,
             next_discovery_retry: None,
+            find_asked: BTreeMap::new(),
+            peers_asked: BTreeMap::new(),
+            registered_with: BTreeSet::new(),
+            registered_addrs: Vec::new(),
             acks: Vec::new(),
             rpc_sent: 0,
             rpc_served: 0,
@@ -313,7 +331,7 @@ impl Node {
 
     // ------------------------------------------------------------------ lookups
 
-    fn start_lookup(
+    pub(super) fn start_lookup(
         &mut self,
         target: Key,
         kind: LookupKind,
@@ -368,14 +386,15 @@ impl Node {
     fn dht_drive_lookups(&mut self) {
         let now = self.now;
         let timeout = self.params.dht_rpc_timeout;
-        let mut sends: Vec<(PeerAddr, LookupKind, Key)> = Vec::new();
+        let mut sends: Vec<(PeerRecord, LookupKind, Key)> = Vec::new();
         for l in &mut self.dht.lookups {
             for rec in l.poll(now, timeout) {
-                sends.push((rec.addr.0, l.kind, l.target));
+                sends.push((rec, l.kind, l.target));
             }
         }
-        for (to, kind, target) in sends {
-            self.send_find(to, kind, target);
+        for (rec, kind, target) in sends {
+            self.dht.find_asked.insert(rec.addr.0, (rec, now));
+            self.send_find(rec.addr.0, kind, target);
         }
         let done: Vec<Lookup> = {
             let (done, rest): (Vec<Lookup>, Vec<Lookup>) = std::mem::take(&mut self.dht.lookups)
@@ -438,11 +457,21 @@ impl Node {
                         self.start_lookup(ks, LookupKind::Node, Purpose::Guardians, 0);
                 }
             }
+            Purpose::Resolve => {}
             Purpose::Guardians => {
                 self.dht.guardians = l.result();
                 self.dht.guardians_at = Some(self.now);
                 self.dht.guardians_lookup = None;
-                if self.dht.registered.is_none() && self.matrix.is_some() {
+                // WHY: The first registration went to the few contacts known at join.
+                //      A guardian found later must hold the record too. Otherwise the
+                //      counts the source sizes the forest on stay low for 90 s.
+                let untold = self
+                    .dht
+                    .guardians
+                    .iter()
+                    .any(|g| !self.dht.registered_with.contains(&g.node_id));
+                if (self.dht.registered.is_none() || untold) && self.matrix.is_some() {
+                    self.dht.registered = None;
                     self.register_self();
                 }
             }
@@ -451,8 +480,10 @@ impl Node {
 
     fn dht_on_find_response(&mut self, from: PeerAddr, resp: FindResponse) {
         let Some(idx) = self.dht.lookups.iter().position(|l| l.awaits(from)) else {
+            self.dht_on_late_find_response(from, resp);
             return;
         };
+        self.dht.find_asked.remove(&from);
         let (nodes, value) = match resp.result {
             FindResult::Nodes(v) => (v, None),
             FindResult::Value(s) => (Vec::new(), Some(*s)),
@@ -474,6 +505,30 @@ impl Node {
             self.dht_learn(r);
         }
         self.dht_drive_lookups();
+    }
+
+    /// Learn from a FIND answer that came after its lookup gave up on the contact.
+    ///
+    /// The answer counts if the request went out within `LATE_ANSWER_WINDOW`.
+    fn dht_on_late_find_response(&mut self, from: PeerAddr, resp: FindResponse) {
+        let Some((mut rec, sent)) = self.dht.find_asked.remove(&from) else {
+            return;
+        };
+        if self.now.duration_since(sent) > LATE_ANSWER_WINDOW {
+            return;
+        }
+        let nodes = match resp.result {
+            FindResult::Nodes(v) => v,
+            FindResult::Value(_) => Vec::new(),
+        };
+        rec.node_id = resp.responder;
+        if let Some(own) = nodes.iter().find(|n| n.node_id == resp.responder) {
+            rec = *own;
+        }
+        self.dht_insert_responsive(rec);
+        for n in nodes {
+            self.dht_learn(n);
+        }
     }
 
     // ------------------------------------------------------------------ discovery (GET_PEERS)
@@ -507,9 +562,11 @@ impl Node {
             if let Some(d) = self.dht.discovery.as_mut() {
                 d.lookup = Some(id);
             }
-        } else {
-            // Nobody to ask yet: fail fast, the join backoff re-queries.
-            self.dht_finish_discovery();
+        } else if let Some(d) = self.dht.discovery.as_mut() {
+            // WHY: Nobody to ask yet. The run ends on the timer, never here. A
+            //      synchronous end re-enters the join that asked. On a node with no
+            //      contact (the DHT seed) that loop has no bound.
+            d.deadline = Some(self.now + self.params.dht_rpc_timeout);
         }
     }
 
@@ -557,7 +614,8 @@ impl Node {
         body.extend_from_slice(sid.as_bytes());
         body.push(starved.0);
         body.push(wanted.0);
-        body.push(0);
+        let want_relay = self.take_want_relay();
+        body.push(want_relay as u8);
         body.push(0);
         for to in &targets {
             let vb = self.validation_block(FrameType::GET_PEERS, &body);
@@ -566,7 +624,7 @@ impl Node {
                 stream_id: sid,
                 starved_trees: starved,
                 wanted_trees: wanted,
-                want_relay_capable: false,
+                want_relay_capable: want_relay,
             };
             self.dht.rpc_sent += 1;
             self.send(
@@ -576,6 +634,9 @@ impl Node {
                 None,
             );
         }
+        for to in &targets {
+            self.dht.peers_asked.insert(*to, self.now);
+        }
         if let Some(d) = self.dht.discovery.as_mut() {
             d.asked = targets.len();
             d.deadline = Some(self.now + self.params.dht_rpc_timeout);
@@ -583,17 +644,28 @@ impl Node {
     }
 
     fn dht_on_get_peers_response(&mut self, from: PeerAddr, r: GetPeersResponse) {
-        let _ = from;
-        let Some(d) = self.dht.discovery.as_mut() else {
-            return;
-        };
-        if d.deadline.is_none() {
+        let asked_at = self.dht.peers_asked.remove(&from);
+        self.note_referrer(&r.records, from);
+        if let Some(d) = self.dht.discovery.as_mut() {
+            if d.deadline.is_some() {
+                d.responses.push(r);
+                if d.responses.len() >= d.asked {
+                    self.dht_finish_discovery();
+                }
+                return;
+            }
+        }
+        // A late answer to a run that already gave up is still the swarm's answer.
+        let late = asked_at
+            .map(|t| self.now.duration_since(t) <= LATE_ANSWER_WINDOW)
+            .unwrap_or(false);
+        if !late {
             return;
         }
-        d.responses.push(r);
-        if d.responses.len() >= d.asked {
-            self.dht_finish_discovery();
+        for rec in &r.records {
+            self.dht_learn(*rec);
         }
+        self.on_discovered(r.records, r.stream_record);
     }
 
     fn dht_finish_discovery(&mut self) {
@@ -623,6 +695,27 @@ impl Node {
             self.dht_learn(*r);
         }
         self.on_discovered(records, sr);
+    }
+
+    /// RELAY_CAPABLE registrations we hold as a guardian.
+    pub(super) fn dht_relay_capable_records(&self) -> Vec<PeerRecord> {
+        self.dht
+            .store
+            .regs
+            .values()
+            .map(|r| r.record)
+            .filter(|r| r.flags.relay_capable)
+            .collect()
+    }
+
+    /// A registration we hold as a guardian.
+    pub(super) fn dht_stored_record(&self, id: &NodeId) -> Option<PeerRecord> {
+        self.dht.store.regs.get(id).map(|r| r.record)
+    }
+
+    /// The guardians our registration went to.
+    pub(super) fn dht_registered_addrs(&self) -> Vec<PeerAddr> {
+        self.dht.registered_addrs.clone()
     }
 
     // ------------------------------------------------------------------ registration
@@ -658,23 +751,20 @@ impl Node {
             self.dht.store.register(rec, self.now);
         }
         let exclude = BTreeSet::from([self.node_id()]);
-        let mut targets: Vec<PeerAddr> = self
+        let mut chosen: Vec<PeerRecord> = self
             .dht
             .guardians
             .iter()
             .filter(|g| g.node_id != rec.node_id)
-            .map(|g| g.addr.0)
+            .copied()
             .collect();
-        if targets.is_empty() {
+        if chosen.is_empty() {
             let ks = self.k_s();
-            targets = self
-                .dht
-                .table
-                .closest(&ks, self.params.dht_k, &exclude)
-                .iter()
-                .map(|r| r.addr.0)
-                .collect();
+            chosen = self.dht.table.closest(&ks, self.params.dht_k, &exclude);
         }
+        self.dht.registered_with = chosen.iter().map(|g| g.node_id).collect();
+        let targets: Vec<PeerAddr> = chosen.iter().map(|g| g.addr.0).collect();
+        self.dht.registered_addrs = targets.clone();
         if targets.is_empty() {
             // Nobody to tell yet: retry as soon as the first lookup completes.
             self.dht.registered = None;
@@ -739,6 +829,7 @@ impl Node {
         let s = self.publisher.as_ref().map(|p| p.sample_log2).unwrap_or(0);
         let scale = 1u32 << s.min(16);
         let acks = std::mem::take(&mut self.dht.acks);
+        self.forest_note_acks(&acks);
         if !acks.is_empty() {
             let mut a: Vec<u32> = acks.iter().map(|x| x.active_count).collect();
             let mut r: Vec<u32> = acks.iter().map(|x| x.relay_count).collect();
@@ -961,13 +1052,17 @@ impl Node {
         self.dht.rpc_served += 1;
         let who = g.validation.node_id;
         let window = self.params.registration_active;
-        let membership = g.wanted_trees.is_empty();
+        let membership = g.wanted_trees.is_empty() || g.want_relay_capable;
         let mut pool: Vec<PeerRecord> = self
             .dht
             .store
             .active(now, window)
             .filter(|r| r.node_id != who)
             .filter(|r| {
+                // WANT_RELAY_CAPABLE asks for bridges, not parents (Ch6 §6.3.1).
+                if g.want_relay_capable {
+                    return r.flags.relay_capable;
+                }
                 membership
                     || (r.node_class == NodeClass::Relay
                         && !r.assigned_trees.intersection(g.wanted_trees).is_empty())
@@ -1113,6 +1208,12 @@ impl Node {
         }
         let now = self.now;
         let to = self.params.dht_rpc_timeout;
+        self.dht
+            .find_asked
+            .retain(|_, (_, t)| now.duration_since(*t) <= LATE_ANSWER_WINDOW);
+        self.dht
+            .peers_asked
+            .retain(|_, t| now.duration_since(*t) <= LATE_ANSWER_WINDOW);
         // Pings that went unanswered: the contact is not reachable (or not there).
         let dead: Vec<PeerAddr> = self
             .dht
@@ -1152,6 +1253,25 @@ impl Node {
             if now >= t {
                 self.register_self();
             }
+        }
+        // WHY: The guardian set is refreshed on its own cadence, not only when
+        //      discovery runs, so a registration refresh reaches today's guardians.
+        //      A short set (a young swarm, or a lookup cut short) is refreshed sooner.
+        let short = self.dht.guardians.len() < self.params.dht_k;
+        let ttl = if short {
+            Duration::from_secs(5)
+        } else {
+            self.params.dht_guardian_cache
+        };
+        let stale = self
+            .dht
+            .guardians_at
+            .map(|t| now.duration_since(t) >= ttl)
+            .unwrap_or(false);
+        if stale && self.dht.guardians_lookup.is_none() && self.matrix.is_some() {
+            let ks = self.k_s();
+            self.dht.guardians_lookup =
+                self.start_lookup(ks, LookupKind::Node, Purpose::Guardians, 0);
         }
         // A viewer without a Stream Record (lost GET_PEERS answer, empty guardian)
         // re-queries; nothing else would, since join rounds need the matrix.

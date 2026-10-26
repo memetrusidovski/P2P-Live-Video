@@ -30,16 +30,16 @@ decodes to `Frame::Raw { frame_type, payload }` until its milestone.
 | 0x16 | PULL_REQUEST | QUIC stream | Typed | M1 |
 | 0x17 | MANIFEST_UPDATE | QUIC stream | Typed | M1 |
 | 0x18 | ROSTER | QUIC stream | Raw | M3 |
-| 0x19 | RANK_PROOF | QUIC stream | Raw | M3 |
+| 0x19 | RANK_PROOF | QUIC stream | Typed (pairs carry signer keys, ISSUE-065) | M3 |
 | 0x1A | STORE_RECORD | pre-session UDP | Typed | M3 |
 | 0x1B | STORE_RECORD_ACK | pre-session UDP | Typed (six per-tree counters) | M3 |
 | 0x1C | PUNCH_REQUEST | pre-session UDP | Raw | M4 |
 | 0x1D | MANIFEST_REQUEST | QUIC stream | Typed | M1 |
 | 0x1E | DRAIN_NOTICE | QUIC stream | Typed | M1 |
 | 0x1F | STREAM_DESCRIPTOR | QUIC stream | Typed (SOLUTION-060) | M2 |
-| 0x20 | PROOF_OF_UPLOAD | QUIC stream | Raw | M3 |
+| 0x20 | PROOF_OF_UPLOAD | QUIC stream | Typed | M3 |
 | 0x21 | CHOKE_STATE | QUIC stream | Typed | M1 |
-| 0x22 | REPUTATION_AUDIT_GOSSIP | QUIC stream | Raw | M3 |
+| 0x22 | REPUTATION_AUDIT_GOSSIP | QUIC stream | Typed (evidence = two receipt bodies) | M3 |
 | 0x30 | RELAY_PROPOSAL | QUIC stream | Raw | M4 |
 | 0x31 | RELAY_BIND | QUIC stream | Raw | M4 |
 

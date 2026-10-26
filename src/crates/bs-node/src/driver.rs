@@ -78,6 +78,8 @@ pub struct RunConfig {
     pub role: Role,
     /// Class.
     pub node_class: NodeClass,
+    /// NAT reachability if known; `None` lets the node decide it from PONGs.
+    pub reachability: Option<bs_wire::Reachability>,
     /// Bind address.
     pub listen: SocketAddr,
     /// External IP to advertise / bind PoW to (`None` = detect).
@@ -157,10 +159,66 @@ pub struct RunReport {
     pub repairs: u64,
     /// Sessions accepted/opened.
     pub sessions: u64,
+    /// Per-connection QUIC path statistics at exit (congestion, loss, MTU).
+    pub connections: Vec<ConnStats>,
+    /// QUIC datagrams the endpoint refused to queue (`send_datagram` errors).
+    pub datagram_send_errors: u64,
+    /// Incentive counters (Ch5): receipts issued / accepted / rejected by reason,
+    /// deadline misses by our children, children evicted for missed receipts,
+    /// choke-state changes toward peers, PULL_REQUESTs refused as choked.
+    pub incentives: IncentiveCounters,
+}
+
+/// One QUIC connection's path statistics (quinn `ConnectionStats`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnStats {
+    /// Remote address.
+    pub peer: String,
+    /// Smoothed RTT, ms.
+    pub rtt_ms: f64,
+    /// Congestion window, bytes.
+    pub cwnd: u64,
+    /// Congestion events.
+    pub congestion_events: u64,
+    /// Packets sent / lost.
+    pub sent_packets: u64,
+    /// Packets lost.
+    pub lost_packets: u64,
+    /// Current path MTU.
+    pub mtu: u16,
+    /// DATAGRAM frames sent / received.
+    pub datagrams_tx: u64,
+    /// DATAGRAM frames received.
+    pub datagrams_rx: u64,
+}
+
+/// Incentive-layer counters in the run report.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IncentiveCounters {
+    /// PROOF_OF_UPLOAD receipts we signed.
+    pub receipts_issued: u64,
+    /// Receipts accepted into our ledger.
+    pub receipts_accepted: u64,
+    /// Receipts rejected, by reason.
+    pub receipts_rejected: HashMap<String, u64>,
+    /// Receipt deadlines our children missed.
+    pub receipts_missed: u64,
+    /// Children evicted for three missed receipts.
+    pub deadline_evictions: u64,
+    /// Choke-state changes toward peers, by new state.
+    pub choke_changes: HashMap<String, u64>,
+    /// PULL_REQUESTs refused because the requester was choked.
+    pub pulls_choked: u64,
+    /// Receipts held as uploader at exit, and the rank they give.
+    pub receipts_held: usize,
+    /// Θ^rate / B at exit.
+    pub rank: f64,
 }
 
 #[derive(Debug)]
 enum Ev {
+    /// A paced datagram could not be queued.
+    DatagramSendError,
     Connected {
         peer: SocketAddr,
         node_id: NodeId,
@@ -247,6 +305,7 @@ pub async fn start(cfg: RunConfig) -> anyhow::Result<Handle> {
         stream_id,
         bootstrap: cfg.bootstrap.into_iter().collect(),
         discovery: bs_core::DiscoveryMode::Dht,
+        reachability: cfg.reachability,
         params: cfg.params.clone(),
         seed: cfg.seed,
     });
@@ -357,6 +416,8 @@ struct Driver {
     parent_lost: u64,
     repairs: u64,
     sessions: u64,
+    incentives: IncentiveCounters,
+    datagram_send_errors: u64,
     ended: bool,
     checkpoints: std::collections::VecDeque<bs_player_api::Checkpoint>,
     descriptor_version: u32,
@@ -459,6 +520,8 @@ impl Driver {
             steady_starved: 0,
             first_chunk: None,
             parent_lost: 0,
+            incentives: IncentiveCounters::default(),
+            datagram_send_errors: 0,
             repairs: 0,
             sessions: 0,
             ended: false,
@@ -874,6 +937,7 @@ impl Driver {
 
     fn on_ev(&mut self, ev: Ev) {
         match ev {
+            Ev::DatagramSendError => self.datagram_send_errors += 1,
             Ev::Connected {
                 peer,
                 node_id,
@@ -1020,11 +1084,16 @@ impl Driver {
                             Err(_) => return,
                         };
                         if delay == 0 {
-                            let _ = conn.send_datagram(bytes);
+                            if conn.send_datagram(bytes).is_err() {
+                                self.datagram_send_errors += 1;
+                            }
                         } else {
+                            let tx = self.ev_tx.clone();
                             tokio::spawn(async move {
                                 tokio::time::sleep(std::time::Duration::from_micros(delay)).await;
-                                let _ = conn.send_datagram(bytes);
+                                if conn.send_datagram(bytes).is_err() {
+                                    let _ = tx.send(Ev::DatagramSendError);
+                                }
                             });
                         }
                     }
@@ -1263,6 +1332,32 @@ impl Driver {
                 ..
             } => info!("tree {tree}: child admitted ({children}/{k_v})"),
             Event::LayerShed { top_layer } => warn!("shed to layer {top_layer}"),
+            Event::ReceiptIssued { .. } => self.incentives.receipts_issued += 1,
+            Event::ReceiptAccepted { .. } => self.incentives.receipts_accepted += 1,
+            Event::ReceiptRejected { reason } => {
+                *self
+                    .incentives
+                    .receipts_rejected
+                    .entry(reason.to_string())
+                    .or_default() += 1;
+            }
+            Event::ReceiptMissed {
+                tree, consecutive, ..
+            } => {
+                self.incentives.receipts_missed += 1;
+                warn!("tree {tree}: child missed a receipt deadline ({consecutive} in a row)");
+            }
+            Event::ChokeChanged { state, .. } => {
+                *self
+                    .incentives
+                    .choke_changes
+                    .entry(state.to_string())
+                    .or_default() += 1;
+            }
+            Event::PullChoked => self.incentives.pulls_choked += 1,
+            Event::ChildRemoved { tree, reason, .. } => {
+                info!("tree {tree}: child removed ({reason})");
+            }
             Event::BlockRejected {
                 tree,
                 segment,
@@ -1336,6 +1431,32 @@ impl Driver {
             parent_lost: self.parent_lost,
             repairs: self.repairs,
             sessions: self.sessions,
+            connections: self
+                .conns
+                .iter()
+                .map(|(peer, c)| {
+                    let st = c.conn.stats();
+                    ConnStats {
+                        peer: peer.to_string(),
+                        rtt_ms: st.path.rtt.as_secs_f64() * 1000.0,
+                        cwnd: st.path.cwnd,
+                        congestion_events: st.path.congestion_events,
+                        sent_packets: st.path.sent_packets,
+                        lost_packets: st.path.lost_packets,
+                        mtu: st.path.current_mtu,
+                        datagrams_tx: st.frame_tx.datagram,
+                        datagrams_rx: st.frame_rx.datagram,
+                    }
+                })
+                .collect(),
+            datagram_send_errors: self.datagram_send_errors,
+            incentives: {
+                let mut i = self.incentives.clone();
+                i.deadline_evictions = self.node.deadline_evictions();
+                i.receipts_held = self.node.receipt_count();
+                i.rank = self.node.rank();
+                i
+            },
         }
     }
 }

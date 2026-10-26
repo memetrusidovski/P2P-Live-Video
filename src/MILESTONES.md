@@ -71,10 +71,11 @@ the browser check still to run.
 | PULL zone: BUFFER_STATE_BITFIELD, deadline-aware rarest-first scheduler, PULL_REQUEST / BLOCK_TRANSMISSION / repair symbols, paced PULL budget served in urgency order, late-join backfill | bs-core | `[x]` |
 | HyParView membership (Active/Passive sets, JOIN/FORWARD_JOIN/SHUFFLE/GOSSIP_EXCHANGE, session HMAC, JOINING state) | bs-core | `[x]` |
 | S/Kademlia DHT: routing table, disjoint lookups, guardians, STORE_RECORD, sampled registration | bs-core | `[x]` |
-| Incentives: PROOF_OF_UPLOAD receipts, Tit-for-Tat unchoker over PULL, RANK_PROOF, rank admission | bs-core | `[ ]` |
-| Reputation auditing, evidence-carrying eviction | bs-core | `[ ]` |
-| Forest resize and fold (MANIFEST_UPDATE), leaf share, adaptive parity from receipts | bs-core | `[ ]` |
-| Ch8 adversarial scenarios as gates; fleet churn run matches the simulator | scenarios/, fleet/ | `[ ]` |
+| Incentives: PROOF_OF_UPLOAD receipts, receipt deadline, adaptive parity, Tit-for-Tat unchoker over PULL | bs-core | `[x]` |
+| RANK_PROOF and rank admission with preemption | bs-core | `[x]` |
+| Reputation auditing, evidence-carrying eviction | bs-core | `[x]` |
+| Forest resize and fold (MANIFEST_UPDATE), leaf share, adaptive parity from receipts | bs-core | `[x]` |
+| Ch8 adversarial scenarios as gates; fleet churn run matches the simulator | scenarios/, fleet/ | `[x]` |
 
 
 S/Kademlia DHT and registration · HyParView membership and gossip · PULL zone,
@@ -83,14 +84,104 @@ rank · reputation auditing · forest resize and fold · leaf share and drain pa
 full. Exit gate: adversarial scenarios from Ch8 §8.3 pass in simulation; 100-node
 docker fleet with churn matches simulator KPIs within tolerance.
 
-## M4 — Edge cases and clients `[ ]`
+## M4 — Edge cases and clients `[~]`
 
-NAT traversal (PONG reflection, PUNCH_REQUEST, ICE-lite) · emergent relays ·
-connection migration · Tauri desktop · browser peer over WebTransport (LEAF_PRIVATE)
-· XDP shield (Linux only). Exit gate: NAT matrix scenario from Ch8 §8.3 C passes on
-the fleet with simulated NAT types.
+| Item | Crate | Status |
+|---|---|---|
+| Reachability from PONG reflections, PUNCH_REQUEST through referrers, CONE keep-alive, NAT model in the simulator | bs-core, bs-sim | `[x]` |
+| Emergent relays: RELAY_CAPABLE, RELAY_PROPOSAL / RELAY_BIND, bridge budget, RELAYED receipts; Ch8 §8.3 scenario C gate | bs-core, scenarios/ | `[x]` |
+| Connection migration: QUIC-native in bsnode (documented, not simulated) | bs-node | `[x]` |
+| Source behind NAT (SOURCE_INGRESS relays); gate `source_behind_nat` | bs-core | `[x]` |
+| Tauri desktop client; browser peer over WebTransport (LEAF_PRIVATE); XDP shield | clients/ | `[ ]` |
+
+Exit gate: NAT matrix scenario from Ch8 §8.3 C passes in simulation (`nat_symmetric`);
+on the fleet it needs simulated NAT types, which docker bridge networking does not give.
 
 ## Log
+
+- 2026-10-23 — Docker fleet with churn (Ch8 scenario A on real nodes): 1 publisher and
+  20 viewers on the lossy profile, 25 MB of the sample, 6 viewers killed at 30 s.
+  Two runs. Survivors: PSR 1.3 % and 1.5 % (bound 2 %), join latency under a second,
+  no viewer without playback, the worst survivor starved 5.3 % of its chunks. The one
+  viewer that played every chunk with every layer hashed equal to the source. Viewers
+  that shed a layer under the churn write shorter outputs and are scored by PSR, not by
+  the hash. One viewer in the first run wrote 178 KB less with every chunk reported
+  full; the second run did not reproduce it, and the output files are not kept.
+  Fleet tooling fixed on the way: the docker build context carried `target/`
+  (`.dockerignore`), `churn.sh` used bash 4 syntax and killed exited containers, and
+  the report ran before the publisher wrote its result.
+- 2026-10-22 (evening) — Source behind a NAT. A publisher that cannot be reached binds
+  public RELAY_CAPABLE peers as ingress relays, no more than its weakest tree holds slots.
+  It pushes every slice to them and they relay as the root. New gate `source_behind_nat`: a
+  symmetric-NAT publisher on 30 Mbps, two ingress relays bound within three seconds of its
+  start, 30 viewers at PSR 0.000. Fixed on the way: a discovery with nobody to ask ended
+  in the call that started it and the DHT seed looped until its stack overflowed.
+- 2026-10-22 (later) — NAT traversal and emergent relays. Reachability is decided from
+  two PONG reflections. PUNCH_REQUEST goes through the referrer that named a cone
+  candidate. A cone registrant keeps its guardians' mappings alive. Peers whose parents
+  never answer ask a public relay for a RELAY_PROPOSAL / RELAY_BIND bridge. The simulator
+  models cone and symmetric mappings. Two new gates. `nat_cone`: half the relays behind
+  cone NATs, every viewer plays. `nat_symmetric`, Ch8 scenario C: 48 of 68 viewers behind
+  symmetric NATs with cone relays and eight public relays; 24 bridges bound, symmetric
+  starvation 1 %. Fleet gate: `fleet/churn.sh` and `BS_FLEET=1 scripts/check.sh`. Found on
+  the way: a relay at its slot cap runs its uplink at 100 % and starves the children queued
+  last (ISSUE-072, 5 % headroom). A node also re-probed its new repair parent on every
+  timer pass and re-joined it in a loop.
+- 2026-10-22 — Forest resize and layer fold. The source walks the spec ladder on the
+  guardians' relay count. It announces each layout five segments ahead. Relays that move
+  drain their old children, new trees are pre-emitted, every peer switches at the effective
+  segment. Folds are driven by the guardians' starved re-query counts. Two new gates.
+  `forest_resize`: 2 → 4 → 6 trees, a fold after half the relays die, then 6 → 4, at
+  PSR 0.000. `layer_fold`: relays that cannot serve a 1.5 Mbps stripe starve the base layer
+  until the source folds the top layer; one fold, every viewer active. Spec gaps filed: a starved
+  peer's manifest window never re-opens (ISSUE-070) and the fold and unfold timing across
+  the fill-in and the count ramp (ISSUE-071). Fixed on the way: the first registration
+  reached only the contacts known at join, so the publisher's relay count lagged a join
+  burst by 60 to 90 s.
+- 2026-10-20 (later) — Reputation auditing. Symmetric-pair and equivocation detection on the
+  receipts sampled from every verified RANK_PROOF. Signed accusations carry the evidence and
+  the accuser's own proof over the Active Set. Receivers check standing and prefix, resolve
+  unknown accusers through the DHT, and ban locally with a duration that doubles per strike.
+  Upward migration every 5 s. New gate `collusion`: three pairs of colluders sign receipts for
+  each other every segment and re-join every 10 s to spend the rank. Honest auditors evict every
+  pair on four seeds (82 to 140 accusations, 216 to 328 local evictions) and no honest node.
+  Two spec gaps filed. The evidence rule as written flags honest parent-child swaps (ISSUE-068,
+  104 honest evictions in one run). The proof's window and nonce are undefined for verifiers
+  that are not the prover's parent (ISSUE-069). Fixed on the way: a rejoin to the current parent
+  closed the session it was about to reuse (14 repairs per minute in the baseline gate), and
+  DHT answers after the 400 ms timeout were discarded, so joiners behind a saturated publisher
+  re-asked it for 15 to 20 s.
+- 2026-10-20 — RANK_PROOF built and verified, rank preemption in enhancement trees. New gate
+  `rank_preemption`: ten relays without uplink fill the publisher's top-layer slots, forty
+  contributors earn receipts on the base layers and preempt them (10 preemptions, 110 proofs
+  verified, 90 % of contributors at full quality). Spec gap filed: the proof follows the
+  NEIGHBOR it should inform (ISSUE-067). Fixed on the way: a one-receipt list must still
+  form a pair with the zero leaf, or the leaf is its own root and the proof fails.
+
+- 2026-09-22 — First fleet run since the DHT and incentive work (20 viewers, lossy profile)
+  starved every viewer. Two defects, both invisible to the simulator gates until now: the
+  data-stall clock was not reset on re-attach, so every new parent was dropped at once
+  (1,417 "data stall" losses in 60 s); and a RaptorQ decode failing with exactly K symbols
+  (≈ 1 %, RFC 6330) was treated as a poisoned block, so under any loss honest parents were
+  flagged after three such failures and the publisher became unreachable. The simulator's
+  lossy gate had 39 such rejections and 3 wrongly poisoned parents while still passing its
+  KPIs; it now shows zero of either. `bsnode` reports incentive counters in `result.json`.
+  With both fixed the fleet still starved: QUIC's default Cubic controller treated netem's
+  2 % random loss as congestion and capped each connection near 2 Mbps. Switching quinn to
+  BBR took the 8-viewer lossy run from 99 % to 1.9 % starvation with zero parent losses;
+  the run report now carries per-connection path statistics.
+
+- 2026-09-16 (later) — Incentive layer: PROOF_OF_UPLOAD receipts issued per segment per tree
+  (and per PULL provider), verified into a 60-segment ledger with capped bytes, the receipt
+  deadline (choke, then evict after three misses, with a NodeID+/24 cooldown), adaptive
+  per-link parity feeding Ω and `K_v`, and the Tit-for-Tat unchoker with FIFO optimistic
+  slots. New adversarial gate `free_riders` (15 of 75 relays sign nothing and serve no pulls):
+  riders are evicted 350+ times and starve 11 %, honest viewers 0.6 %. Found on the way: TFT
+  cooldowns deny repair to children who cannot reciprocate (ISSUE-066; a child's repair of
+  the tree it is pushed is served), PULL-path proofs corrupted depth propagation and disabled
+  the cycle guard, evicted riders held honest subtrees hostage (data-stall and stalled-drain
+  rules), and the simulator's single /24 made prefix cooldowns ban the whole swarm.
+  Verdict facts now include per-label PSR and scenario-declared `facts_min`/`facts_max` gates.
 
 - 2026-09-16 — S/Kademlia DHT replaces the oracle (simulator) and the bootstrap guardian
   (`bsnode`): FIND_NODE/FIND_VALUE/STORE_RECORD/STORE_RECORD_ACK typed frames (32 golden

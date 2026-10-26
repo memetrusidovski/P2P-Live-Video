@@ -1,0 +1,69 @@
+# Ch1 §1.2.1 §1.4 and §1.2.4 §4.5. The relay population grows in two bursts and then
+# halves, so the source walks the ladder up (2 → 4 → 6 trees) and back down (6 → 4)
+# with MANIFEST_UPDATEs. Moving relays drain their old tree, new trees are pre-emitted
+# during the window, and playback must not starve across any switch.
+seed = 7
+duration_s = 320.0
+forest_size = 2
+
+[params]
+dynamic_forest = true
+
+[publisher]
+upload_kbps = 40000
+
+[[viewers]]
+label = "early"
+count = 8
+class = "relay"
+upload_kbps = { min = 12000.0, max = 20000.0 }
+top_layer = 2
+join_s = { min = 1.0, max = 8.0 }
+
+[[events]]
+kind = "join_burst"
+at_s = 40.0
+[events.group]
+label = "second"
+count = 12
+class = "relay"
+upload_kbps = { min = 12000.0, max = 20000.0 }
+top_layer = 2
+join_s = { min = 0.0, max = 6.0 }
+
+[[events]]
+kind = "join_burst"
+at_s = 110.0
+[events.group]
+label = "third"
+count = 14
+class = "relay"
+upload_kbps = { min = 12000.0, max = 20000.0 }
+top_layer = 2
+join_s = { min = 0.0, max = 6.0 }
+
+[[events]]
+kind = "kill_fraction"
+at_s = 180.0
+fraction = 0.5
+class = "relay"
+
+[network]
+regions = 2
+
+[kpis]
+psr_max = 0.03
+sjl_mean_max_s = 4.5
+sjl_p95_max_s = 8.0
+active_fraction_min = 0.9
+repair_median_max_s = 3.0
+repair_p95_max_s = 6.0
+
+# Five matrix changes on the way up and down; the end state is 3 or 4 trees because
+# the killed relays' registrations expire over 135 s.
+[kpis.facts_min]
+forest_version = 4
+forest_m = 3
+
+[kpis.facts_max]
+forest_m = 4

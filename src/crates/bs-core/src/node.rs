@@ -12,7 +12,7 @@ use bs_wire::frames::*;
 use bs_wire::Encode;
 use bs_wire::{
     DisconnectReason, Frame, FrameType, NodeClass, NodeId, PeerFlags, PeerRecord, PublicKeyBytes,
-    SegmentSeq, StreamId, TreeId, TreeSet, ValidationBlock, WireAddr,
+    Reachability, SegmentSeq, StreamId, TreeId, TreeSet, ValidationBlock, WireAddr,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -26,14 +26,22 @@ use crate::swarm::{ManifestVerdict, SwarmBuffer, VerifiedBlock};
 use crate::time::{Duration, Instant};
 use crate::Lifecycle;
 
+mod audit;
 mod dht;
+mod incentive;
 mod membership;
+mod nat;
 mod pull;
+mod rank;
+mod resize;
 
+use audit::AuditState;
 use dht::DhtState;
 pub use dht::DiscoveryMode;
+use incentive::IncentiveState;
 pub use membership::MembershipState;
 pub use pull::PullState;
+use rank::RankState;
 
 /// What this node is.
 #[derive(Debug, Clone)]
@@ -73,6 +81,8 @@ pub struct NodeConfig {
     pub bootstrap: Vec<PeerAddr>,
     /// How peers are discovered.
     pub discovery: DiscoveryMode,
+    /// NAT reachability if known; `None` is decided from two PONG reflections.
+    pub reachability: Option<Reachability>,
 }
 
 #[derive(Debug)]
@@ -111,6 +121,8 @@ pub struct Node {
     out: VecDeque<Output>,
     dyn_nonce: u64,
     next_liveness: Instant,
+    /// Next greedy upward-migration evaluation (Ch1 §1.2.3).
+    next_migrate: Instant,
     started_at: Option<Instant>,
     first_ok_chunk: bool,
     manifests_forwarded: HashSet<(u32, u8, PeerAddr)>,
@@ -120,6 +132,16 @@ pub struct Node {
     descriptor: Option<StreamDescriptor>,
     /// Children already sent the current descriptor version.
     descriptor_sent: HashSet<(u32, PeerAddr)>,
+    /// A `MANIFEST_UPDATE` accepted and not yet in force (Ch1 §1.2.4 §4.5).
+    pending_update: Option<resize::PendingUpdate>,
+    /// The source's forest control (resize ladder, folds).
+    forest: resize::ForestControl,
+    /// Last starvation re-query per tree (GET_PEERS with the starved bit).
+    starved_query_at: Vec<Option<Instant>>,
+    /// Our reachability, configured or decided from reflections (Ch6 §6.1).
+    reach: Reachability,
+    /// NAT traversal and bridge state (Ch6).
+    nat: nat::NatState,
     /// PULL zone state (Ch4 §4.3).
     pull: PullState,
     /// HyParView membership (Ch3 §3.1–3.2).
@@ -132,6 +154,12 @@ pub struct Node {
     dht: DhtState,
     /// Registration sampling exponent last seen in a verified Stream Record.
     known_sample_log2: u8,
+    /// Incentives (Ch5): receipts, deadlines, parity, Tit-for-Tat.
+    incentive: IncentiveState,
+    /// Ranks proved to us (Ch5 §5.2.2).
+    rank: RankState,
+    /// Reputation auditing (Ch5 §5.3).
+    audit: AuditState,
     now: Instant,
 }
 
@@ -187,17 +215,28 @@ impl Node {
             out: VecDeque::new(),
             dyn_nonce: 0,
             next_liveness: Instant::ZERO,
+            next_migrate: Instant::ZERO,
             started_at: None,
             first_ok_chunk: false,
             manifests_forwarded: HashSet::new(),
             ending: false,
             descriptor: None,
             descriptor_sent: HashSet::new(),
+            pending_update: None,
+            forest: resize::ForestControl::default(),
+            starved_query_at: Vec::new(),
+            // RULE: Unknown reachability is treated as CONE until two reflections
+            //       decide it: punches are then asked for, never relied on.
+            reach: cfg.reachability.unwrap_or(Reachability::Cone),
+            nat: nat::NatState::default(),
             pull: PullState::default(),
             membership: MembershipState::default(),
             first_push_chunk: BTreeMap::new(),
             dht,
             known_sample_log2: 0,
+            incentive: IncentiveState::default(),
+            rank: RankState::default(),
+            audit: AuditState::default(),
             now: Instant::ZERO,
             cfg,
         }
@@ -241,6 +280,15 @@ impl Node {
         &self.swarm
     }
     /// Highest subscribed layer.
+    /// The top layer the viewer was configured to want, before any shed.
+    pub fn configured_top_layer(&self) -> u8 {
+        match self.cfg.role {
+            Role::Viewer { top_layer } => top_layer,
+            Role::Publisher { ref ladder, .. } => ladder.len().saturating_sub(1) as u8,
+        }
+    }
+
+    /// The top layer currently wanted (falls when a layer is shed).
     pub fn top_layer(&self) -> u8 {
         self.top_layer
     }
@@ -272,7 +320,7 @@ impl Node {
     }
     /// Node class.
     pub fn node_class(&self) -> NodeClass {
-        self.cfg.node_class
+        self.effective_class()
     }
     /// Our Peer Record as we would register it.
     pub fn peer_record(&self) -> PeerRecord {
@@ -284,12 +332,9 @@ impl Node {
         }
         PeerRecord {
             node_id: self.node_id(),
-            node_class: self.cfg.node_class,
+            node_class: self.effective_class(),
             assigned_trees: assigned,
-            flags: PeerFlags {
-                source: self.is_source(),
-                ..PeerFlags::PUBLIC
-            },
+            flags: self.peer_flags(),
             addr: WireAddr(self.cfg.addr),
         }
     }
@@ -315,6 +360,8 @@ impl Node {
         m(self.pull_next_timer());
         m(self.membership_next_timer());
         m(self.dht_next_timer());
+        m(self.incentive_next_timer());
+        m(Some(self.next_migrate));
         for tree in &self.trees {
             match &tree.join {
                 JoinState::Probing { deadline, .. } => m(Some(*deadline)),
@@ -386,6 +433,7 @@ impl Node {
         self.membership.next_shuffle = self.now + self.params.tau_gossip * 3;
         self.pull.next_sched = self.now + self.params.tau_sched;
         self.pull.budget_at = self.now;
+        self.incentive_start();
         let d = Difficulty {
             c1: self.params.c1,
             c2_min: self.params.c2_min,
@@ -402,6 +450,8 @@ impl Node {
                 self.publisher_key = Some(self.identity.public_key());
                 self.matrix = Some(p.matrix.clone());
                 self.publisher = Some(p);
+                // The initial matrix is the first change: the dwell runs from here.
+                self.forest.last_change = Some(self.now);
                 self.setup_trees();
                 for t in &mut self.trees {
                     t.assigned = true;
@@ -445,18 +495,58 @@ impl Node {
         let Some(matrix) = self.matrix.clone() else {
             return;
         };
+        let pending = self.pending_update.as_ref().map(|p| p.matrix.clone());
         let assigned_count = self.trees.iter().filter(|t| t.assigned).count() as u32;
-        let parity = self.params.default_parity as f64;
-        for t in &mut self.trees {
+        // Ē_v: the mean parity actually sent to children (Ch1 §1.2.1; Ch4 §4.2.2 rule 5).
+        let parity = self.mean_child_parity();
+        let bridge_load = self.bridge_load_kbps();
+        let upload = self.cfg.upload_kbps.saturating_sub(bridge_load);
+        let bridge_counts: Vec<u16> = self.trees.iter().map(|t| self.bridge_count(t.id)).collect();
+        for (i, t) in self.trees.iter_mut().enumerate() {
             if !t.assigned {
-                t.k_v = 0;
+                t.k_v = bridge_counts[i];
                 continue;
             }
-            let b = matrix.tree(t.id).map(|i| i.bitrate_kbps).unwrap_or(0);
-            t.k_v = self
-                .params
-                .slots(self.cfg.upload_kbps, assigned_count, b, parity);
+            let b = matrix
+                .tree(t.id)
+                .map(|i| i.bitrate_kbps)
+                .or_else(|| {
+                    pending
+                        .as_ref()
+                        .and_then(|p| p.tree(t.id))
+                        .map(|i| i.bitrate_kbps)
+                })
+                .unwrap_or(0);
+            // Bridge slots are paid from the bridge budget, on top of the tree's own.
+            t.k_v = self.params.slots(upload, assigned_count, b, parity) + bridge_counts[i];
         }
+        // A K_v(m) that fell (parity rose, or the mean moved with the child set) is
+        // honoured by draining, never by dropping (Ch1 §1.2.1 §1.3).
+        let ids: Vec<TreeId> = self
+            .trees
+            .iter()
+            .filter(|t| t.assigned)
+            .map(|t| t.id)
+            .collect();
+        for id in ids {
+            self.shed_capacity(id);
+        }
+    }
+
+    /// Re-query the guardians with the starved bit for `tree`, at most every 5 s.
+    fn starved_requery(&mut self, tree: TreeId) {
+        let idx = tree.index();
+        while self.starved_query_at.len() <= idx {
+            self.starved_query_at.push(None);
+        }
+        let recent = self.starved_query_at[idx]
+            .map(|t| self.now.duration_since(t) < Duration::from_secs(5))
+            .unwrap_or(false);
+        if recent || self.discovery_inflight {
+            return;
+        }
+        self.starved_query_at[idx] = Some(self.now);
+        self.request_discovery(TreeSet::single(tree));
     }
 
     fn request_discovery(&mut self, wanted: TreeSet) {
@@ -486,9 +576,10 @@ impl Node {
         stream_record: Option<bs_wire::StreamRecord>,
     ) {
         self.discovery_inflight = false;
-        for r in records {
-            self.passive_insert(r);
+        for r in &records {
+            self.passive_insert(*r);
         }
+        self.on_relay_records(&records);
         if let Some(sr) = stream_record {
             if self.publisher.is_none() {
                 let ok = bs_crypto::Verifier::verify(
@@ -513,15 +604,16 @@ impl Node {
                         &sr.trees,
                         layer_count,
                     );
-                    // The manifest's SlicingMatrixVersion is the publisher's matrix version,
-                    // which is 1 for the initial matrix in M1.
-                    let m = SlicingMatrix { version: 1, ..m };
+                    // RULE: The record does not name the matrix version. Version 0 means
+                    //       unknown; the first accepted manifest supplies it.
+                    let m = SlicingMatrix { version: 0, ..m };
                     if self.matrix.is_none() {
                         self.matrix = Some(m);
                         self.setup_trees();
                         self.configure_tree_roles();
                         self.recompute_slots();
                         self.register_self();
+                        self.pending_from_record(&sr);
                     }
                 }
             }
@@ -557,7 +649,9 @@ impl Node {
         let m = matrix.m();
         let subscribed =
             matrix.trees_for_layer_prefix(self.top_layer.min(matrix.layer_count.saturating_sub(1)));
-        let assigned = if self.cfg.node_class == NodeClass::Relay && !self.is_source() {
+        let assigned = if self.is_ingress() {
+            TreeSet::first_n(m)
+        } else if self.effective_class() == NodeClass::Relay && !self.is_source() {
             TreeSet::single(rendezvous::assigned_tree(&self.node_id(), m))
         } else {
             TreeSet::EMPTY
@@ -589,13 +683,20 @@ impl Node {
             .filter(|r| r.flags.reachability != bs_wire::Reachability::Symmetric)
             .filter(|r| r.node_id != self.node_id())
             .filter(|r| !self.bad_peers.contains(&r.node_id))
+            .filter(|r| !self.audit_banned(&r.node_id))
             .filter(|r| !my_parents.contains(&r.node_id) || r.flags.source)
             .filter(|r| !my_children.contains(&r.node_id))
+            .filter(|r| self.trees[tree.index()].avoid_parent != Some(r.node_id))
             .copied()
             .collect();
         if v.is_empty() {
             if let Some(s) = self.source_record {
-                if !my_parents.contains(&s.node_id) || self.trees[tree.index()].parent.is_none() {
+                // A source behind a NAT is reached through its ingress relays only.
+                let reachable = s.flags.reachability != bs_wire::Reachability::Symmetric;
+                if reachable
+                    && (!my_parents.contains(&s.node_id)
+                        || self.trees[tree.index()].parent.is_none())
+                {
                     v.push(s);
                 }
             }
@@ -620,25 +721,9 @@ impl Node {
         }
         let deadline = self.now + self.params.probe_timeout;
         let mut candidates = Vec::with_capacity(cands.len());
-        let sid = self.stream_id();
         for r in cands {
-            let body = {
-                let mut b = Vec::with_capacity(33);
-                b.extend_from_slice(sid.as_bytes());
-                b.push(tree.0);
-                b
-            };
-            let vb = self.validation_block(FrameType::PROBE, &body);
-            self.send(
-                r.addr.0,
-                Channel::Udp,
-                Frame::Probe(Probe {
-                    validation: vb,
-                    stream_id: sid,
-                    tree_id: tree,
-                }),
-                None,
-            );
+            self.punch_if_needed(&r);
+            self.send_probe(tree, r.addr.0);
             candidates.push(Candidate {
                 record: r,
                 probed_at: self.now,
@@ -651,6 +736,24 @@ impl Node {
             candidates,
             deadline,
         };
+    }
+
+    fn send_probe(&mut self, tree: TreeId, to: PeerAddr) {
+        let sid = self.stream_id();
+        let mut body = Vec::with_capacity(33);
+        body.extend_from_slice(sid.as_bytes());
+        body.push(tree.0);
+        let vb = self.validation_block(FrameType::PROBE, &body);
+        self.send(
+            to,
+            Channel::Udp,
+            Frame::Probe(Probe {
+                validation: vb,
+                stream_id: sid,
+                tree_id: tree,
+            }),
+            None,
+        );
     }
 
     fn on_probe_response(&mut self, from: PeerAddr, pr: ProbeResponse) {
@@ -711,11 +814,25 @@ impl Node {
         };
         let d_max = self.params.d_max;
         let we_relay_this_tree = self.trees[tree.index()].assigned;
+        let has_children = !self.trees[tree.index()].children.is_empty();
+        let has_parent = self.trees[tree.index()].parent.is_some();
+        let migrating = self.trees[tree.index()].migrating;
+        let own_depth = {
+            let t = &self.trees[tree.index()];
+            if t.depth != u8::MAX {
+                t.depth
+            } else {
+                t.last_depth
+            }
+        };
         let mut scored: Vec<(PeerRecord, f64, u8, f64)> = Vec::new();
         let mut saturated: Vec<(PeerRecord, f64, u8, f64)> = Vec::new();
         let mut saw_warming = false;
         let mut saturated_seen = 0usize;
         let n = candidates.len();
+        let answered = candidates.iter().filter(|c| c.response.is_some()).count();
+        self.join_stats[tree.index()].last_probed = n;
+        self.join_stats[tree.index()].last_answered = answered;
         for c in candidates {
             let Some(r) = c.response else { continue };
             match r.tree_state {
@@ -724,6 +841,22 @@ impl Node {
                 bs_wire::TreeState::Serving => {
                     if r.hop >= d_max {
                         saturated_seen += 1;
+                        continue;
+                    }
+                    // Cycle guard: while we still hold children in this tree, a candidate
+                    // deeper than our own depth may be our descendant. An equal-depth
+                    // candidate (a sibling) is safe only when we have no parent at all: two
+                    // attached relays re-selecting at the same depth can each pick a node
+                    // in the other's subtree and close a cycle.
+                    if has_children
+                        && own_depth != u8::MAX
+                        && (r.hop > own_depth || (r.hop == own_depth && has_parent))
+                    {
+                        continue;
+                    }
+                    // RULE: A migration only moves up. A candidate that does not place us
+                    //       strictly shallower is not worth a handover (Ch1 §1.2.3).
+                    if migrating && r.hop.saturating_add(1) >= own_depth {
                         continue;
                     }
                     if r.k_avail == 0 {
@@ -745,6 +878,12 @@ impl Node {
         self.join_stats[tree.index()].saw_warming = saw_warming;
         if scored.is_empty() {
             let _ = n;
+            if migrating {
+                // Nothing shallower was willing: stay put, no shed accounting.
+                self.trees[tree.index()].migrating = false;
+                self.trees[tree.index()].join = JoinState::Idle;
+                return;
+            }
             self.join_round_failed(tree, saturated_seen);
             return;
         }
@@ -783,6 +922,9 @@ impl Node {
     }
 
     fn send_neighbor(&mut self, tree: TreeId, addr: PeerAddr) {
+        // WHY: The proof goes first so the parent decides admission in one step. The
+        //      spec sends the proof after the NEIGHBOR (ISSUE-067).
+        self.send_rank_proof_for(tree, addr);
         let repairing = self.trees[tree.index()].repairing;
         let f = Neighbor {
             sender: self.node_id(),
@@ -792,7 +934,7 @@ impl Node {
                 Priority::Low
             },
             tree_id: tree,
-            node_class: self.cfg.node_class,
+            node_class: self.effective_class(),
             assigned_trees: self.peer_record().assigned_trees,
         };
         self.send(addr, Channel::Control, Frame::Neighbor(f), None);
@@ -803,6 +945,12 @@ impl Node {
     /// (App D §D.4.3b), and does not advance the shed counter.
     fn join_round_failed(&mut self, tree: TreeId, saturated: usize) {
         let idx = tree.index();
+        if self.trees[idx].migrating {
+            // A refused migration is not a capacity signal for our current slot.
+            self.trees[idx].migrating = false;
+            self.trees[idx].join = JoinState::Idle;
+            return;
+        }
         let candidates = saturated;
         // A WARMING candidate exempts the round (Ch1 §1.2.2 table) because capacity
         // is imminent, but only for a bounded run of rounds: under sustained churn at
@@ -816,8 +964,27 @@ impl Node {
         } else {
             self.join_stats[idx].warming_rounds = 0;
         }
-        if !exempt && (saturated > 0 || saw_warming) {
+        if !exempt && (saturated > 0 || saw_warming) && !self.in_resize_grace(tree) {
             self.join_stats[idx].failed_rounds += 1;
+        }
+        let js = &mut self.join_stats[idx];
+        if js.last_probed > 0 && js.last_answered == 0 {
+            js.silent_rounds += 1;
+        } else if js.last_answered > 0 {
+            js.silent_rounds = 0;
+        }
+        // RULE: A bridge is for a NAT-blocked peer whose probed parents never answer
+        //       (Ch6 §6.3.1). Full or unknown parents are not a reason.
+        if self.reach != Reachability::Public
+            && self.join_stats[idx].silent_rounds >= self.params.bridge_after_failed_rounds
+        {
+            self.request_bridge(tree);
+        }
+        // WHY: The re-query marks the tree starved at the guardians. The source reads
+        //      that count as the fold trigger (Ch1 §1.1.5 §5.6).
+        // A WARMING candidate is capacity about to open, not starvation.
+        if saturated > 0 && !saw_warming {
+            self.starved_requery(tree);
         }
         let failed = self.join_stats[idx].failed_rounds;
         self.emit(Event::JoinRoundFailed {
@@ -951,6 +1118,27 @@ impl Node {
         if current != from {
             return;
         }
+        // RULE: While we hold children here, a parent deeper than we were can be our
+        //       own descendant (Ch1 §1.2.2 cycle guard). The probe filter applies the
+        //       rule to candidates; a bridge relay was never probed, so ACCEPTED is
+        //       checked too.
+        let was_depth = self.trees[idx].last_depth;
+        let descendant_risk = !self.trees[idx].children.is_empty()
+            && was_depth != u8::MAX
+            && a.hop_depth > was_depth
+            && !self.is_ingress();
+        // RULE: Never attach under our own child in this tree. Two unparented relays
+        //       that pick each other in the same round would otherwise close a cycle.
+        if self.trees[idx].children.contains_key(&from) || descendant_risk {
+            self.trees[idx].join = JoinState::Idle;
+            let f = Disconnect {
+                sender: self.node_id(),
+                reason: DisconnectReason::Choke,
+                tree_id: a.tree_id,
+            };
+            self.send(from, Channel::Control, Frame::Disconnect(f), None);
+            return;
+        }
         let repair = self.trees[idx].repairing;
         let srtt = Duration::from_secs_f64((current_rtt_ms.max(1.0)) / 1000.0);
         let old_parent = self.trees[idx].parent.take();
@@ -969,7 +1157,10 @@ impl Node {
             attached_as_repair: repair,
         });
         self.trees[idx].depth = a.hop_depth.saturating_add(1);
+        // A new parent starts with a clean data-stall clock.
+        self.trees[idx].last_block_at = None;
         self.trees[idx].join = JoinState::Idle;
+        self.trees[idx].migrating = false;
         self.join_stats[idx].failed_rounds = 0;
         self.join_stats[idx].warming_rounds = 0;
         // A warm repair (drain) leaves an old parent: keep taking its blocks until
@@ -979,6 +1170,9 @@ impl Node {
                 self.trees[idx].old_parent = Some(op);
             }
         }
+        self.trees[idx].avoid_parent = None;
+        let attached_tree = self.trees[idx].id;
+        self.nat_attached(attached_tree);
         self.emit(Event::ParentAttached {
             tree: a.tree_id.0,
             parent: current_id,
@@ -1117,58 +1311,145 @@ impl Node {
             reason,
             tree_id: n.tree_id,
         };
-        let verdict: Result<u8, DisconnectReason> =
-            if idx >= self.trees.len() || !self.trees[idx].assigned {
-                Err(DisconnectReason::RejectedNotAssigned)
+        // A current child asking again has left from its own point of view (it detached
+        // and re-selected us): its old link goes and the request is judged like any
+        // other, so a re-join never cancels a drain, never exceeds K_v, and is refused
+        // with REJECTED_DEPTH while we are unparented.
+        if self
+            .trees
+            .get(idx)
+            .map(|t| t.children.contains_key(&from))
+            .unwrap_or(false)
+        {
+            // The session stays open: the admission below reuses it.
+            self.detach_child_link(n.tree_id, from, "rejoin");
+        }
+        // RULE: Never admit our own parent in this tree. The join would make the parent
+        //       its own descendant. `on_accepted` holds the mirror guard.
+        let is_parent = self
+            .trees
+            .get(idx)
+            .map(|t| {
+                t.parent
+                    .as_ref()
+                    .map(|p| p.node_id == n.sender)
+                    .unwrap_or(false)
+                    || t.old_parent
+                        .as_ref()
+                        .map(|p| p.node_id == n.sender)
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if is_parent {
+            let mut f = reject(DisconnectReason::RejectedSaturated);
+            f.sender = self.node_id();
+            self.send(from, Channel::Control, Frame::Disconnect(f), None);
+            return;
+        }
+        if self.admission_banned(from, n.sender) || self.audit_banned(&n.sender) {
+            // Evicted for unreceipted segments: no slot here until the cooldown ends.
+            let mut f = reject(DisconnectReason::RejectedSaturated);
+            f.sender = self.node_id();
+            self.send(from, Channel::Control, Frame::Disconnect(f), None);
+            self.emit(Event::ChildRejected {
+                tree: n.tree_id.0,
+                child: n.sender,
+                reason: "EvictionCooldown".into(),
+            });
+            return;
+        }
+        let bridge = self.is_bridge_child(from, n.tree_id);
+        let verdict: Result<u8, DisconnectReason> = if idx >= self.trees.len() {
+            Err(DisconnectReason::RejectedNotAssigned)
+        } else if bridge {
+            // A bridge slot promised by RELAY_BIND: out-degree one in a tree we are
+            // not assigned to (Ch6 §6.3.1).
+            if self.trees[idx].depth_allows_children(self.params.d_max) {
+                Ok(self.trees[idx].depth)
             } else {
-                let t = &self.trees[idx];
-                if !t.depth_allows_children(self.params.d_max) {
-                    Err(DisconnectReason::RejectedDepth)
-                } else if t.k_avail(self.is_source()) == 0 && !t.children.contains_key(&from) {
-                    // ISSUE-061: a relay *assigned* to this tree displaces a pure subscriber
-                    // (a child that does not relay the tree) through the drain path, so the
-                    // tree can grow interior nodes. Verified against the rendezvous rule, not
-                    // the self-declared bit alone. One displacement in progress per tree.
-                    let m = self.matrix.as_ref().map(|x| x.m()).unwrap_or(0);
-                    let requester_relays_m = n.node_class == NodeClass::Relay
-                        && n.assigned_trees.contains(n.tree_id)
-                        && rendezvous::assigned_tree(&n.sender, m) == n.tree_id;
-                    let draining = t.children.values().any(|c| c.draining_until.is_some());
-                    let victim = if requester_relays_m && !draining {
-                        t.children
-                            .values()
-                            .filter(|c| {
-                                !c.assigned_trees.contains(n.tree_id)
-                                    || c.node_class != NodeClass::Relay
-                            })
-                            .filter(|c| c.draining_until.is_none())
-                            .max_by_key(|c| c.admitted_at)
-                            .map(|c| c.addr)
-                    } else {
-                        None
-                    };
-                    match victim {
-                        Some(v) => {
-                            let deadline =
-                                SegmentSeq(self.swarm.live_edge.0 + self.params.tau_drain_segments);
-                            let d = DrainNotice {
-                                tree_id: n.tree_id,
-                                reason: DisconnectReason::Displaced,
-                                scope: DrainScope::ThisChild,
-                                deadline,
-                            };
-                            self.send(v, Channel::Tree(n.tree_id), Frame::DrainNotice(d), None);
-                            if let Some(c) = self.trees[idx].children.get_mut(&v) {
-                                c.draining_until = Some(deadline);
-                            }
-                            Ok(self.trees[idx].depth)
-                        }
-                        None => Err(DisconnectReason::RejectedSaturated),
-                    }
+                Err(DisconnectReason::RejectedDepth)
+            }
+        } else if !self.trees[idx].assigned || self.trees[idx].reassigning {
+            // A relay that leaves this tree at the next switch admits nobody new here.
+            Err(DisconnectReason::RejectedNotAssigned)
+        } else {
+            let t = &self.trees[idx];
+            if !t.depth_allows_children(self.params.d_max) {
+                Err(DisconnectReason::RejectedDepth)
+            } else if t.k_avail(self.is_source()) == 0 && !t.children.contains_key(&from) {
+                // ISSUE-061: a relay *assigned* to this tree displaces a pure subscriber
+                // (a child that does not relay the tree) through the drain path, so the
+                // tree can grow interior nodes. Verified against the rendezvous rule, not
+                // the self-declared bit alone. One displacement in progress per tree.
+                let m = self.matrix.as_ref().map(|x| x.m()).unwrap_or(0);
+                let requester_relays_m = n.node_class == NodeClass::Relay
+                    && n.assigned_trees.contains(n.tree_id)
+                    && rendezvous::assigned_tree(&n.sender, m) == n.tree_id;
+                let draining = t.children.values().any(|c| c.draining_until.is_some());
+                // Only a serving parent can displace: an unparented relay has nothing
+                // to push and an undefined depth.
+                let serving = self.is_source() || (t.parent.is_some() && t.verified_segments > 0);
+                let victim = if requester_relays_m && !draining && serving {
+                    t.children
+                        .values()
+                        .filter(|c| {
+                            !c.assigned_trees.contains(n.tree_id)
+                                || c.node_class != NodeClass::Relay
+                        })
+                        .filter(|c| c.draining_until.is_none())
+                        .max_by_key(|c| c.admitted_at)
+                        .map(|c| c.addr)
                 } else {
-                    Ok(t.depth)
+                    None
+                };
+                let mut reason = DisconnectReason::Displaced;
+                let mut victim = victim;
+                if victim.is_none() && !draining && serving {
+                    // RULE: Rank Admission Rule case 2 (Ch1 §1.2.2). In an enhancement tree a
+                    //       joiner preempts the weakest child if the proved rank beats the
+                    //       child's rank by the margin. Base-layer slots are never preempted.
+                    let enhancement = self
+                        .tree_info(n.tree_id)
+                        .map(|t| t.layer > 0)
+                        .unwrap_or(false);
+                    let r_new = self.peer_rank(from);
+                    if enhancement && r_new > 0.0 {
+                        if let Some((addr, id, r_min)) = self.weakest_child(n.tree_id) {
+                            if r_new > self.params.rank_preempt_margin * r_min {
+                                victim = Some(addr);
+                                reason = DisconnectReason::Preempted;
+                                self.emit(Event::RankPreempted {
+                                    tree: n.tree_id.0,
+                                    child: id,
+                                    r_new,
+                                    r_min,
+                                });
+                            }
+                        }
+                    }
                 }
-            };
+                match victim {
+                    Some(v) => {
+                        let deadline =
+                            SegmentSeq(self.swarm.live_edge.0 + self.params.tau_drain_segments);
+                        let d = DrainNotice {
+                            tree_id: n.tree_id,
+                            reason,
+                            scope: DrainScope::ThisChild,
+                            deadline,
+                        };
+                        self.send(v, Channel::Tree(n.tree_id), Frame::DrainNotice(d), None);
+                        if let Some(c) = self.trees[idx].children.get_mut(&v) {
+                            c.draining_until = Some(deadline);
+                        }
+                        Ok(self.trees[idx].depth)
+                    }
+                    None => Err(DisconnectReason::RejectedSaturated),
+                }
+            } else {
+                Ok(t.depth)
+            }
+        };
         match verdict {
             Ok(depth) => {
                 // Handover budget (Ch1 §1.2.2): serving K_v + 1 during a drain is charged to
@@ -1190,6 +1471,7 @@ impl Node {
                     + self.params.default_parity as f64 / bs_wire::consts::K_BLOCK as f64)
                     * (1.0 + self.params.f_frame);
                 let pending = displacing && (self.cfg.upload_kbps as f64) < 10.0 * b_m * omega;
+                let rank_new = self.peer_rank(from);
                 let t = &mut self.trees[idx];
                 t.children.insert(
                     from,
@@ -1204,6 +1486,7 @@ impl Node {
                         parity: self.params.default_parity,
                         draining_until: None,
                         pending,
+                        rank: rank_new,
                     },
                 );
                 let (children, k_v) = (t.children.len(), t.k_v);
@@ -1224,6 +1507,11 @@ impl Node {
                     children,
                     k_v,
                 });
+                // The bridge budget paid for this slot. An own child above the
+                // remaining K_v drains (Ch1 §1.2.1 §1.3).
+                if bridge {
+                    self.shed_capacity(n.tree_id);
+                }
                 self.reregister_if_needed();
             }
             Err(reason) => {
@@ -1252,6 +1540,38 @@ impl Node {
             {
                 self.send(to, Channel::Control, Frame::Manifest(m), None);
             }
+        }
+    }
+
+    /// Greedy upward migration (Ch1 §1.2.3): every τ_migrate, an attached relay deeper
+    /// than one hop probes once for a strictly shallower parent and hands over warm.
+    fn migration_round(&mut self) {
+        if self.now < self.next_migrate {
+            return;
+        }
+        self.next_migrate = self.now + self.params.tau_migrate;
+        if self.is_source() || self.matrix.is_none() || self.state != Lifecycle::Active {
+            return;
+        }
+        let ids: Vec<TreeId> = self
+            .trees
+            .iter()
+            .filter(|t| {
+                t.parent.as_ref().map(|p| !p.pending).unwrap_or(false)
+                    && t.old_parent.is_none()
+                    && !t.repairing
+                    && t.depth != u8::MAX
+                    && t.depth >= 2
+                    && matches!(t.join, JoinState::Idle)
+            })
+            .map(|t| t.id)
+            .collect();
+        for id in ids {
+            if self.candidates_for(id).is_empty() {
+                continue;
+            }
+            self.trees[id.index()].migrating = true;
+            self.begin_probing(id);
         }
     }
 
@@ -1385,7 +1705,7 @@ impl Node {
                     self.send(from, Channel::Control, Frame::Manifest(m), None);
                 }
             }
-            ManifestSelector::PendingUpdate => {}
+            ManifestSelector::PendingUpdate => self.send_pending_update(from),
         }
     }
 
@@ -1414,10 +1734,35 @@ impl Node {
         any
     }
 
+    /// Remove `addr` as a child of one tree only.
+    pub(super) fn remove_child_from_tree(&mut self, tree: TreeId, addr: PeerAddr, reason: &str) {
+        self.detach_child_link(tree, addr, reason);
+        self.maybe_close_session(addr);
+    }
+
+    /// Drop the child link in `tree` and keep the session.
+    fn detach_child_link(&mut self, tree: TreeId, addr: PeerAddr, reason: &str) {
+        let idx = tree.index();
+        self.nat_child_removed(addr, tree);
+        if let Some(c) = self.trees[idx].children.remove(&addr) {
+            self.emit(Event::ChildRemoved {
+                tree: tree.0,
+                child: c.node_id,
+                reason: reason.into(),
+            });
+            if c.draining_until.is_some() {
+                self.release_pending(tree);
+            }
+        }
+        self.reregister_if_needed();
+    }
+
     fn remove_child(&mut self, addr: PeerAddr, reason: &str) {
+        self.forget_child_receipts(addr);
         for t in 0..self.trees.len() {
             if let Some(c) = self.trees[t].children.remove(&addr) {
                 let tree = self.trees[t].id;
+                self.nat_child_removed(addr, tree);
                 self.emit(Event::ChildRemoved {
                     tree: tree.0,
                     child: c.node_id,
@@ -1465,6 +1810,11 @@ impl Node {
         s.node_id = Some(node_id);
         s.last_rx = self.now;
         s.session_key = Some(session_key);
+        // One PING per new session: the PONG's validation block binds the peer's key to
+        // its NodeID, which receipt verification needs (Ch5 §5.2.1).
+        if !self.incentive.known_keys.contains_key(&node_id) {
+            self.send_ping(peer);
+        }
         let ids: Vec<TreeId> = self.trees.iter().map(|t| t.id).collect();
         for id in ids {
             if let JoinState::Requesting {
@@ -1483,6 +1833,7 @@ impl Node {
         if self.membership.pending_neighbor.remove(&peer) {
             self.membership_send_neighbor(peer);
         }
+        self.nat_session_opened(peer);
     }
 
     fn on_session_closed(&mut self, peer: PeerAddr, reason: &str) {
@@ -1538,6 +1889,7 @@ impl Node {
             parent: p.node_id,
             reason: reason.into(),
         });
+        self.nat_parent_lost(tree, p.addr);
         self.maybe_close_session(p.addr);
         if self.ending {
             return; // the stream is over; nothing to repair
@@ -1607,9 +1959,14 @@ impl Node {
             Frame::GossipExchange(g) => self.on_gossip_exchange(from, g),
             Frame::PullRequest(r) => self.on_pull_request(from, r),
             Frame::BlockTransmission(bt) => self.on_block_transmission(from, bt),
-            Frame::ChokeState(_) | Frame::ManifestUpdate(_) => {
-                // M3.
-            }
+            Frame::ChokeState(s) => self.on_choke_state(from, s),
+            Frame::ProofOfUpload(p) => self.on_receipt(from, p),
+            Frame::RankProof(p) => self.on_rank_proof(from, p),
+            Frame::AuditGossip(g) => self.on_audit_gossip(from, g),
+            Frame::PunchRequest(f) => self.on_punch(from, f),
+            Frame::RelayProposal(p) => self.on_relay_proposal(from, p),
+            Frame::RelayBind(b) => self.on_relay_bind(from, b),
+            Frame::ManifestUpdate(u) => self.on_manifest_update(from, u),
             Frame::RegisterPeer(_)
             | Frame::GetPeers(_)
             | Frame::FindNode(_)
@@ -1629,7 +1986,7 @@ impl Node {
     }
 
     fn verify_vb(
-        &self,
+        &mut self,
         vb: &ValidationBlock,
         ty: FrameType,
         body: &[u8],
@@ -1641,7 +1998,13 @@ impl Node {
             c2_min: self.params.c2_min,
         };
         let c2 = d.dynamic_accepted(self.swarm_size.max(2), class, false);
-        Identity::verify_validation_block(vb, ty, body, from.ip(), d, c2).is_ok()
+        let ok = Identity::verify_validation_block(vb, ty, body, from.ip(), d, c2).is_ok();
+        if ok {
+            // Every verified block binds a NodeID to its key: receipts signed by this
+            // peer can be checked later (Ch5 §5.2.1).
+            self.learn_key(vb);
+        }
+        ok
     }
 
     fn on_ping(&mut self, from: PeerAddr, p: Ping) {
@@ -1665,10 +2028,16 @@ impl Node {
             }),
             None,
         );
+        self.reprobe_after_punch(from);
     }
 
     fn on_pong(&mut self, from: PeerAddr, p: Pong) {
         self.dht_on_pong(from, &p);
+        // A verified PONG binds the responder's key to its NodeID (receipt verification).
+        let body = p.reflected.to_vec();
+        if self.verify_vb(&p.validation, FrameType::PONG, &body, from, NodeClass::Leaf) {
+            self.on_reflection(from, p.reflected);
+        }
         if let Some(s) = self.sessions.get_mut(&from) {
             if let Some(t0) = s.ping_sent_at.take() {
                 let sample = self.now.duration_since(t0);
@@ -1722,7 +2091,7 @@ impl Node {
             k_avail,
             reliability: ProbeResponse::reliability_from_f32(1.0),
             hop_count: hop,
-            node_class: self.cfg.node_class,
+            node_class: self.effective_class(),
             flags: rec.flags,
             tree_state: state,
             assigned_trees: rec.assigned_trees,
@@ -1800,6 +2169,12 @@ impl Node {
     }
 
     fn on_manifest(&mut self, from: PeerAddr, m: Manifest) {
+        self.maybe_switch_for(&m.body);
+        if let Some(x) = self.matrix.as_mut() {
+            if x.version == 0 {
+                x.version = m.body.slicing_matrix_version;
+            }
+        }
         let (Some(pk), Some(matrix)) = (self.publisher_key, self.matrix.clone()) else {
             return;
         };
@@ -1827,6 +2202,15 @@ impl Node {
                 }
             }
             ManifestVerdict::Duplicate => {}
+            ManifestVerdict::UnknownMatrix => {
+                // Cut under a matrix we have not seen: fetch the pending update.
+                self.request_pending_update(from);
+                self.emit(Event::ManifestRejected {
+                    segment: m.body.segment.0,
+                    chunk: m.body.chunk_index,
+                    reason: "UnknownMatrix".into(),
+                });
+            }
             other => self.emit(Event::ManifestRejected {
                 segment: m.body.segment.0,
                 chunk: m.body.chunk_index,
@@ -1889,9 +2273,13 @@ impl Node {
                 .or_insert((bp.segment, bp.block.chunk()));
         }
         let sender = if is_current {
-            // Depth propagation (Ch1 §1.2.2): h_self = SenderHopDepth + 1 on every block.
+            // Depth propagation (Ch1 §1.2.2): h_self = SenderHopDepth + 1 on every pushed
+            // block. A PULL-path proof carries the unknown marker and says nothing about
+            // the tree position, so it must not touch the depth.
             let was = self.trees[idx].depth;
-            self.trees[idx].depth = bp.sender_hop_depth.saturating_add(1);
+            if bp.sender_hop_depth != u8::MAX {
+                self.trees[idx].depth = bp.sender_hop_depth.saturating_add(1);
+            }
             let now_depth = self.trees[idx].depth;
             let d_max = self.params.d_max;
             if now_depth >= d_max && was < d_max {
@@ -1965,8 +2353,12 @@ impl Node {
     }
 
     fn try_verify(&mut self, seg: SegmentSeq, idx: bs_wire::BlockIndex, from: Option<PeerAddr>) {
+        // A block we asked for on the PULL path is pull-delivered even when its repair
+        // symbols arrive as datagrams: the receipt must say PULL, not name the provider
+        // as a tree parent (Ch5 §5.2.3).
+        let via_pull = self.pull.pending.contains_key(&(seg.0, idx.0));
         match self.swarm.try_verify(seg, idx) {
-            Ok(Some(vb)) => self.on_verified(vb, from),
+            Ok(Some(vb)) => self.on_verified(vb, from, via_pull),
             Ok(None) => {}
             Err((_e, who)) => {
                 let tree = self
@@ -2003,12 +2395,36 @@ impl Node {
         }
     }
 
-    fn on_verified(&mut self, vb: VerifiedBlock, _from: Option<PeerAddr>) {
+    fn on_verified(&mut self, vb: VerifiedBlock, from: Option<PeerAddr>, via_pull: bool) {
+        // WHY: During a resize window a block is pushed on the tree the pending layout
+        //      gives it. Receipts and liveness belong to the tree it arrived on. The
+        //      parent there would otherwise never see a receipt and evict the child.
+        let arrived = from
+            .and_then(|f| self.delivery_tree(&vb, f))
+            .unwrap_or(vb.tree);
+        let credited = VerifiedBlock {
+            tree: arrived,
+            ..vb.clone()
+        };
+        if let Some(f) = from {
+            if !self.is_source() {
+                self.note_delivered(&credited, f, via_pull);
+            }
+        }
+        let idx = arrived.index();
+        if !via_pull && idx < self.trees.len() {
+            if let (Some(f), Some(p)) = (from, self.trees[idx].parent.as_ref()) {
+                if p.addr == f {
+                    self.trees[idx].last_block_at = Some(self.now);
+                }
+            }
+        }
         let idx = vb.tree.index();
         if idx < self.trees.len() && vb.segment > self.trees[idx].last_segment_seen {
             self.trees[idx].last_segment_seen = vb.segment;
         }
         let forwarded = self.forward_block(&vb);
+        self.preemit_block(&vb);
         let depth = self.trees.get(idx).map(|t| t.depth).unwrap_or(0);
         self.emit(Event::BlockVerified {
             tree: vb.tree.0,
@@ -2034,6 +2450,34 @@ impl Node {
     }
 
     /// Verify-then-forward: BLOCK_PROOF on the tree stream, then symbols as datagrams.
+    /// The tree `from` pushed `vb` on.
+    ///
+    /// That is `vb.tree` when `from` is our parent there, else the pending layout's
+    /// tree for the block when `from` is our parent in that tree.
+    fn delivery_tree(&self, vb: &VerifiedBlock, from: PeerAddr) -> Option<TreeId> {
+        let is_parent = |t: TreeId| {
+            self.trees
+                .get(t.index())
+                .and_then(|x| x.parent.as_ref().map(|p| p.addr == from))
+                .unwrap_or(false)
+        };
+        if is_parent(vb.tree) {
+            return Some(vb.tree);
+        }
+        let p = self.pending_update.as_ref()?;
+        let body = self
+            .swarm
+            .chunk(vb.segment, vb.index.chunk())?
+            .manifest
+            .clone();
+        let t = p.matrix.tree_for_block(&body, vb.index.j())?;
+        if t != vb.tree && is_parent(t) {
+            Some(t)
+        } else {
+            None
+        }
+    }
+
     fn forward_block(&mut self, vb: &VerifiedBlock) -> usize {
         let idx = vb.tree.index();
         if idx >= self.trees.len() {
@@ -2057,7 +2501,13 @@ impl Node {
             siblings: vb.siblings.clone(),
         };
         let not_before = self.pacing_slot(vb);
+        let mut served = 0usize;
         for (addr, parity) in &children {
+            // Receipt deadline (Ch5 §5.2.1): segment k's receipt is due before k+2 starts.
+            if !self.check_receipt_deadline(vb.tree, *addr, vb.segment.0) {
+                continue;
+            }
+            served += 1;
             self.send(
                 *addr,
                 Channel::Tree(vb.tree),
@@ -2073,7 +2523,7 @@ impl Node {
                 );
             }
         }
-        children.len()
+        served
     }
 
     /// Source pacing (Ch3 §3.3.2): spread a chunk's blocks over ≤ ½ chunk period.
@@ -2097,10 +2547,20 @@ impl Node {
 
     // ------------------------------------------------------------------ publisher
 
-    fn publish_chunk(&mut self, chunk: LayeredChunk) {
+    fn publish_chunk(&mut self, mut chunk: LayeredChunk) {
+        let due = self
+            .pending_update
+            .as_ref()
+            .map(|p| chunk.segment >= p.effective)
+            .unwrap_or(false);
+        if due {
+            self.forest_switch();
+        }
         let Some(matrix) = self.matrix.clone() else {
             return;
         };
+        // A folded layer is not encoded (Ch1 §1.1.5 §5.6).
+        chunk.layers.truncate(matrix.layer_count as usize);
         let built = match self.publisher.as_mut().map(|p| p.build(&chunk)) {
             Some(Ok(b)) => b,
             _ => return,
@@ -2127,8 +2587,10 @@ impl Node {
                 siblings: built.tree.proof(j as usize),
                 sender_depth: 0,
                 decoded: false,
+                symbols_received: bs_wire::consts::K_BLOCK as u16,
             };
             let n = self.forward_block(&vb);
+            self.preemit_block(&vb);
             self.emit(Event::BlockVerified {
                 tree: tree.0,
                 segment: chunk.segment.0,
@@ -2145,6 +2607,7 @@ impl Node {
         }
         if chunk.chunk_index == 0 {
             self.store_record();
+            self.forest_consider();
         }
     }
 
@@ -2171,6 +2634,7 @@ impl Node {
     }
 
     fn quit(&mut self) {
+        self.flush_all_receipts();
         let peers: BTreeSet<PeerAddr> = self
             .trees
             .iter()
@@ -2198,6 +2662,58 @@ impl Node {
     fn run_timers(&mut self) {
         let now = self.now;
         self.dht_timers();
+        self.incentive_timers();
+        self.migration_round();
+        self.forest_timers();
+        self.nat_timers();
+        self.ingress_timers();
+        // A relay that lost its parent and has not re-attached within the drain window
+        // releases its children so they repair themselves (an evicted free rider, or
+        // one banned everywhere, must not hold its subtree hostage; ISSUE-066 addendum).
+        let stall = Duration::from_secs(2);
+        let stalled: Vec<TreeId> = self
+            .trees
+            .iter()
+            .filter(|t| {
+                t.parent.is_none()
+                    && !t.children.is_empty()
+                    && t.lost_at
+                        .map(|l| now.duration_since(l) > stall)
+                        .unwrap_or(false)
+                    && t.children.values().any(|c| c.draining_until.is_none())
+            })
+            .map(|t| t.id)
+            .collect();
+        for id in stalled {
+            self.drain_children(id, DisconnectReason::Capacity);
+        }
+        // Data stall: a parent that is alive (heartbeats) but has pushed nothing for
+        // the same window cannot feed this tree; treat the edge as lost and repair.
+        // The children then get the stalled-repair drain above if we fail too.
+        if !self.ending && !self.is_source() {
+            let stalled_parents: Vec<TreeId> = self
+                .trees
+                .iter()
+                .filter(|t| {
+                    t.parent
+                        .as_ref()
+                        .map(|p| {
+                            // A parent that stopped delivering is stalled after one window.
+                            // A fresh or PENDING parent is warming or waits on a drain. It
+                            // gets three windows before the edge counts as lost.
+                            match t.last_block_at {
+                                Some(b) => now.duration_since(b) > stall,
+                                None => now.duration_since(p.attached_at) > stall * 3,
+                            }
+                        })
+                        .unwrap_or(false)
+                })
+                .map(|t| t.id)
+                .collect();
+            for id in stalled_parents {
+                self.lose_parent(id, "data stall");
+            }
+        }
         // Join deadlines.
         let ids: Vec<TreeId> = self.trees.iter().map(|t| t.id).collect();
         for id in ids {
@@ -2216,7 +2732,7 @@ impl Node {
                 }
                 JoinState::Backoff { until } if now >= until => {
                     let t = &self.trees[idx];
-                    if t.wants_parent() && (t.parent.is_none() || t.repairing) {
+                    if t.wants_parent() && t.needs_parent_search() {
                         self.begin_probing(id);
                     } else {
                         self.trees[idx].join = JoinState::Idle;
@@ -2225,7 +2741,7 @@ impl Node {
                 JoinState::Idle
                     if !self.is_source()
                         && self.trees[idx].wants_parent()
-                        && (self.trees[idx].parent.is_none() || self.trees[idx].repairing)
+                        && self.trees[idx].needs_parent_search()
                         && self.matrix.is_some()
                         && self.state != Lifecycle::Discovery
                         && self.state != Lifecycle::Joining =>

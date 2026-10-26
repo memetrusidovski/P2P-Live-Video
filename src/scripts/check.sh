@@ -76,6 +76,26 @@ else
   skip_step "sim gates" "bs-sim not ready"
 fi
 
+# Docker fleet gate (opt-in: BS_FLEET=1, needs docker and a sample file). The lossy
+# profile with a churn of 30 % of the viewers at 30 s is Ch8 §8.3 scenario A on real nodes.
+if [ "${BS_FLEET:-0}" = 1 ]; then
+  sample="${BS_FLEET_FILE:-fleet/media/sample.mp4}"
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    skip_step "fleet gate" "docker not available"
+  elif [ ! -f "$sample" ]; then
+    skip_step "fleet gate" "no sample file ($sample); set BS_FLEET_FILE"
+  else
+    # 25 MB of the sample is about a minute of video: the stream ends before the viewers
+    # do, so every surviving viewer holds the whole stream and the hash check is exact.
+    # The publisher writes its report when stopped, so the fleet comes down before the
+    # report is built (the results volume is kept).
+    fleet_cmd="fleet/up.sh --viewers ${BS_FLEET_VIEWERS:-20} --profile lossy --file $sample --max-bytes 25000000 --duration 90 && fleet/churn.sh --fraction 0.3 --at 30 && sleep 80 && fleet/down.sh --keep-results && python3 fleet/report.py && fleet/down.sh"
+    run_step "fleet gate: lossy churn" "$fleet_cmd" bash -c "$fleet_cmd"
+  fi
+else
+  skip_step "fleet gate" "set BS_FLEET=1 to run the docker fleet"
+fi
+
 {
   echo "{"
   echo "  \"passed\": $([ $FAILED = 0 ] && echo true || echo false),"

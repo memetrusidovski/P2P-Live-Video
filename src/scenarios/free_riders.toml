@@ -1,0 +1,53 @@
+# Ch8 adversarial: a fifth of the swarm never signs receipts and never serves PULLs.
+# The receipt deadline must evict them from the trees they sit in (Ch5 §5.2.1) and the
+# unchoker must stop serving them repairs (Ch5 §5.1.2), while honest viewers keep
+# playing. Free riders still get the base layer they are pushed until eviction; their
+# own starvation is not a defect, so the gate is on the honest group's PSR.
+seed = 17
+duration_s = 60.0
+forest_size = 3
+
+[publisher]
+upload_kbps = 100000
+
+[[viewers]]
+label = "honest"
+count = 60
+class = "relay"
+upload_kbps = { min = 8000.0, max = 20000.0 }
+top_layer = 2
+join_s = { min = 1.0, max = 12.0 }
+
+[[viewers]]
+label = "riders"
+count = 15
+class = "relay"
+upload_kbps = { min = 8000.0, max = 20000.0 }
+top_layer = 2
+join_s = { min = 1.0, max = 12.0 }
+behaviour = "freeloader"
+
+[network]
+regions = 2
+
+[kpis]
+# Whole-swarm figures include the riders, whose starvation and non-activation are the
+# punishment working; the honest group is gated through the facts below.
+psr_max = 0.30
+sjl_mean_max_s = 3.6
+sjl_p95_max_s = 5.0
+active_fraction_min = 0.75
+repair_p95_max_s = 10.0
+
+[kpis.facts_max]
+# Honest viewers under a rider lose their feed when the rider is evicted and repair;
+# until Ch5 §5.3 consensus eviction stops honest nodes from choosing riders as parents,
+# 2 % is the collateral this design accepts. Tighten to 0.001 with §5.3.
+"psr:honest" = 0.02
+
+[kpis.facts_min]
+# Every rider that ever held a tree slot is dropped after three unreceipted segments.
+deadline_evictions = 15
+"active_fraction:honest" = 0.98
+# Riders must be worse off than honest viewers (about an order of magnitude here).
+"psr:riders" = 0.015

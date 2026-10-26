@@ -65,6 +65,64 @@ pub struct NodeStats {
     pub dht_get_peers_served: u64,
     /// Blocks rejected (poison).
     pub blocks_rejected: u64,
+    /// Receipts issued (as downloader).
+    pub receipts_issued: u64,
+    /// Receipts accepted (as uploader).
+    pub receipts_accepted: u64,
+    /// Receipts rejected.
+    pub receipts_rejected: u64,
+    /// Receipt deadlines missed by our children.
+    pub receipts_missed: u64,
+    /// Children evicted for missed receipts.
+    pub deadline_evictions: u64,
+    /// Choke-state changes toward peers: chokes.
+    pub chokes: u64,
+    /// ... unchokes (regular).
+    pub unchokes: u64,
+    /// ... optimistic unchokes.
+    pub optimistic: u64,
+    /// PULL_REQUESTs refused because the requester was choked.
+    pub pulls_choked: u64,
+    /// RANK_PROOFs sent / verified / rejected, and rank preemptions performed.
+    pub rank_proofs_sent: u64,
+    /// RANK_PROOFs verified.
+    pub rank_proofs_verified: u64,
+    /// RANK_PROOFs rejected.
+    pub rank_proofs_rejected: u64,
+    /// Rank preemptions this node performed as a parent.
+    pub preemptions: u64,
+    /// Accusations this node signed.
+    pub accusations_made: u64,
+    /// Accusations this node re-verified and counted.
+    pub accusations_counted: u64,
+    /// Accusations this node did not count.
+    pub accusations_dropped: u64,
+    /// `MANIFEST_UPDATE`s announced (source) or accepted (peer).
+    pub forest_updates: u64,
+    /// Forest switches performed.
+    pub forest_switches: u64,
+    /// Rendezvous reassignments at a resize.
+    pub relay_reassignments: u64,
+    /// PUNCH_REQUESTs sent to referrers.
+    pub punches_sent: u64,
+    /// RELAY_PROPOSALs sent.
+    pub bridges_proposed: u64,
+    /// Bridges bound for this node.
+    pub bridges_bound: u64,
+    /// Bridges declined or unanswered.
+    pub bridges_rejected: u64,
+    /// Bridges this node serves as a relay.
+    pub bridges_served: u64,
+    /// Bridges released because the child never joined.
+    pub bridges_expired: u64,
+    /// Ingress relays bound by this source.
+    pub ingress_bound: u64,
+    /// Rank proofs discounted for subnet clustering.
+    pub subnet_penalties: u64,
+    /// Sum of parity values set by loss reports, and their count.
+    pub parity_sum: u64,
+    /// Count for `parity_sum`.
+    pub parity_n: u64,
     /// Backfilled chunks played / complete.
     pub backfill_played: u64,
     /// Backfilled chunks complete at their deadline.
@@ -100,6 +158,16 @@ pub struct Kpis {
     pub depth_series: Vec<(u64, f64, u8, usize, usize)>,
     /// Session-bound sends dropped for lack of a session.
     pub no_session_drops: u64,
+    /// Frames dropped by scripted misbehaviour (free riders).
+    pub freeload_drops: u64,
+    /// Receipt rejections by reason.
+    pub receipt_reject_reasons: std::collections::BTreeMap<String, u64>,
+    /// RANK_PROOF rejections by reason.
+    pub rank_reject_reasons: std::collections::BTreeMap<String, u64>,
+    /// Accusation drops by reason.
+    pub accusation_drop_reasons: std::collections::BTreeMap<String, u64>,
+    /// Suspects evicted by consensus, one entry per eviction.
+    pub consensus_evictions: Vec<bs_wire::NodeId>,
     /// No-session drops by frame type.
     pub no_session_by_type: std::collections::BTreeMap<String, u64>,
 }
@@ -115,6 +183,11 @@ impl Kpis {
             repairs_us: Vec::new(),
             depth_series: Vec::new(),
             no_session_drops: 0,
+            freeload_drops: 0,
+            receipt_reject_reasons: Default::default(),
+            rank_reject_reasons: Default::default(),
+            accusation_drop_reasons: Default::default(),
+            consensus_evictions: Vec::new(),
             no_session_by_type: std::collections::BTreeMap::new(),
         }
     }
@@ -260,6 +333,59 @@ impl Kpis {
                 }
             }
             Event::BlockRejected { .. } => s.blocks_rejected += 1,
+            Event::ReceiptIssued { .. } => s.receipts_issued += 1,
+            Event::ReceiptAccepted { .. } => s.receipts_accepted += 1,
+            Event::ReceiptRejected { reason } => {
+                s.receipts_rejected += 1;
+                *self
+                    .receipt_reject_reasons
+                    .entry(reason.to_string())
+                    .or_default() += 1;
+            }
+            Event::ReceiptMissed { .. } => s.receipts_missed += 1,
+            Event::ChokeChanged { state, .. } => match *state {
+                "choke" => s.chokes += 1,
+                "unchoke" => s.unchokes += 1,
+                _ => s.optimistic += 1,
+            },
+            Event::PullChoked => s.pulls_choked += 1,
+            Event::RankProofSent { .. } => s.rank_proofs_sent += 1,
+            Event::RankProofVerified { .. } => s.rank_proofs_verified += 1,
+            Event::RankProofRejected { reason } => {
+                s.rank_proofs_rejected += 1;
+                *self
+                    .rank_reject_reasons
+                    .entry(reason.to_string())
+                    .or_default() += 1;
+            }
+            Event::RankPreempted { .. } => s.preemptions += 1,
+            Event::ForestUpdateAnnounced { .. } => s.forest_updates += 1,
+            Event::ForestSwitched { .. } => s.forest_switches += 1,
+            Event::RelayReassigned { .. } => s.relay_reassignments += 1,
+            Event::PunchSent { .. } => s.punches_sent += 1,
+            Event::BridgeProposed { .. } => s.bridges_proposed += 1,
+            Event::BridgeBound { .. } => s.bridges_bound += 1,
+            Event::BridgeRejected { .. } => s.bridges_rejected += 1,
+            Event::BridgeServed { .. } => s.bridges_served += 1,
+            Event::BridgeExpired { .. } => s.bridges_expired += 1,
+            Event::IngressBound { .. } => s.ingress_bound += 1,
+            Event::AccusationMade { .. } => s.accusations_made += 1,
+            Event::AccusationCounted { .. } => s.accusations_counted += 1,
+            Event::AccusationDropped { reason } => {
+                s.accusations_dropped += 1;
+                *self
+                    .accusation_drop_reasons
+                    .entry(reason.to_string())
+                    .or_default() += 1;
+            }
+            Event::ConsensusEviction { suspect, .. } => {
+                self.consensus_evictions.push(*suspect);
+            }
+            Event::SubnetPenalty { .. } => s.subnet_penalties += 1,
+            Event::ParityChanged { parity, .. } => {
+                s.parity_sum += *parity as u64;
+                s.parity_n += 1;
+            }
             Event::PullSent { .. } => s.pulls_sent += 1,
             Event::PullServed { .. } => s.pulls_served += 1,
             Event::PullRefused { .. } => s.pulls_refused += 1,

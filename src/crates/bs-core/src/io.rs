@@ -177,6 +177,33 @@ pub enum Event {
         /// Highest layer still subscribed.
         top_layer: u8,
     },
+    /// A `MANIFEST_UPDATE` was made (source) or accepted (peer).
+    ForestUpdateAnnounced {
+        /// Matrix version.
+        version: u8,
+        /// Trees in the new layout.
+        m: u8,
+        /// Layers in the new layout.
+        layers: u8,
+        /// First segment on the new layout.
+        effective: u32,
+    },
+    /// The pending matrix took effect.
+    ForestSwitched {
+        /// Matrix version.
+        version: u8,
+        /// Trees.
+        m: u8,
+        /// Layers.
+        layers: u8,
+    },
+    /// A relay's rendezvous assignment moved at a resize.
+    RelayReassigned {
+        /// Old tree.
+        from: u8,
+        /// New tree.
+        to: u8,
+    },
     /// A child was admitted.
     ChildAdmitted {
         /// Tree.
@@ -330,6 +357,57 @@ pub enum Event {
         /// Block.
         block: u16,
     },
+    /// Reachability decided from PONG reflections (Ch2 §2.1.3).
+    ReachabilityDetected {
+        /// The class decided.
+        reach: bs_wire::Reachability,
+    },
+    /// A PUNCH_REQUEST went to a referrer (App D §D.4.14).
+    PunchSent {
+        /// The CONE candidate.
+        target: NodeId,
+    },
+    /// A RELAY_PROPOSAL went to a RELAY_CAPABLE peer (Ch6 §6.3.3).
+    BridgeProposed {
+        /// Tree.
+        tree: u8,
+    },
+    /// A relay bound a bridge for us.
+    BridgeBound {
+        /// Tree.
+        tree: u8,
+        /// The relay.
+        relay: NodeId,
+    },
+    /// This node bound a bridge for a NAT-blocked peer (relay side).
+    BridgeServed {
+        /// Tree.
+        tree: u8,
+        /// The bridged peer.
+        client: NodeId,
+    },
+    /// A bound bridge whose child never joined was released (relay side).
+    BridgeExpired {
+        /// Tree.
+        tree: u8,
+        /// The peer that never joined.
+        client: NodeId,
+    },
+    /// The source bound an ingress relay (Ch6 §6.3.3).
+    IngressBound {
+        /// The relay.
+        relay: NodeId,
+    },
+    /// This relay became hop 0 for a source behind a NAT.
+    IngressServing {
+        /// The source.
+        source: NodeId,
+    },
+    /// A relay declined, or did not answer.
+    BridgeRejected {
+        /// Tree.
+        tree: u8,
+    },
     /// A DHT lookup finished (Ch2 §2.1).
     DhtLookup {
         /// `self`, `guardians` or `value`.
@@ -348,6 +426,122 @@ pub enum Event {
     DhtServed {
         /// RPC kind.
         rpc: &'static str,
+    },
+    /// We issued a PROOF_OF_UPLOAD receipt (Ch5 §5.2).
+    ReceiptIssued {
+        /// Tree (0 = PULL receipt).
+        tree: u8,
+        /// Segment.
+        segment: u32,
+        /// Blocks attested.
+        blocks: u16,
+        /// Loss rate byte.
+        loss: u8,
+    },
+    /// A receipt from a child/peer was accepted into the ledger.
+    ReceiptAccepted {
+        /// Tree.
+        tree: u8,
+        /// Segment.
+        segment: u32,
+        /// Capped bytes credited.
+        bytes: u64,
+    },
+    /// A receipt was rejected (`bad_signature`, `unknown_key`, `wrong_uploader`,
+    /// `wrong_stream`, `stale`).
+    ReceiptRejected {
+        /// Why.
+        reason: &'static str,
+    },
+    /// A child missed a receipt deadline (Ch5 §5.2.1).
+    ReceiptMissed {
+        /// Tree.
+        tree: u8,
+        /// Child.
+        child: NodeId,
+        /// Consecutive misses.
+        consecutive: u8,
+    },
+    /// Our choke state toward a peer changed (Ch5 §5.1.2).
+    ChokeChanged {
+        /// Peer.
+        peer: NodeId,
+        /// `choke`, `unchoke`, `optimistic`.
+        state: &'static str,
+    },
+    /// Per-link parity changed after a loss report (Ch4 §4.2.2).
+    ParityChanged {
+        /// Child.
+        child: NodeId,
+        /// Symbols per block.
+        parity: u16,
+        /// Reported loss byte.
+        loss: u8,
+    },
+    /// A PULL_REQUEST from a choked peer was refused.
+    PullChoked,
+    /// We sent a RANK_PROOF ahead of a join (Ch5 §5.2.2).
+    RankProofSent {
+        /// Receipts committed.
+        receipts: u32,
+        /// Our own rank estimate.
+        rank: f64,
+    },
+    /// A peer's RANK_PROOF verified.
+    RankProofVerified {
+        /// Prover.
+        peer: NodeId,
+        /// Receipts committed.
+        receipts: u32,
+        /// Rank established.
+        rank: f64,
+    },
+    /// A RANK_PROOF failed a check.
+    RankProofRejected {
+        /// Which check.
+        reason: &'static str,
+    },
+    /// We signed and gossiped an accusation (Ch5 §5.3.3).
+    AccusationMade {
+        /// The accused.
+        suspect: NodeId,
+        /// `symmetric_tree_pair` or `equivocation`.
+        evidence: &'static str,
+    },
+    /// A received accusation was re-verified and counted.
+    AccusationCounted {
+        /// The accused.
+        suspect: NodeId,
+        /// Who accused.
+        accuser: NodeId,
+    },
+    /// A received accusation was not counted.
+    AccusationDropped {
+        /// Why.
+        reason: &'static str,
+    },
+    /// Three ranked accusers from three prefixes: the suspect is evicted locally.
+    ConsensusEviction {
+        /// The evicted peer.
+        suspect: NodeId,
+        /// Evictions of this peer so far (the ban doubles each time).
+        strikes: u32,
+    },
+    /// A rank proof's sampled signers clustered in one prefix (Ch5 §5.3.2).
+    SubnetPenalty {
+        /// Factor applied to the rank.
+        factor: f64,
+    },
+    /// Rank admission preempted a child (Ch1 §1.2.2 case 2).
+    RankPreempted {
+        /// Tree.
+        tree: u8,
+        /// Victim.
+        child: NodeId,
+        /// Joiner's rank.
+        r_new: f64,
+        /// Victim's rank.
+        r_min: f64,
     },
     /// Free-form diagnostic.
     Note {

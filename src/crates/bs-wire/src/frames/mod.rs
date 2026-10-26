@@ -2,14 +2,20 @@
 //! [`Encode`](crate::Encode)/[`Decode`](crate::Decode) for its **payload only**
 //! (no header); [`crate::Frame`] adds the header.
 
+pub mod audit;
 pub mod control;
 pub mod dht;
+pub mod incentive;
 pub mod media;
 pub mod membership;
+pub mod nat;
 pub mod presession;
 
+pub use audit::*;
 pub use control::*;
 pub use dht::*;
+pub use incentive::*;
 pub use media::*;
 pub use membership::*;
+pub use nat::*;
 pub use presession::*;

@@ -74,6 +74,36 @@ fn sr_fixture() -> StreamRecord {
     }
 }
 
+fn pou_fixture(seg: u32, tree: u8, downloader: u8) -> ProofOfUpload {
+    ProofOfUpload {
+        segment: SegmentSeq(seg),
+        tree_id: TreeId(tree),
+        rx_flags: RxFlags {
+            relayed: false,
+            pull: tree == 0,
+        },
+        loss_rate: 5,
+        bitmap: Bytes::from(vec![
+            0b1110_0000,
+            0,
+            0b1110_0000,
+            0,
+            0b1110_0000,
+            0,
+            0b1110_0000,
+            0,
+        ]),
+        k_avail: 3,
+        assigned_trees: TreeSet(0b0000_0001),
+        node_class: NodeClass::Relay,
+        stream_key: Hash([0x4B; 32]),
+        uploader: NodeId([0xA1; 32]),
+        downloader: NodeId([downloader; 32]),
+        timestamp_us: 1_700_000_000_500_000,
+        signature: SignatureBytes([downloader.wrapping_add(1); 64]),
+    }
+}
+
 fn fixtures() -> Vec<(&'static str, &'static str, Frame)> {
     let sid = StreamId([0xAA; 32]);
     let nid = NodeId([0x11; 32]);
@@ -586,6 +616,111 @@ fn fixtures() -> Vec<(&'static str, &'static str, Frame)> {
                 relay_count: 700,
                 per_tree_relay: [230, 231, 239, 0, 0, 0],
                 starved: [0, 0, 3, 0, 0, 0],
+            }),
+        ),
+        (
+            "proof_of_upload",
+            "App D §D.4.12",
+            Frame::ProofOfUpload(pou_fixture(41, 1, 0xB1)),
+        ),
+        (
+            "rank_proof",
+            "App D §D.4.17",
+            Frame::RankProof(RankProof {
+                receipt_count: 5,
+                commit_segment: SegmentSeq(40),
+                root: Hash([0x7A; 32]),
+                prover: NodeId([0xA1; 32]),
+                signature: SignatureBytes([0xA2; 64]),
+                nonce_segment: SegmentSeq(41),
+                nonce_chunk: 0,
+                pairs: vec![
+                    RankPair {
+                        left: pou_fixture(39, 1, 0xB1),
+                        right: Some(pou_fixture(39, 1, 0xB2)),
+                        signers: vec![
+                            (PublicKeyBytes([0xB1; 32]), 0x0101010101010101),
+                            (PublicKeyBytes([0xB2; 32]), 0x0202020202020202),
+                        ],
+                        path: vec![Hash([0xC1; 32]), Hash([0xC2; 32])],
+                    },
+                    RankPair {
+                        left: pou_fixture(40, 2, 0xB3),
+                        right: None,
+                        signers: vec![(PublicKeyBytes([0xB3; 32]), 0x0303030303030303)],
+                        path: vec![Hash([0xC3; 32]), Hash([0xC4; 32])],
+                    },
+                ],
+            }),
+        ),
+        (
+            "audit_gossip",
+            "App D §D.4.18",
+            Frame::AuditGossip(AuditGossip {
+                accuser: NodeId([0xA1; 32]),
+                accuser_key: (PublicKeyBytes([0xA1; 32]), 0x0202020202020202),
+                rank_proof: None,
+                accusations: vec![Accusation {
+                    suspect: NodeId([0xB1; 32]),
+                    evidence_type: EvidenceType::SymmetricTreePair,
+                    first: pou_fixture(41, 1, 0xB1),
+                    second: pou_fixture(41, 1, 0xA1),
+                    signers: vec![
+                        (PublicKeyBytes([0xB1; 32]), 0x0101010101010101),
+                        (PublicKeyBytes([0xA1; 32]), 0x0202020202020202),
+                    ],
+                    timestamp_us: 1_700_000_000_600_000,
+                    signature: SignatureBytes([0xA3; 64]),
+                }],
+            }),
+        ),
+        (
+            "punch_request",
+            "App D §D.4.14",
+            Frame::PunchRequest(PunchFrame::Request(PunchRequest {
+                validation: vb(0x50),
+                target: NodeId([0x51; 32]),
+                stream_id: StreamId([0x52; 32]),
+            })),
+        ),
+        (
+            "punch_forward",
+            "App D §D.4.14",
+            Frame::PunchRequest(PunchFrame::Forward(PunchForward {
+                validation: vb(0x53),
+                requester: PeerRecord {
+                    node_id: NodeId([0x54; 32]),
+                    node_class: NodeClass::Relay,
+                    assigned_trees: TreeSet(0b0000_0010),
+                    flags: PeerFlags {
+                        reachability: Reachability::Cone,
+                        relay_capable: false,
+                        source: false,
+                        source_ingress: false,
+                    },
+                    addr: WireAddr(SocketAddr::new(Ipv4Addr::new(192, 0, 2, 84).into(), 4084)),
+                },
+                stream_id: StreamId([0x52; 32]),
+            })),
+        ),
+        (
+            "relay_proposal",
+            "Ch6 §6.3.3",
+            Frame::RelayProposal(RelayProposal {
+                target: NodeId([0x60; 32]),
+                target_port: 4060,
+                tree_id: TreeId(2),
+                bind_flags: 0,
+            }),
+        ),
+        (
+            "relay_bind",
+            "Ch6 §6.3.3",
+            Frame::RelayBind(RelayBind {
+                client_a: NodeId([0x61; 32]),
+                client_b: NodeId([0x62; 32]),
+                tree_id: TreeId(2),
+                bind_flags: 0,
             }),
         ),
     ]

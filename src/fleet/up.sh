@@ -25,6 +25,10 @@ if [ -n "$FILE" ]; then cp "$FILE" media/sample.mp4; fi
 EXPECT_HASH=""
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 echo "$RUN_ID" > .last_run_id
+# report.py reads these as defaults (profile-specific PSR bound, publisher start delay).
+rm -f .churned
+START_DELAY="${BS_START_DELAY_S:-8}"
+printf 'BS_RUN_ID=%s\nBS_NETEM_PROFILE=%s\nBS_START_DELAY_S=%s\nBS_SEED=%s\n' "$RUN_ID" "$PROFILE" "$START_DELAY" "$SEED" > .last_run.env
 # Start from a clean slate: previous containers and their results volume.
 docker compose down -v --remove-orphans >/dev/null 2>&1 || true
 export BS_RUN_ID="$RUN_ID" BS_SEED="$SEED" BS_NETEM_PROFILE="$PROFILE" BS_DURATION_S="$DURATION" BS_EXPECT_HASH="$EXPECT_HASH" BS_MAX_BYTES="$MAX_BYTES" BS_INGEST="$INGEST" BS_RENDITIONS="$RENDITIONS"

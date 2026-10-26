@@ -1,0 +1,46 @@
+# Ch1 §1.1.5 §5.6. Three trees carry three layers (1.5, 1.5 and 3.0 Mbps stripes) to
+# relays that can serve one 1.5 Mbps child each, so two thirds of the swarm cannot find
+# a base-layer parent. The starved re-queries reach the guardians, the source folds the
+# top layer, and the base layer is served to everyone under the two-layer mapping.
+seed = 11
+duration_s = 120.0
+forest_size = 3
+
+[params]
+dynamic_forest = true
+# The ladder is pinned at three trees: this gate tests the fold, not the resize.
+forest_ladder_relays = [0, 0, 0, 0, 1000, 1000, 1000]
+
+[publisher]
+upload_kbps = 20000
+
+[[viewers]]
+label = "viewers"
+count = 24
+class = "relay"
+upload_kbps = { min = 2400.0, max = 2600.0 }
+top_layer = 2
+join_s = { min = 1.0, max = 10.0 }
+
+[network]
+regions = 2
+
+# Two thirds of the viewers wait for the fold before their first chunk: the join
+# latency here is the fold latency.
+[kpis]
+psr_max = 0.5
+sjl_mean_max_s = 30.0
+sjl_p95_max_s = 60.0
+active_fraction_min = 0.9
+cdo_max = 0.3
+# Repairs here are the starved base-tree joins that complete only after the fold, which
+# the dwell (Ch1 §1.2.1 §1.4) holds back for 30 s.
+repair_median_max_s = 10.0
+repair_p95_max_s = 30.0
+
+[kpis.facts_max]
+forest_layers = 2
+"psr:viewers" = 0.5
+
+[kpis.facts_min]
+forest_version = 2

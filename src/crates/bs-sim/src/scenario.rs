@@ -154,6 +154,8 @@ pub struct PublisherSpec {
     pub region: u8,
     /// Start time.
     pub start_s: f64,
+    /// NAT class: `public` (default), `cone` or `symmetric` (Ch6 §6.3.3).
+    pub nat: String,
 }
 impl Default for PublisherSpec {
     fn default() -> Self {
@@ -161,6 +163,7 @@ impl Default for PublisherSpec {
             upload_kbps: 100_000,
             region: 0,
             start_s: 0.0,
+            nat: "public".into(),
         }
     }
 }
@@ -185,6 +188,11 @@ pub struct ViewerGroup {
     pub leave_s: Option<Range>,
     /// Region; `None` = random over the network's regions.
     pub region: Option<u8>,
+    /// `honest` (default), `no_receipts` (never issues PROOF_OF_UPLOAD),
+    /// `no_pull_service` (never answers PULL_REQUEST) or `freeloader` (both).
+    pub behaviour: String,
+    /// NAT class: `public` (default), `cone` or `symmetric` (Ch6 §6.1).
+    pub nat: String,
 }
 impl Default for ViewerGroup {
     fn default() -> Self {
@@ -200,6 +208,8 @@ impl Default for ViewerGroup {
             join_s: Range { min: 1.0, max: 5.0 },
             leave_s: None,
             region: None,
+            behaviour: "honest".into(),
+            nat: "public".into(),
         }
     }
 }
@@ -237,6 +247,9 @@ pub struct NetworkSpec {
     pub discovery_rtt_ms: f64,
     /// Per-packet overhead bytes (UDP/IP/QUIC).
     pub packet_overhead: u32,
+    /// Probability that a SYMMETRIC peer's punch into a CONE peer works, per pair
+    /// (Ch6 §6.1: 95 % for restricted cones, 10 % for port-restricted ones).
+    pub symmetric_cone_punch: f64,
 }
 impl Default for NetworkSpec {
     fn default() -> Self {
@@ -257,6 +270,7 @@ impl Default for NetworkSpec {
             idle_timeout_s: 1.0,
             discovery_rtt_ms: 60.0,
             packet_overhead: 60,
+            symmetric_cone_punch: 1.0,
         }
     }
 }
@@ -335,10 +349,17 @@ pub struct KpiThresholds {
     pub require_hash_match: bool,
     /// Fraction of viewers that must reach ACTIVE.
     pub active_fraction_min: f64,
+    /// Upper bounds on numeric verdict facts (e.g. `queue_drops = 100`,
+    /// `"psr:honest" = 0.001`), reported as KPIs `fact:<name>`.
+    pub facts_max: std::collections::BTreeMap<String, f64>,
+    /// Lower bounds on numeric verdict facts.
+    pub facts_min: std::collections::BTreeMap<String, f64>,
 }
 impl Default for KpiThresholds {
     fn default() -> Self {
         Self {
+            facts_max: Default::default(),
+            facts_min: Default::default(),
             psr_max: 0.001,
             // M1: no late-join backfill yet, so the first frame renders Δ_buffer (3 s)
             // after the first manifest. M3 (MANIFEST_REQUEST + PULL) targets 1.5 s.

@@ -11,3 +11,5 @@
 .DS_Store
 /fleet/media
 /fleet/.last_run_id
+/fleet/.last_run.env
+/fleet/.churned

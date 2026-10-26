@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use bs_core::{Channel, Duration, Instant};
+use bs_wire::Reachability;
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 
@@ -28,6 +29,8 @@ pub struct Endpoint {
     pub queue_drops: u64,
     /// Datagrams dropped by random loss.
     pub loss_drops: u64,
+    /// NAT class (Ch6 §6.1).
+    pub reach: Reachability,
 }
 
 /// The network.
@@ -38,6 +41,12 @@ pub struct Network {
     stream_tail: HashMap<(SocketAddr, SocketAddr, u8), Instant>,
     /// Open sessions (unordered pair).
     sessions: HashMap<(SocketAddr, SocketAddr), ()>,
+    /// NAT mappings: (host behind a NAT, remote) → last outbound packet.
+    mappings: HashMap<(SocketAddr, SocketAddr), Instant>,
+    /// How long a mapping stays open.
+    mapping_ttl: Duration,
+    /// Packets dropped by a closed NAT mapping.
+    pub nat_drops: u64,
     pair_seed: u64,
     /// Current datagram loss (scriptable).
     pub loss: f64,
@@ -61,12 +70,15 @@ impl Network {
             endpoints: HashMap::new(),
             stream_tail: HashMap::new(),
             sessions: HashMap::new(),
+            mappings: HashMap::new(),
+            mapping_ttl: Duration::from_secs(30),
+            nat_drops: 0,
             pair_seed: seed,
         }
     }
 
     /// Add a host.
-    pub fn add(&mut self, addr: SocketAddr, region: u8, upload_kbps: u32) {
+    pub fn add(&mut self, addr: SocketAddr, region: u8, upload_kbps: u32, reach: Reachability) {
         self.endpoints.insert(
             addr,
             Endpoint {
@@ -78,8 +90,58 @@ impl Network {
                 tx_control: 0,
                 queue_drops: 0,
                 loss_drops: 0,
+                reach,
             },
         );
+    }
+
+    /// Whether a packet from `from` passes `to`'s NAT now (Ch6 §6.1).
+    ///
+    /// A PUBLIC host takes anything. A CONE or SYMMETRIC host takes a packet only
+    /// from an address it sent to within the mapping TTL.
+    pub fn can_reach(&self, now: Instant, from: SocketAddr, to: SocketAddr) -> bool {
+        match self.endpoints.get(&to).map(|e| e.reach) {
+            None | Some(Reachability::Public) => true,
+            Some(to_reach) => {
+                let open = self
+                    .mappings
+                    .get(&(to, from))
+                    .map(|t| now.duration_since(*t) <= self.mapping_ttl)
+                    .unwrap_or(false);
+                // A symmetric sender's port differs per destination. A cone target's
+                // mapping matches it for the pair fraction the spec's matrix gives.
+                let from_sym = self
+                    .endpoints
+                    .get(&from)
+                    .map(|e| e.reach == Reachability::Symmetric)
+                    .unwrap_or(false);
+                if open && from_sym && to_reach == Reachability::Cone {
+                    return self.pair_coin(from, to) < self.spec.symmetric_cone_punch;
+                }
+                open
+            }
+        }
+    }
+
+    /// A stable number in [0, 1) for a pair.
+    fn pair_coin(&self, a: SocketAddr, b: SocketAddr) -> f64 {
+        let mut h: u64 = self.pair_seed ^ 0x9E37_79B9_7F4A_7C15;
+        for x in [a, b] {
+            for byte in x.to_string().bytes() {
+                h = (h ^ byte as u64).wrapping_mul(0x100_0000_01B3);
+            }
+        }
+        (h >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// Record an outbound packet from `from` to `to` that no frame carries.
+    pub fn note_outbound(&mut self, now: Instant, from: SocketAddr, to: SocketAddr) {
+        self.mappings.insert((from, to), now);
+    }
+
+    /// Set the mapping TTL.
+    pub fn set_mapping_ttl(&mut self, ttl: Duration) {
+        self.mapping_ttl = ttl;
     }
     /// Whether alive.
     pub fn alive(&self, a: &SocketAddr) -> bool {
@@ -179,10 +241,17 @@ impl Network {
         let jitter =
             Duration::from_secs_f64(rng.random_range(0.0..=self.spec.jitter_ms.max(0.0)) / 1000.0);
         let wire_bytes = bytes as u64 + self.spec.packet_overhead as u64;
+        // The sender's own NAT opens (or refreshes) a mapping toward `to`.
+        self.mappings.insert((from, to), now);
+        let passes = self.can_reach(now, from, to);
         let Some(e) = self.endpoints.get_mut(&from) else {
             return Delivery::Dropped;
         };
         if !e.alive {
+            return Delivery::Dropped;
+        }
+        if !passes {
+            self.nat_drops += 1;
             return Delivery::Dropped;
         }
         // Egress serialisation.

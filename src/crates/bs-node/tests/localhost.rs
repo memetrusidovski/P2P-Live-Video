@@ -43,6 +43,7 @@ async fn publisher_and_two_viewers_stream_a_file_byte_exact() {
             forest_size: 3,
         },
         node_class: NodeClass::Relay,
+        reachability: Some(bs_wire::Reachability::Public),
         listen: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
         advertise_ip: None,
         bootstrap: None,
@@ -72,6 +73,7 @@ async fn publisher_and_two_viewers_stream_a_file_byte_exact() {
         let h = start(RunConfig {
             role: Role::Viewer { top_layer: 2 },
             node_class: class,
+            reachability: Some(bs_wire::Reachability::Public),
             listen: "127.0.0.1:0".parse().unwrap(),
             advertise_ip: None,
             bootstrap: Some(bootstrap),

@@ -10,7 +10,7 @@ use bs_core::{
     Role,
 };
 use bs_media::{FileSource, Source, SyntheticSource};
-use bs_wire::{Frame, FrameType, NodeClass};
+use bs_wire::{Frame, FrameType, NodeClass, Reachability};
 use bytes::Bytes;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -27,6 +27,8 @@ pub type NodeIdx = usize;
 
 #[derive(Debug)]
 enum Kind {
+    /// A colluding node forges receipts for its partner.
+    Collude(NodeIdx),
     Start(NodeIdx),
     Kill(NodeIdx),
     Deliver {
@@ -80,6 +82,49 @@ impl Ord for Ev {
     }
 }
 
+/// Scripted misbehaviour (Ch8 adversarial scenarios).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Behaviour {
+    /// Follows the protocol.
+    Honest,
+    /// Never issues PROOF_OF_UPLOAD receipts.
+    NoReceipts,
+    /// Never answers PULL_REQUESTs (drops its BLOCK_TRANSMISSIONs).
+    NoPullService,
+    /// Both.
+    Freeloader,
+    /// Signs receipts for a partner that never sent the bytes (Ch5 §5.3.1).
+    Collude,
+}
+
+impl Behaviour {
+    fn parse(s: &str) -> Self {
+        match s {
+            "no_receipts" => Behaviour::NoReceipts,
+            "no_pull_service" => Behaviour::NoPullService,
+            "freeloader" => Behaviour::Freeloader,
+            "collude" => Behaviour::Collude,
+            _ => Behaviour::Honest,
+        }
+    }
+    fn drops(self, ty: FrameType) -> bool {
+        match self {
+            Behaviour::Honest => false,
+            Behaviour::NoReceipts => ty == FrameType::PROOF_OF_UPLOAD,
+            Behaviour::NoPullService => ty == FrameType::BLOCK_TRANSMISSION,
+            Behaviour::Freeloader => {
+                ty == FrameType::PROOF_OF_UPLOAD || ty == FrameType::BLOCK_TRANSMISSION
+            }
+            Behaviour::Collude => false,
+        }
+    }
+}
+
+/// Seconds after a colluder starts before it begins to re-join for better slots.
+const SHOP_START_S: u64 = 15;
+/// Seconds between a colluder's re-joins.
+const SHOP_PERIOD_S: u64 = 10;
+
 /// A simulated peer.
 pub struct SimNode {
     /// The protocol state machine.
@@ -94,6 +139,8 @@ pub struct SimNode {
     timer_at: Option<Instant>,
     /// Whether this node poisons blocks it forwards (adversarial scenarios).
     pub poison: bool,
+    /// Scripted misbehaviour from the viewer group.
+    pub behaviour: Behaviour,
     /// Start time.
     pub started_at: Option<Instant>,
 }
@@ -128,14 +175,17 @@ pub struct Sim {
     scripted_done: Vec<bool>,
 }
 
+/// One /24 per node: prefix-keyed rules (eviction and optimistic cooldowns, Ch5
+/// §5.1.3 and §5.2.1; the prefix cap of Ch2 §2.2.2) treat nodes behind one /24 as
+/// one household, which is not what a swarm of independent viewers looks like.
 fn addr_for(i: usize) -> SocketAddr {
     let i = i as u32 + 1;
     SocketAddr::new(
         IpAddr::V4(Ipv4Addr::new(
             10,
-            ((i >> 16) & 0xFF) as u8,
             ((i >> 8) & 0xFF) as u8,
             (i & 0xFF) as u8,
+            1,
         )),
         4000 + (i % 1000) as u16,
     )
@@ -198,6 +248,11 @@ impl Sim {
         // Publisher.
         let pub_addr = addr_for(0);
         let params = sim.scenario.params.clone();
+        let pub_reach = match sim.scenario.publisher.nat.to_ascii_lowercase().as_str() {
+            "cone" => Reachability::Cone,
+            "symmetric" => Reachability::Symmetric,
+            _ => Reachability::Public,
+        };
         let publisher = Node::new(NodeConfig {
             role: Role::Publisher {
                 ladder: ladder.clone(),
@@ -207,16 +262,26 @@ impl Sim {
             upload_kbps: sim.scenario.publisher.upload_kbps,
             addr: pub_addr,
             stream_id: bs_wire::StreamId::ZERO,
-            bootstrap: Vec::new(),
+            // RULE: A source behind a NAT cannot seed the DHT (Ch6 §6.3.3). Everyone,
+            //       the source included, bootstraps from the first viewer. That viewer
+            //       must be public and start first.
+            bootstrap: if pub_reach == Reachability::Public {
+                Vec::new()
+            } else {
+                vec![addr_for(1)]
+            },
             discovery: sim.scenario.discovery,
             params: params.clone(),
             seed: sim.scenario.seed,
+            reachability: Some(pub_reach),
         });
         let stream_id = publisher.stream_id();
+        sim.network.set_mapping_ttl(params.nat_mapping_ttl);
         sim.network.add(
             pub_addr,
             sim.scenario.publisher.region,
             sim.scenario.publisher.upload_kbps,
+            pub_reach,
         );
         sim.push_node(publisher, pub_addr, "publisher".into());
         let start = Instant::ZERO + Duration::from_secs_f64(sim.scenario.publisher.start_s);
@@ -245,6 +310,15 @@ impl Sim {
         Ok(sim)
     }
 
+    /// The DHT seed: the publisher, or the first viewer when the publisher is behind a NAT.
+    fn bootstrap_addr(&self) -> SocketAddr {
+        if self.scenario.publisher.nat.eq_ignore_ascii_case("public") {
+            self.nodes[0].addr
+        } else {
+            addr_for(1)
+        }
+    }
+
     fn push_node(&mut self, node: Node, addr: SocketAddr, label: String) -> NodeIdx {
         let idx = self.nodes.len();
         self.addr_index.insert(addr, idx);
@@ -255,6 +329,7 @@ impl Sim {
             alive: true,
             timer_at: None,
             poison: false,
+            behaviour: Behaviour::Honest,
             started_at: None,
         });
         idx
@@ -282,6 +357,11 @@ impl Sim {
             } else {
                 NodeClass::Relay
             };
+            let reach = match g.nat.to_ascii_lowercase().as_str() {
+                "cone" => Reachability::Cone,
+                "symmetric" => Reachability::Symmetric,
+                _ => Reachability::Public,
+            };
             let node = Node::new(NodeConfig {
                 role: Role::Viewer {
                     top_layer: g.top_layer,
@@ -290,8 +370,13 @@ impl Sim {
                 upload_kbps: upload,
                 addr,
                 stream_id,
-                bootstrap: vec![self.nodes[0].addr],
+                bootstrap: if self.bootstrap_addr() == addr {
+                    Vec::new()
+                } else {
+                    vec![self.bootstrap_addr()]
+                },
                 discovery: self.scenario.discovery,
+                reachability: Some(reach),
                 params: params.clone(),
                 seed: self
                     .scenario
@@ -299,9 +384,18 @@ impl Sim {
                     .wrapping_mul(1_000_003)
                     .wrapping_add(idx as u64),
             });
-            self.network.add(addr, region, upload);
+            self.network.add(addr, region, upload, reach);
             let i = self.push_node(node, addr, g.label.clone());
+            self.nodes[i].behaviour = Behaviour::parse(&g.behaviour);
             let join = offset_s + rng.random_range(g.join_s.min..=g.join_s.max);
+            if self.nodes[i].behaviour == Behaviour::Collude {
+                // Colluders pair up within the group: each forges receipts for the next
+                // member, every segment, once both are up.
+                self.schedule(
+                    Instant::ZERO + Duration::from_secs_f64(join + 5.0),
+                    Kind::Collude(i),
+                );
+            }
             self.schedule(
                 Instant::ZERO + Duration::from_secs_f64(join),
                 Kind::Start(i),
@@ -333,6 +427,7 @@ impl Sim {
                 Kind::End => break,
                 Kind::Start(i) => self.start_node(i),
                 Kind::Kill(i) => self.kill_node(i, "scripted leave"),
+                Kind::Collude(i) => self.collude_tick(i),
                 Kind::Deliver {
                     to,
                     from,
@@ -366,6 +461,7 @@ impl Sim {
                     if self.nodes[a].alive && self.nodes[b].alive {
                         let (aa, ab) = (self.nodes[a].addr, self.nodes[b].addr);
                         self.network.open_session(aa, ab);
+                        self.network.note_outbound(self.now, ab, aa);
                         let ida = self.nodes[a].node.node_id();
                         let idb = self.nodes[b].node.node_id();
                         let key = session_key(self.scenario.seed, aa, ab);
@@ -557,6 +653,49 @@ impl Sim {
         }
     }
 
+    /// Forge one receipt per tree for the colluder's partner (the next colluder in
+    /// the same group), then reschedule one segment later.
+    fn collude_tick(&mut self, i: NodeIdx) {
+        if !self.nodes[i].alive {
+            return;
+        }
+        let label = self.nodes[i].label.clone();
+        let group: Vec<usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.label == label && n.behaviour == Behaviour::Collude)
+            .map(|(j, _)| j)
+            .collect();
+        if group.len() >= 2 {
+            let pos = group.iter().position(|j| *j == i).unwrap_or(0);
+            // Pairs: members 0 and 1, 2 and 3, and so on; each signs for the other.
+            let partner = group[(pos ^ 1).min(group.len() - 1)];
+            if self.nodes[partner].alive && self.nodes[partner].started_at.is_some() {
+                let (addr, id) = (self.nodes[partner].addr, self.nodes[partner].node.node_id());
+                let m = self.nodes[i].node.trees().len() as u8;
+                for t in 1..=m {
+                    self.nodes[i]
+                        .node
+                        .forge_receipt(addr, id, bs_wire::TreeId(t));
+                }
+                // A colluder shops its pumped rank. Every SHOP_PERIOD_S it drops one
+                // parent, trees in turn, and re-joins with a fresh proof.
+                let elapsed = self
+                    .now
+                    .duration_since(self.nodes[i].started_at.unwrap())
+                    .as_millis()
+                    / 1000;
+                if m > 0 && elapsed >= SHOP_START_S && elapsed % SHOP_PERIOD_S == 0 {
+                    let t = ((elapsed / SHOP_PERIOD_S) % m as u64) as u8 + 1;
+                    self.nodes[i].node.shop_parent(bs_wire::TreeId(t));
+                }
+                self.feed(i, Input::Tick);
+            }
+        }
+        self.schedule(self.now + Duration::from_secs(1), Kind::Collude(i));
+    }
+
     fn alive_viewers(&self, class: &str) -> Vec<usize> {
         (1..self.nodes.len())
             .filter(|&i| self.nodes[i].alive)
@@ -614,6 +753,10 @@ impl Sim {
                     to,
                     &mut self.log,
                 );
+                if self.nodes[i].behaviour.drops(frame.frame_type()) {
+                    self.kpis.freeload_drops += 1;
+                    return;
+                }
                 let mut frame = frame;
                 if self.nodes[i].poison {
                     if let Frame::RaptorQSymbol(s) = &mut frame {
@@ -666,7 +809,11 @@ impl Sim {
                 let Some(&j) = self.addr_index.get(&peer) else {
                     return;
                 };
-                if self.network.alive(&peer) {
+                // The handshake is outbound from `from`: it passes the peer's NAT only
+                // through an open mapping, and it opens our own toward the peer.
+                let reachable = self.network.can_reach(self.now, from, peer);
+                self.network.note_outbound(self.now, from, peer);
+                if self.network.alive(&peer) && reachable {
                     let d = self.network.session_open_delay(&from, &peer);
                     self.schedule(self.now + d, Kind::SessionOpen { a: i, b: j });
                 } else {

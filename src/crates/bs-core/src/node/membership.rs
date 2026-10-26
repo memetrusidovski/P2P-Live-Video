@@ -103,7 +103,13 @@ impl Node {
         if r.node_id == self.node_id() {
             return;
         }
-        if r.flags.source {
+        // RULE: An ingress relay stands in for a source behind a NAT (Ch6 §6.3.3).
+        //       A reachable source record is never replaced by an unreachable one.
+        if r.flags.source_ingress
+            || (r.flags.source
+                && (r.flags.reachability != bs_wire::Reachability::Symmetric
+                    || self.source_record.is_none()))
+        {
             self.source_record = Some(r);
         }
         let known_active = self
@@ -505,6 +511,7 @@ impl Node {
     /// SHUFFLE: integrate, then forward (ttl > 0) or answer (ttl == 0).
     pub(super) fn on_shuffle(&mut self, from: PeerAddr, s: Shuffle) {
         self.membership.shuffles += 1;
+        self.note_referrer(&s.records, from);
         for r in &s.records {
             self.passive_insert(*r);
         }
@@ -589,6 +596,7 @@ impl Node {
         a.seq_in_max = g.sequence;
         a.wants = g.wanted_trees;
         self.membership.exchanges += 1;
+        self.note_referrer(&g.records, from);
         for r in &g.records {
             self.passive_insert(*r);
         }

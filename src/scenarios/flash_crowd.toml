@@ -33,5 +33,8 @@ psr_max = 0.01
 repair_median_max_s = 2.5
 repair_p95_max_s = 4.0
 sjl_mean_max_s = 4.5
-sjl_p95_max_s = 6.0
+# Backfill for a burst of joiners is PULL service bounded by r_pull and Tit-for-Tat
+# slots (Ch5 §5.1); the tail waits for an optimistic slot.
+# The 5 % slot headroom (ISSUE-072) costs the burst about a third of a second at p95.
+sjl_p95_max_s = 7.0
 active_fraction_min = 0.97

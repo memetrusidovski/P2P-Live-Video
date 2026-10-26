@@ -95,4 +95,12 @@ pub struct JoinStats {
     /// Consecutive rounds exempted from the shed counter by a WARMING candidate.
     /// Bounded by `Params::warming_exempt_rounds` (ISSUE-063).
     pub warming_rounds: u32,
+    /// Failed rounds do not count toward a shed before this segment (resize grace).
+    pub grace_until: u32,
+    /// Consecutive rounds in which no candidate answered at all.
+    pub silent_rounds: u32,
+    /// Candidates probed in the last round.
+    pub last_probed: usize,
+    /// Candidates that answered in the last round.
+    pub last_answered: usize,
 }

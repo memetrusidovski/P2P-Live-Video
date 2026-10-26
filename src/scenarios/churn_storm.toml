@@ -33,6 +33,9 @@ class = "relay"
 regions = 3
 
 [kpis]
+# Late-join backfill is PULL service, bounded by the r_pull reserve and Tit-for-Tat
+# slots (Ch5 §5.1): under a join storm the tail waits for a slot.
+sjl_p95_max_s = 5.0
 psr_max = 0.02
 # Median repair is the Ch3 §3.3 path (detect + re-attach); the tail after losing
 # 30% of the relays is capacity-bound until survivors warm up.
