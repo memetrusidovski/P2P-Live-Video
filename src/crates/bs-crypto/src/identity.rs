@@ -89,6 +89,21 @@ impl Identity {
         }
     }
 
+    /// Verify a validation block without the address binding: the static puzzle and
+    /// the packet signature only. A receiver that answers a reflection request uses
+    /// this, because the sender cannot know its observed address before the answer.
+    pub fn verify_validation_block_unbound(
+        vb: &ValidationBlock,
+        frame_type: FrameType,
+        body: &[u8],
+        difficulty: Difficulty,
+    ) -> Result<(), CryptoError> {
+        pow::verify_static(&vb.public_key, vb.static_nonce, &vb.node_id, difficulty.c1)?;
+        let pre = ValidationBlock::signed_message(frame_type, vb.timestamp_us, body);
+        let digest = blake3::hash(&pre);
+        Verifier::verify(&vb.public_key, digest.as_bytes(), &vb.signature)
+    }
+
     /// Verify a received validation block: static puzzle, dynamic puzzle against
     /// the observed source IP, and the packet signature.
     pub fn verify_validation_block(

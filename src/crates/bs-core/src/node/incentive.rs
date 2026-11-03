@@ -2,7 +2,6 @@
 //! adaptive per-link parity (Ch4 §4.2.2) and the Tit-for-Tat PULL unchoker (Ch5 §5.1).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::net::IpAddr;
 
 use bs_crypto::Signer;
 use bs_wire::consts::{BLOCK_SIZE, K_BLOCK};
@@ -14,6 +13,19 @@ use super::{Lifecycle, Node};
 use crate::io::{Channel, Event, PeerAddr};
 use crate::swarm::VerifiedBlock;
 use crate::time::Instant;
+
+/// The canonical key of a receipt: (segment, tree, flags, downloader), Ch5 §5.2.2.
+pub type ReceiptKey = (u32, u8, u8, [u8; 32]);
+
+/// The smallest key of a segment, for range bounds.
+fn segment_floor(segment: u32) -> ReceiptKey {
+    (segment, 0, 0, [0u8; 32])
+}
+
+/// The largest key of a segment, for range bounds.
+fn segment_ceil(segment: u32) -> ReceiptKey {
+    (segment, u8::MAX, u8::MAX, [u8::MAX; 32])
+}
 
 /// A receipt we hold as uploader.
 #[derive(Debug, Clone)]
@@ -75,8 +87,10 @@ pub struct IncentiveState {
     /// Providers that have unchoked us (we only ask these).
     pub unchoked_by: BTreeSet<PeerAddr>,
     // ---- uploader side
-    /// Receipts naming us as uploader, within the rank window.
-    pub receipts: Vec<StoredReceipt>,
+    /// Receipts naming us as uploader, within the rank window, keyed by canonical key
+    /// (segment, tree, flags, downloader) so the window trims and the proof's sorted
+    /// list are range operations (ISSUE-088).
+    pub receipts: BTreeMap<ReceiptKey, StoredReceipt>,
     child_receipts: BTreeMap<(u8, PeerAddr), ChildReceipts>,
     /// Peers that missed a receipt deadline (ingress counts as 0 this cycle).
     deadline_missed: BTreeSet<PeerAddr>,
@@ -103,14 +117,7 @@ pub struct IncentiveState {
     pub pulls_choked: u64,
 }
 
-pub(super) fn prefix_key(ip: IpAddr) -> [u8; 8] {
-    let mut k = [0u8; 8];
-    match ip {
-        IpAddr::V4(v4) => k[..3].copy_from_slice(&v4.octets()[..3]),
-        IpAddr::V6(v6) => k[..6].copy_from_slice(&v6.octets()[..6]),
-    }
-    k
-}
+pub(super) use crate::dht::prefix_key;
 
 /// `E = max(1, ⌈clamp(2ρK, 0.05K, 0.30K)⌉)` (Ch4 §4.2.2).
 pub fn parity_for_loss(loss_byte: u8) -> u16 {
@@ -157,9 +164,8 @@ impl Node {
         let bytes: u64 = self
             .incentive
             .receipts
-            .iter()
-            .filter(|r| r.pou.segment.0 >= lo && r.pou.segment.0 <= edge)
-            .map(|r| r.weight as u64 * r.capped_bytes)
+            .range(segment_floor(lo)..=segment_ceil(edge))
+            .map(|(_, r)| r.weight as u64 * r.capped_bytes)
             .sum();
         bytes as f64 * 8.0 / 60.0
     }
@@ -169,7 +175,7 @@ impl Node {
         let lambda = self.params.receipt_decay_lambda;
         self.incentive
             .receipts
-            .iter()
+            .values()
             .map(|r| {
                 let age = self.now.duration_since(r.at).as_secs_f64();
                 r.weight as f64 * r.capped_bytes as f64 * (-lambda * age).exp()
@@ -440,25 +446,19 @@ impl Node {
         let key = pou.canonical_key();
         // One receipt per canonical key. A replacement with another bitmap is an
         // equivocation by the signer (Ch5 §5.3.3).
-        if let Some(old) = self
-            .incentive
-            .receipts
-            .iter()
-            .find(|r| r.pou.canonical_key() == key)
-            .map(|r| r.pou.clone())
-        {
+        if let Some(old) = self.incentive.receipts.get(&key).map(|r| r.pou.clone()) {
             self.audit_check_equivocation(&old, &pou);
         }
-        self.incentive
-            .receipts
-            .retain(|r| r.pou.canonical_key() != key);
         let (tree, seg, loss) = (pou.tree_id, pou.segment.0, pou.loss_rate);
-        self.incentive.receipts.push(StoredReceipt {
-            pou,
-            capped_bytes: capped,
-            weight,
-            at: self.now,
-        });
+        self.incentive.receipts.insert(
+            key,
+            StoredReceipt {
+                pou,
+                capped_bytes: capped,
+                weight,
+                at: self.now,
+            },
+        );
         self.incentive.receipts_accepted += 1;
         self.emit(Event::ReceiptAccepted {
             tree: tree.0,
@@ -483,9 +483,10 @@ impl Node {
             }
             self.apply_loss_report(from, tree, loss);
         }
-        // Trim the ledger to the rank window.
+        // Trim the ledger to the rank window: one split at the window's first segment.
         let lo = edge.saturating_sub(self.params.rank_window_segments);
-        self.incentive.receipts.retain(|r| r.pou.segment.0 >= lo);
+        let kept = self.incentive.receipts.split_off(&segment_floor(lo));
+        self.incentive.receipts = kept;
     }
 
     /// Adaptive parity: recompute this child's parity from its loss report, and the

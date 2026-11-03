@@ -104,14 +104,22 @@ impl Node {
             return;
         }
         // RULE: An ingress relay stands in for a source behind a NAT (Ch6 §6.3.3).
-        //       A reachable source record is never replaced by an unreachable one.
+        //       A reachable source record is never replaced by an unreachable one. A
+        //       record that claims SOURCE never replaces a known source with another
+        //       identity (ISSUE-085).
+        let same_source = self
+            .source_record
+            .map(|s| !s.flags.source || s.node_id == r.node_id)
+            .unwrap_or(true);
         if r.flags.source_ingress
             || (r.flags.source
+                && same_source
                 && (r.flags.reachability != bs_wire::Reachability::Symmetric
                     || self.source_record.is_none()))
         {
             self.source_record = Some(r);
         }
+        self.note_prefix(r.addr.0.ip());
         let known_active = self
             .membership
             .active
@@ -357,6 +365,20 @@ impl Node {
             return true;
         }
         let target = self.active_target();
+        // SECURITY: At most prefix_cap(c_a_eff) Active Set members per /24 or /48
+        //           (Ch2 §2.2.2, App C), at any priority.
+        let cap = self.prefix_cap(target.max(1));
+        let k = crate::dht::prefix_key(addr.ip());
+        let same = self
+            .membership
+            .active
+            .keys()
+            .filter(|a| crate::dht::prefix_key(a.ip()) == k)
+            .count();
+        if cap < target && same >= cap {
+            return false;
+        }
+        self.note_prefix(addr.ip());
         if self.membership.active.len() >= target {
             if !force {
                 return false;

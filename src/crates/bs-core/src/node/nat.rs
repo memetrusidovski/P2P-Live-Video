@@ -74,6 +74,11 @@ pub struct NatState {
     ingress_tried: BTreeSet<NodeId>,
     /// Relay: we are an ingress relay for the source at this address.
     ingress_source: Option<PeerAddr>,
+    /// The address the identity was bound to before a rebind; reflections are judged
+    /// against it so a rebound node still classifies its NAT.
+    bound_addr: Option<PeerAddr>,
+    /// A SOURCE_INGRESS proposal waiting for the proposer's key (one PING round).
+    pending_ingress: Option<PeerAddr>,
     /// Source: when the guardians were last asked for relays.
     ingress_query_at: Option<Instant>,
     /// Counters.
@@ -249,16 +254,27 @@ impl Node {
     }
 
     /// Relay: the source proposes that we become its ingress (Ch6 §6.3.3).
-    fn on_ingress_proposal(&mut self, from: PeerAddr) {
+    pub(super) fn on_ingress_proposal(&mut self, from: PeerAddr) {
         let Some(peer) = self.sessions.get(&from).and_then(|s| s.node_id) else {
             return;
         };
-        // SECURITY: Only the stream's publisher can bind an ingress relay: the session
-        //           identity must be the one the Stream Record names.
-        let is_publisher = self
-            .source_record
-            .map(|r| r.node_id == peer && r.flags.source)
-            .unwrap_or(false);
+        // SECURITY: Only the stream's publisher can bind an ingress relay. The proof is
+        //           the proposer's key: StreamID = Blake3(PublisherPubKey) (Ch2 §2.3.1),
+        //           never a self-declared record flag (ISSUE-085).
+        let key = self.incentive.known_keys.get(&peer).map(|(pk, _)| *pk);
+        let is_publisher = match key {
+            Some(pk) => bs_crypto::stream_id(&pk) == self.stream_id(),
+            None => {
+                // The key arrives with the PONG; judge the proposal then.
+                if self.nat.pending_ingress.is_none() {
+                    self.nat.pending_ingress = Some(from);
+                    self.send_ping(from);
+                    return;
+                }
+                false
+            }
+        };
+        self.nat.pending_ingress = None;
         let Some(matrix) = self.matrix.clone() else {
             return;
         };
@@ -320,10 +336,48 @@ impl Node {
         self.check_active();
     }
 
+    /// Bind the identity to the address the swarm observes, once, after the first
+    /// verified reflection that differs from the configured address.
+    ///
+    /// Only a node that detects its reachability (`reachability: None`, a real viewer)
+    /// rebinds; the simulator and the publisher state their address.
+    pub(super) fn maybe_rebind(&mut self, reflected: WireAddr) {
+        if self.cfg.reachability.is_some()
+            || self.nat.bound_addr.is_some()
+            || reflected.0 == self.cfg.addr
+            || reflected.0.ip().is_unspecified()
+        {
+            return;
+        }
+        // WHY: The dynamic puzzle binds the NodeID to the observed address (Ch2 §2.2.1).
+        //      Peers verify every plain frame against its source address. A node
+        //      behind a NAT must solve for the address they see.
+        self.nat.bound_addr = Some(self.cfg.addr);
+        self.cfg.addr = reflected.0;
+        let d = bs_crypto::pow::Difficulty {
+            c1: self.params.c1,
+            c2_min: self.params.c2_min,
+        };
+        let c2 = d.dynamic_required(self.swarm_size.max(2), self.cfg.node_class, false);
+        self.dyn_nonce = self.identity.solve_dynamic(self.cfg.addr.ip(), c2);
+        self.dht.registered = None;
+        self.register_self();
+        self.emit(Event::AddressRebound { addr: reflected.0 });
+        if let Some(p) = self.nat.pending_ingress.take() {
+            self.on_ingress_proposal(p);
+        }
+    }
+
     /// A PONG reflected our address: decide reachability after two responders.
     pub(super) fn on_reflection(&mut self, from: PeerAddr, reflected: WireAddr) {
         if self.cfg.reachability.is_some() {
             return;
+        }
+        if let Some(p) = self.nat.pending_ingress {
+            if p == from {
+                // The proposer's key is known now; judge the waiting proposal.
+                self.on_ingress_proposal(p);
+            }
         }
         self.nat.reflections.insert(from, reflected);
         if self.nat.reflections.len() < 2 {
@@ -334,7 +388,8 @@ impl Node {
         seen.dedup();
         // RULE: One mapping equal to our own address is no NAT. One shared mapping is
         //       a cone. A mapping per responder is symmetric (Ch2 §2.1.3).
-        let decided = if seen.len() == 1 && seen[0].0 == self.cfg.addr {
+        let own = self.nat.bound_addr.unwrap_or(self.cfg.addr);
+        let decided = if seen.len() == 1 && seen[0].0 == own {
             Reachability::Public
         } else if seen.len() == 1 {
             Reachability::Cone

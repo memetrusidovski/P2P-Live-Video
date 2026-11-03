@@ -56,6 +56,23 @@ pub struct Contact {
     pub last_seen: Instant,
 }
 
+/// The /24 (IPv4) or /48 (IPv6) prefix of an address, the unit of the diversity caps.
+pub(crate) fn prefix_key(ip: std::net::IpAddr) -> [u8; 8] {
+    let mut k = [0u8; 8];
+    match ip {
+        std::net::IpAddr::V4(v4) => k[..3].copy_from_slice(&v4.octets()[..3]),
+        std::net::IpAddr::V6(v6) => k[..6].copy_from_slice(&v6.octets()[..6]),
+    }
+    k
+}
+
+/// `max(1, ⌈k / min(P_obs, 20)⌉)`: how many of a slot set of size `k` one prefix may
+/// hold when the node has observed `p_obs` distinct prefixes (Ch2 §2.2.2).
+pub(crate) fn prefix_cap(k: usize, p_obs: usize) -> usize {
+    let d = p_obs.clamp(1, 20);
+    k.div_ceil(d).max(1)
+}
+
 /// 256 k-buckets of reachable relay-class contacts (Ch2 §2.1.1, §2.3.2 rule 1).
 #[derive(Debug, Clone)]
 pub struct RoutingTable {
@@ -109,8 +126,9 @@ impl RoutingTable {
     }
 
     /// Insert or refresh a contact. Returns `false` when the bucket is full (the
-    /// classic Kademlia rule keeps the long-lived contacts and drops the newcomer).
-    pub fn insert(&mut self, record: PeerRecord, now: Instant) -> bool {
+    /// classic Kademlia rule keeps the long-lived contacts and drops the newcomer) or
+    /// when the bucket already holds `prefix_cap` contacts from the record's /24 or /48.
+    pub fn insert(&mut self, record: PeerRecord, now: Instant, prefix_cap: usize) -> bool {
         let Some(j) = bucket_index(&self.local, &record.node_id) else {
             return false;
         };
@@ -123,6 +141,17 @@ impl RoutingTable {
             return true;
         }
         if b.len() >= self.k {
+            return false;
+        }
+        // SECURITY: Address diversity is the Sybil bound (Ch2 §2.2.2). The cap is
+        //           relative to the prefixes this node observed. A swarm inside one
+        //           /24 still fills its buckets (SOLUTION-086).
+        let prefix = prefix_key(record.addr.0.ip());
+        if b.iter()
+            .filter(|c| prefix_key(c.record.addr.0.ip()) == prefix)
+            .count()
+            >= prefix_cap
+        {
             return false;
         }
         b.push(Contact {
@@ -487,17 +516,31 @@ mod tests {
     fn table_insert_closest_and_capacity() {
         let mut t = RoutingTable::new(NodeId([0; 32]), 2);
         let now = Instant::ZERO;
-        assert!(t.insert(rec(0x10), now));
-        assert!(t.insert(rec(0x11), now)); // same bucket as 0x10
-        assert!(!t.insert(rec(0x12), now)); // bucket full
-        assert!(t.insert(rec(0x10), now)); // refresh is always fine
-        assert!(t.insert(rec(0x80), now));
+        assert!(t.insert(rec(0x10), now, 20));
+        assert!(t.insert(rec(0x11), now, 20)); // same bucket as 0x10
+        assert!(!t.insert(rec(0x12), now, 20)); // bucket full
+        assert!(t.insert(rec(0x10), now, 20)); // refresh is always fine
+        assert!(t.insert(rec(0x80), now, 20));
         let c = t.closest(&[0x11; 32], 2, &BTreeSet::new());
         assert_eq!(c[0].node_id, NodeId([0x11; 32]));
         assert_eq!(c[1].node_id, NodeId([0x10; 32]));
         assert_eq!(t.len(), 3);
         t.remove(&NodeId([0x80; 32]));
         assert_eq!(t.len(), 2);
+    }
+
+    #[test]
+    fn prefix_cap_is_relative_to_observed_prefixes() {
+        // rec(b) addresses are 10.0.0.b: every contact is in one /24.
+        let mut t = RoutingTable::new(NodeId([0; 32]), 4);
+        let now = Instant::ZERO;
+        assert!(t.insert(rec(0x10), now, 1));
+        assert!(!t.insert(rec(0x11), now, 1)); // a second contact from the /24 at cap 1
+        assert!(t.insert(rec(0x11), now, 4)); // a swarm inside one /24 relaxes the cap
+        assert_eq!(prefix_cap(20, 1), 20);
+        assert_eq!(prefix_cap(20, 20), 1);
+        assert_eq!(prefix_cap(8, 5), 2);
+        assert_eq!(prefix_cap(6, 40), 1);
     }
 
     #[test]

@@ -177,6 +177,13 @@ pub enum Event {
         /// Highest layer still subscribed.
         top_layer: u8,
     },
+    /// A frame's validation block failed proof of work, address binding or signature.
+    ValidationRejected {
+        /// Sender.
+        from: PeerAddr,
+        /// Why.
+        error: String,
+    },
     /// A `MANIFEST_UPDATE` was made (source) or accepted (peer).
     ForestUpdateAnnounced {
         /// Matrix version.
@@ -356,6 +363,11 @@ pub enum Event {
         segment: u32,
         /// Block.
         block: u16,
+    },
+    /// The node re-bound its identity to the address the first PONG reflected.
+    AddressRebound {
+        /// The address peers observe.
+        addr: PeerAddr,
     },
     /// Reachability decided from PONG reflections (Ch2 §2.1.3).
     ReachabilityDetected {

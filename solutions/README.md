@@ -72,6 +72,7 @@ Open defects live in [`../issues/`](../issues/).
 | [050](SOLUTION-050-bridge-is-a-tree-edge.md) | Bridge is a tree edge | $R$ is $B$'s child, $A$ is $R$'s; bridges charged to the tree budget (≤ ½), reversing 032; ingress relays are budgeted roots |
 | [051](SOLUTION-051-cone-guardian-keepalive.md) | `CONE` guardian keepalive | A `PING` to each guardian every 25 s keeps the punch path alive; the NAT-timeout assumption is stated |
 | [054](SOLUTION-054-ch2-counts-and-records.md) | Ch2 counts and records | Only registration counts scale by $2^{s}$; active-only serving; Stream Record carries the pending matrix and `EffectiveSegmentSeq` |
+| [086](SOLUTION-086-prefix-caps-in-the-implementation.md) | Prefix caps in the implementation | Implementation: `max(1, ⌈K / min(P_obs, 20)⌉)` per /24 or /48 on k-buckets, Active Set, parents and children; the k-bucket cap is diversity-relative, not the unconditional 1 of 20 |
 
 ### Security and incentives
 
@@ -90,6 +91,7 @@ Open defects live in [`../issues/`](../issues/).
 | [057](SOLUTION-057-rank-is-a-cost-not-a-proof.md) | Rank is a cost, not a proof | The subnet penalty applies to resolvable signers only; forged rank via leaf-class Sybils is stated and bounded where rank is spent |
 | [017](SOLUTION-017-xdp-ddos-shield.md) | XDP DDoS shield | The kernel enforces the *result* of validation, never the validation |
 | [030](SOLUTION-030-sequence-windowed-manifest-acceptance.md) | Sequence-windowed manifests | Signature first, sequence window second, no wall clock; duplicates are never forgeries; bans are local and time-bounded |
+| [088](SOLUTION-088-receipt-ledger-index.md) | Receipt ledger index | Implementation: receipts keyed by canonical key, one lookup per receipt and one split per window trim; the `RANK_PROOF` list is a key range |
 
 ### Structure
 

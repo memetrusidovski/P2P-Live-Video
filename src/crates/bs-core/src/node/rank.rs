@@ -69,20 +69,18 @@ impl Node {
         let lo = commit_segment
             .0
             .saturating_sub(self.params.rank_window_segments);
-        let mut receipts: Vec<&ProofOfUpload> = self
+        // RULE: The list is sorted by the canonical key with one receipt per key. The
+        //       verifier binds ReceiptCount to distinct receipts through that order
+        //       (Ch5 §5.2.2). The ledger's key order is that order.
+        let receipts: Vec<&ProofOfUpload> = self
             .incentive
             .receipts
-            .iter()
-            .map(|r| &r.pou)
-            .filter(|p| p.segment.0 >= lo && p.segment.0 <= commit_segment.0)
+            .range((lo, 0, 0, [0u8; 32])..=(commit_segment.0, u8::MAX, u8::MAX, [u8::MAX; 32]))
+            .map(|(_, r)| &r.pou)
             .collect();
         if receipts.is_empty() {
             return None;
         }
-        // RULE: Sort by the canonical key and keep one receipt per key. The verifier
-        //       binds ReceiptCount to distinct receipts through that order (Ch5 §5.2.2).
-        receipts.sort_by_key(|p| p.canonical_key());
-        receipts.dedup_by_key(|p| p.canonical_key());
         let count = receipts.len() as u32;
         let mut leaves: Vec<Hash> = receipts.iter().map(|p| leaf_hash(p)).collect();
         // RULE: A single receipt forms one pair with the zero leaf. The tree must have at

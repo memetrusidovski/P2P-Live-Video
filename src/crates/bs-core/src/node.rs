@@ -116,10 +116,15 @@ pub struct Node {
     passive: BTreeMap<NodeId, PeerRecord>,
     /// Peers that delivered blocks failing verification; never chosen again this run.
     bad_peers: HashSet<NodeId>,
+    /// Distinct /24 or /48 prefixes seen on verified frames and records: `P_obs` of the
+    /// diversity-relative prefix cap (Ch2 §2.2.2).
+    observed_prefixes: BTreeSet<[u8; 8]>,
     source_record: Option<PeerRecord>,
     discovery_inflight: bool,
     out: VecDeque<Output>,
     dyn_nonce: u64,
+    /// Validation blocks that failed verification (proof of work, binding, signature).
+    vb_rejected: u64,
     next_liveness: Instant,
     /// Next greedy upward-migration evaluation (Ch1 §1.2.3).
     next_migrate: Instant,
@@ -210,10 +215,12 @@ impl Node {
             sessions: BTreeMap::new(),
             passive: BTreeMap::new(),
             bad_peers: HashSet::new(),
+            observed_prefixes: BTreeSet::new(),
             source_record: None,
             discovery_inflight: false,
             out: VecDeque::new(),
             dyn_nonce: 0,
+            vb_rejected: 0,
             next_liveness: Instant::ZERO,
             next_migrate: Instant::ZERO,
             started_at: None,
@@ -666,12 +673,40 @@ impl Node {
 
     // ------------------------------------------------------------------ join (Ch1 §1.2.2 §2.2)
 
+    /// Record a prefix this node observed.
+    pub(crate) fn note_prefix(&mut self, ip: std::net::IpAddr) {
+        self.observed_prefixes.insert(crate::dht::prefix_key(ip));
+    }
+
+    /// The slots of a set of size `k` that one prefix can hold here (Ch2 §2.2.2).
+    pub(crate) fn prefix_cap(&self, k: usize) -> usize {
+        crate::dht::prefix_cap(k, self.observed_prefixes.len())
+    }
+
     fn candidates_for(&self, tree: TreeId) -> Vec<PeerRecord> {
         let my_parents: HashSet<NodeId> = self
             .trees
             .iter()
             .filter_map(|t| t.parent.as_ref().map(|p| p.node_id))
             .collect();
+        // SECURITY: At most prefix_cap(M) parents from one /24 or /48 (Ch2 §2.2.2).
+        let m = self.trees.len().max(1);
+        let parent_cap = self.prefix_cap(m);
+        let parent_prefixes: Vec<[u8; 8]> = self
+            .trees
+            .iter()
+            .filter_map(|t| {
+                t.parent
+                    .as_ref()
+                    .map(|p| crate::dht::prefix_key(p.addr.ip()))
+            })
+            .collect();
+        let prefix_full = |r: &PeerRecord| {
+            let k = crate::dht::prefix_key(r.addr.0.ip());
+            !r.flags.source
+                && parent_cap < m
+                && parent_prefixes.iter().filter(|x| **x == k).count() >= parent_cap
+        };
         let my_children: HashSet<NodeId> = self.trees[tree.index()]
             .children
             .values()
@@ -689,6 +724,7 @@ impl Node {
             .filter(|r| !my_parents.contains(&r.node_id) || r.flags.source)
             .filter(|r| !my_children.contains(&r.node_id))
             .filter(|r| self.trees[tree.index()].avoid_parent != Some(r.node_id))
+            .filter(|r| !prefix_full(r))
             .copied()
             .collect();
         if v.is_empty() {
@@ -1360,6 +1396,32 @@ impl Node {
             });
             return;
         }
+        // SECURITY: At most prefix_cap(K_v) children per tree from one /24 or /48
+        //           (Ch2 §2.2.2, App C).
+        if idx < self.trees.len() {
+            let t = &self.trees[idx];
+            let k_v = t.k_v.max(1) as usize;
+            let cap = self.prefix_cap(k_v);
+            let k = crate::dht::prefix_key(from.ip());
+            let same = t
+                .children
+                .values()
+                .filter(|c| c.addr != from && crate::dht::prefix_key(c.addr.ip()) == k)
+                .count();
+            // A cap equal to the slot count constrains nothing: the full-tree rules
+            // (displacement, preemption) decide then.
+            if cap < k_v && same >= cap {
+                let mut f = reject(DisconnectReason::RejectedSaturated);
+                f.sender = self.node_id();
+                self.send(from, Channel::Control, Frame::Disconnect(f), None);
+                self.emit(Event::ChildRejected {
+                    tree: n.tree_id.0,
+                    child: n.sender,
+                    reason: "PrefixCap".into(),
+                });
+                return;
+            }
+        }
         let bridge = self.is_bridge_child(from, n.tree_id);
         let verdict: Result<u8, DisconnectReason> = if idx >= self.trees.len() {
             Err(DisconnectReason::RejectedNotAssigned)
@@ -2000,24 +2062,60 @@ impl Node {
             c2_min: self.params.c2_min,
         };
         let c2 = d.dynamic_accepted(self.swarm_size.max(2), class, false);
-        let ok = Identity::verify_validation_block(vb, ty, body, from.ip(), d, c2).is_ok();
-        if ok {
-            // Every verified block binds a NodeID to its key: receipts signed by this
-            // peer can be checked later (Ch5 §5.2.1).
-            self.learn_key(vb);
+        match Identity::verify_validation_block(vb, ty, body, from.ip(), d, c2) {
+            Ok(()) => {
+                // Every verified block binds a NodeID to its key: receipts signed by this
+                // peer can be checked later (Ch5 §5.2.1).
+                self.learn_key(vb);
+                self.note_prefix(from.ip());
+                true
+            }
+            Err(e) => {
+                self.vb_rejected += 1;
+                self.emit(Event::ValidationRejected {
+                    from,
+                    error: e.to_string(),
+                });
+                false
+            }
         }
-        ok
+    }
+
+    /// Validation blocks rejected so far.
+    pub fn vb_rejected(&self) -> u64 {
+        self.vb_rejected
     }
 
     fn on_ping(&mut self, from: PeerAddr, p: Ping) {
-        if !self.verify_vb(
-            &p.validation,
-            FrameType::PING,
-            p.stream_id.as_bytes(),
-            from,
-            NodeClass::Leaf,
-        ) {
+        let d = Difficulty {
+            c1: self.params.c1,
+            c2_min: self.params.c2_min,
+        };
+        let body = p.stream_id.as_bytes();
+        if let Err(e) =
+            Identity::verify_validation_block_unbound(&p.validation, FrameType::PING, body, d)
+        {
+            self.vb_rejected += 1;
+            self.emit(Event::ValidationRejected {
+                from,
+                error: e.to_string(),
+            });
             return;
+        }
+        // WHY: A peer behind a NAT binds its first PING to the address it knows, not
+        //      the one we observe. The PONG reflects the observed address so the peer
+        //      can rebind (Ch2 §2.1.3). Its key is learned only from a bound block.
+        let c2 = d.dynamic_accepted(self.swarm_size.max(2), NodeClass::Leaf, false);
+        let bound = bs_crypto::pow::verify_dynamic(
+            &p.validation.node_id,
+            from.ip(),
+            p.validation.dynamic_nonce,
+            c2,
+        )
+        .is_ok();
+        if bound {
+            self.learn_key(&p.validation);
+            self.note_prefix(from.ip());
         }
         let reflected = WireAddr(from);
         let vb = self.validation_block(FrameType::PONG, &reflected.to_vec());
@@ -2030,7 +2128,9 @@ impl Node {
             }),
             None,
         );
-        self.reprobe_after_punch(from);
+        if bound {
+            self.reprobe_after_punch(from);
+        }
     }
 
     fn on_pong(&mut self, from: PeerAddr, p: Pong) {
@@ -2039,6 +2139,7 @@ impl Node {
         let body = p.reflected.to_vec();
         if self.verify_vb(&p.validation, FrameType::PONG, &body, from, NodeClass::Leaf) {
             self.on_reflection(from, p.reflected);
+            self.maybe_rebind(p.reflected);
         }
         if let Some(s) = self.sessions.get_mut(&from) {
             if let Some(t0) = s.ping_sent_at.take() {

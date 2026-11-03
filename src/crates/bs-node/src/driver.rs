@@ -224,6 +224,24 @@ pub struct RunReport {
     pub connections: Vec<ConnStats>,
     /// QUIC datagrams the endpoint refused to queue (`send_datagram` errors).
     pub datagram_send_errors: u64,
+    /// Plain (pre-session) datagrams received on the socket.
+    #[serde(default)]
+    pub plain_frames_in: u64,
+    /// Plain sends held because the socket buffer was full.
+    #[serde(default)]
+    pub plain_sends_held: u64,
+    /// Held plain datagrams dropped when the hold queue overflowed.
+    #[serde(default)]
+    pub plain_sends_dropped: u64,
+    /// Plain frames received, per frame type.
+    #[serde(default)]
+    pub received_plain: std::collections::BTreeMap<String, u64>,
+    /// DHT RPCs this node answered.
+    #[serde(default)]
+    pub dht_rpc_served: u64,
+    /// Validation blocks rejected (proof of work, address binding or signature).
+    #[serde(default)]
+    pub vb_rejected: u64,
     /// Incentive counters (Ch5): receipts issued / accepted / rejected by reason,
     /// deadline misses by our children, children evicted for missed receipts,
     /// choke-state changes toward peers, PULL_REQUESTs refused as choked.
@@ -497,6 +515,8 @@ struct Sink {
 
 struct Driver {
     cfg: RunConfig,
+    /// Senders already warned about for a rejected validation block.
+    rejected_peers: std::collections::HashSet<SocketAddr>,
     node: Node,
     sock: Arc<DemuxSocket>,
     endpoint: quinn::Endpoint,
@@ -512,6 +532,7 @@ struct Driver {
     local_addr: SocketAddr,
     // stats
     sent: HashMap<FrameType, u64>,
+    received_plain: HashMap<FrameType, u64>,
     chunks_published: u64,
     played: u64,
     ok: u64,
@@ -617,6 +638,7 @@ impl Driver {
         let _ = (difficulty, identity);
         Ok(Self {
             cfg,
+            rejected_peers: std::collections::HashSet::new(),
             node,
             sock,
             endpoint,
@@ -631,6 +653,7 @@ impl Driver {
             stop_rx,
             local_addr,
             sent: HashMap::new(),
+            received_plain: HashMap::new(),
             chunks_published: 0,
             played: 0,
             ok: 0,
@@ -1070,6 +1093,7 @@ impl Driver {
             }
         };
         self.note_bootstrap_answered(p.from);
+        *self.received_plain.entry(frame.frame_type()).or_insert(0) += 1;
         // Every plain frame, DHT RPCs included, is the core's (Ch2 lives in bs-core).
         self.feed(Input::Frame {
             from: p.from,
@@ -1484,6 +1508,21 @@ impl Driver {
                 ..
             } => info!("tree {tree}: child admitted ({children}/{k_v})"),
             Event::LayerShed { top_layer } => warn!("shed to layer {top_layer}"),
+            Event::AddressRebound { addr } => {
+                info!("address rebound to {addr}: peers observe this node there");
+            }
+            Event::ValidationRejected { from, error } => {
+                // WHY: One line per peer. A peer bound to one address (loopback) that
+                //      sends from another (LAN) fails every block. A flood of warnings
+                //      hides the cause.
+                if self.rejected_peers.insert(*from) {
+                    warn!(
+                        "validation block from {from} rejected: {error}. Peers must reach \
+                         each other by the addresses they advertise; a node that \
+                         bootstraps via 127.0.0.1 binds its identity to 127.0.0.1"
+                    );
+                }
+            }
             Event::ReceiptIssued { .. } => self.incentives.receipts_issued += 1,
             Event::ReceiptAccepted { .. } => self.incentives.receipts_accepted += 1,
             Event::ReceiptRejected { reason } => {
@@ -1602,6 +1641,25 @@ impl Driver {
                 })
                 .collect(),
             datagram_send_errors: self.datagram_send_errors,
+            plain_frames_in: self
+                .sock
+                .plain_in
+                .load(std::sync::atomic::Ordering::Relaxed),
+            plain_sends_held: self
+                .sock
+                .plain_held
+                .load(std::sync::atomic::Ordering::Relaxed),
+            plain_sends_dropped: self
+                .sock
+                .plain_dropped
+                .load(std::sync::atomic::Ordering::Relaxed),
+            received_plain: self
+                .received_plain
+                .iter()
+                .map(|(k, v)| (format!("{k:?}"), *v))
+                .collect(),
+            dht_rpc_served: self.node.dht_rpc_served(),
+            vb_rejected: self.node.vb_rejected(),
             incentives: {
                 let mut i = self.incentives.clone();
                 i.deadline_evictions = self.node.deadline_evictions();

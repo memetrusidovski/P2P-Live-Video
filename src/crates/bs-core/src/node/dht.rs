@@ -314,7 +314,8 @@ impl Node {
     /// A contact that just answered one of our RPCs is reachable: insert directly.
     fn dht_insert_responsive(&mut self, rec: PeerRecord) {
         if rec.node_id != self.node_id() && usable_contact(&rec) {
-            self.dht.table.insert(rec, self.now);
+            let cap = self.prefix_cap(self.params.dht_k);
+            self.dht.table.insert(rec, self.now, cap);
         }
     }
 
@@ -325,7 +326,8 @@ impl Node {
         };
         let Some(rec) = rec else { return };
         if rec.node_id != self.node_id() && rec.node_id == p.validation.node_id {
-            self.dht.table.insert(rec, self.now);
+            let cap = self.prefix_cap(self.params.dht_k);
+            self.dht.table.insert(rec, self.now, cap);
         }
     }
 
