@@ -1,0 +1,8 @@
+# Publishes every viewer's status page on the host, one port per replica, in
+# start order (docker compose ps shows the mapping). Publishing a hundred ports
+# is the slow part of a large start on Docker Desktop, so up.sh --no-ports
+# leaves this file out.
+services:
+  viewer:
+    ports:
+      - "8080-8199:8080"

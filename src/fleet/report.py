@@ -7,6 +7,7 @@ schema (role, output_hash, source_hash, steady_starved, steady_played,
 first_chunk_s, first_segment, parent_lost, repairs, ...).
 
 Usage: fleet/report.py [--out results/fleet] [--psr-max 0.001] [--sjl-max-ms 1500]
+       fleet/report.py --dir results/swarm/raw   (result.json files copied from machines)
 """
 from __future__ import annotations
 
@@ -17,6 +18,10 @@ import json
 import pathlib
 import subprocess
 import sys
+
+
+# The repository's src/ directory, so paths do not depend on the working directory.
+SRC_DIR = pathlib.Path(__file__).resolve().parent.parent
 
 
 def copy_results(dest: pathlib.Path) -> None:
@@ -39,31 +44,49 @@ def churned_hosts() -> set:
     return {line.strip() for line in p.read_text().splitlines() if line.strip()}
 
 
-def build_verdict(raw: pathlib.Path, psr_max: float, sjl_max_ms: float, seed: int, profile: str, start_delay_s: float = 0.0, churned: set | None = None) -> dict:
+def load_run(raw: pathlib.Path) -> list[dict]:
+    """The result.json files of one fleet run, laid out <raw>/<run-id>/<hostname>/result.json.
+
+    Reports the newest run, or the one named by RUN_ID_FILTER.
+    """
+    runs = sorted(d for d in raw.iterdir() if d.is_dir() and any(d.glob("*/result.json")))
+    chosen = RUN_ID_FILTER or (runs[-1].name if runs else None)
+    return load_results(raw / chosen, chosen) if chosen else []
+
+
+def load_results(root: pathlib.Path, run_id: str | None = None) -> list[dict]:
+    """Every result.json under root, named by its directory relative to root.
+
+    Args:
+        root: Directory to search; the swarm command writes <label>-<i>/result.json.
+        run_id: Not used.
+    """
+    results = []
+    for p in sorted(root.rglob("result.json")):
+        try:
+            r = json.loads(p.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        r["container"] = str(p.parent.relative_to(root)) or p.parent.name
+        results.append(r)
+    return results
+
+
+def build_verdict(raw: pathlib.Path, psr_max: float, sjl_max_ms: float, seed: int, profile: str, start_delay_s: float = 0.0, churned: set | None = None, flat: bool = False) -> dict:
     """Fold bsnode result.json files (bs_node::RunReport) into the simulator's verdict schema.
 
     Args:
-        raw: Directory the results volume was copied to.
+        raw: Directory the results volume was copied to, or any directory of result.json files if flat.
         psr_max: Steady-state starvation bound.
         sjl_max_ms: Mean join latency bound in milliseconds.
         seed: Publisher seed of the run.
         profile: Netem profile name.
         start_delay_s: Publisher start delay subtracted from join latency.
         churned: Container names killed mid-run; absent results for them are expected.
+        flat: Search raw recursively; the fleet's run-id layout is not required.
     """
     churned = churned or set()
-    results = []
-    # Results are laid out /results/<run-id>/<hostname>/result.json; report the newest
-    # run only (or the one named by --run-id).
-    runs = sorted(d for d in raw.iterdir() if d.is_dir() and any(d.glob("*/result.json")))
-    chosen = RUN_ID_FILTER or (runs[-1].name if runs else None)
-    for p in sorted(raw.glob(f"{chosen}/*/result.json")) if chosen else []:
-        try:
-            r = json.loads(p.read_text())
-            r["container"] = p.parent.name
-            results.append(r)
-        except (OSError, json.JSONDecodeError):
-            continue
+    results = load_results(raw) if flat else load_run(raw)
     pubs = [r for r in results if r.get("role") == "publisher"]
     viewers = [r for r in results if r.get("role") == "viewer"]
     source_hash = pubs[0].get("source_hash") if pubs else None
@@ -99,8 +122,11 @@ def build_verdict(raw: pathlib.Path, psr_max: float, sjl_max_ms: float, seed: in
         # after the churn has stalled.
         stalled = sum(1 for v in viewers if int(v.get("steady_starved", 0)) * 10 > int(v.get("steady_played", 0)))
         kpis["survivors_stalled"] = {"value": float(stalled), "threshold": 0.0, "op": "<=", "pass": stalled == 0}
-    scenario = f"fleet-{profile}" + ("-churn" if churned else "")
-    repro = f"fleet/up.sh --viewers {len(viewers) + len(churned)} --profile {profile} --seed {seed}"
+    scenario = ("swarm" if flat else f"fleet-{profile}") + ("-churn" if churned else "")
+    if flat:
+        repro = f"bsnode swarm --count {len(viewers)} on each machine, see docs/MULTI_MACHINE.md"
+    else:
+        repro = f"fleet/up.sh --viewers {len(viewers) + len(churned)} --profile {profile} --seed {seed}"
     if churned:
         repro += f" && fleet/churn.sh --fraction {len(churned) / max(1, len(viewers) + len(churned)):.2f} --at 30"
     return {
@@ -156,34 +182,54 @@ def last_run_env() -> dict:
 def main() -> int:
     last = last_run_env()
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="results/fleet")
+    ap.add_argument("--out", default=str(SRC_DIR / "results" / "fleet"),
+                    help="verdict and raw results directory; the default is under src/ whatever the working directory")
     ap.add_argument("--psr-max", type=float, default=None, help="default: per profile, see PROFILE_PSR_MAX")
     ap.add_argument(
         "--start-delay-s",
         type=float,
-        default=float(__import__("os").environ.get("BS_START_DELAY_S", last.get("BS_START_DELAY_S", "0"))),
-        help="publisher start delay, subtracted from every viewer's first-chunk time",
+        default=None,
+        help="publisher start delay, subtracted from every viewer's first-chunk time (default: the last up.sh run's, or 0 with --dir)",
     )
     # Startup join latency is Δ_buffer-bound (3 s) until late-join backfill is tuned; the
     # simulator gates use 3.6 s mean, and a real link adds DHT and QUIC round trips.
     ap.add_argument("--sjl-max-ms", type=float, default=4000.0)
-    ap.add_argument("--seed", type=int, default=int(last.get("BS_SEED", "1")))
-    ap.add_argument("--profile", default=last.get("BS_NETEM_PROFILE", "clean"))
+    ap.add_argument("--seed", type=int, default=None, help="publisher seed (default: the last up.sh run's, or 1 with --dir)")
+    ap.add_argument("--profile", default=None, help="netem profile, sets the starvation bound (default: the last up.sh run's, or clean with --dir)")
     ap.add_argument("--raw", help="already-copied results dir (skip docker copy)")
-    ap.add_argument("--run-id", default=last.get("BS_RUN_ID"), help="report this run id (default: the last up.sh run)")
+    ap.add_argument("--dir", help="directory of result.json files from `bsnode swarm` runs, searched recursively (no docker)")
+    ap.add_argument("--run-id", default=None, help="report this run id (default: the last up.sh run)")
     a = ap.parse_args()
+    # The last fleet run's settings are defaults for a fleet report only. A swarm run
+    # on other machines shares nothing with that fleet run.
+    fleet = {} if a.dir else last
+    if a.start_delay_s is None:
+        a.start_delay_s = float(__import__("os").environ.get("BS_START_DELAY_S", fleet.get("BS_START_DELAY_S", "0")))
+    if a.seed is None:
+        a.seed = int(fleet.get("BS_SEED", "1"))
+    if a.profile is None:
+        a.profile = fleet.get("BS_NETEM_PROFILE", "clean")
+    if a.run_id is None:
+        a.run_id = fleet.get("BS_RUN_ID")
     if a.psr_max is None:
         a.psr_max = PROFILE_PSR_MAX.get(a.profile, 0.001)
     global RUN_ID_FILTER
     RUN_ID_FILTER = a.run_id
     out = pathlib.Path(a.out)
-    if a.raw:
+    churned = set()
+    if a.dir:
+        raw = pathlib.Path(a.dir)
+        if a.out == str(SRC_DIR / "results" / "fleet"):
+            out = SRC_DIR / "results" / "swarm"
+    elif a.raw:
         raw = pathlib.Path(a.raw)
+        churned = churned_hosts()
     else:
+        churned = churned_hosts()
         # Kept beside the verdict so a failed run can be read after the fleet is down.
         raw = (out / "raw").resolve()
         copy_results(raw)
-    verdict = build_verdict(raw, a.psr_max, a.sjl_max_ms, a.seed, a.profile, a.start_delay_s, churned_hosts())
+    verdict = build_verdict(raw, a.psr_max, a.sjl_max_ms, a.seed, a.profile, a.start_delay_s, churned, flat=bool(a.dir))
     out.mkdir(parents=True, exist_ok=True)
     (out / "verdict.json").write_text(json.dumps(verdict, indent=2))
     print(json.dumps({k: v for k, v in verdict.items() if k != "nodes"}, indent=2))

@@ -143,6 +143,10 @@ Every viewer writes its reassembled output hash; the report compares them with
 the publisher's. Hash equality is the end-to-end data-correctness check at
 every level, from a unit test in `bs-media` up to the fleet.
 
+Real machines on a LAN or VPN: `bsnode swarm` runs a machine's share of viewers and
+`fleet/report.py --dir` scores the collected result files with the fleet's bounds.
+The steps are in [MULTI_MACHINE.md](MULTI_MACHINE.md).
+
 ## Coverage
 
 ```

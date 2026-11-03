@@ -40,11 +40,22 @@ case "$ROLE" in
       --result "$OUT/result.json"
     ;;
   viewer)
+    # WHY: Docker's embedded DNS fails lookups while a hundred containers start at
+    #      once, and bsnode resolves the bootstrap name exactly once. Compose passes
+    #      an address; a name is resolved here with retries.
+    host="${BS_BOOTSTRAP%%:*}"; port="${BS_BOOTSTRAP##*:}"; ip=""
+    for attempt in $(seq 1 60); do
+      ip="$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}' || true)"
+      [ -n "$ip" ] && break
+      echo "$(date +%T) resolve $host: attempt $attempt failed" >&2
+      sleep 1
+    done
+    echo "$(date +%T) bootstrap $host -> ${ip:-unresolved}" >&2
     exec bsnode --parity "$BS_PARITY" watch \
-      --bootstrap "${BS_BOOTSTRAP:-publisher:4000}" \
+      --bootstrap "${ip:-$host}:${port}" \
       --publisher-seed "${BS_SEED:-1}" \
       --publisher-port "${BS_PORT:-4000}" \
-      --out "$OUT/output.bin" \
+      ${BS_KEEP_OUTPUT:+--out "$OUT/output.bin"} \
       ${BS_EXPECT_HASH:+--expect-hash "$BS_EXPECT_HASH"} \
       --class "${BS_CLASS:-relay}" \
       --upload-kbps "${BS_UPLOAD_KBPS:-20000}" \

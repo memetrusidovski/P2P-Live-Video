@@ -7,6 +7,11 @@ services:
       dockerfile: fleet/Dockerfile
     image: bitstream/bsnode:dev
     hostname: publisher
+    # WHY: Docker's embedded DNS answers "not found" or stale for part of a
+    #      hundred-container start, so viewers bootstrap by address, not by name.
+    networks:
+      swarm:
+        ipv4_address: 10.77.0.2
     cap_add: [NET_ADMIN]
     environment:
       BS_ROLE: publisher
@@ -26,7 +31,6 @@ services:
       - ./netem.sh:/usr/local/bin/netem.sh:ro
       - ./profiles:/profiles:ro
       - results:/results
-    networks: [swarm]
 
   viewer:
     image: bitstream/bsnode:dev
@@ -35,16 +39,17 @@ services:
     environment:
       BS_ROLE: viewer
       BS_RUN_ID: "${BS_RUN_ID:-run}"
-      BS_BOOTSTRAP: publisher:4000
+      BS_BOOTSTRAP: 10.77.0.2:4000
       BS_SEED: "${BS_SEED:-1}"
       BS_EXPECT_HASH: "${BS_EXPECT_HASH:-}"
       BS_DURATION_S: "${BS_DURATION_S:-60}"
+      # Set to 1 to keep each viewer's reassembled bytes; the hash needs no file.
+      BS_KEEP_OUTPUT: "${BS_KEEP_OUTPUT:-}"
       BS_CLASS: "${BS_CLASS:-relay}"
       BS_UPLOAD_KBPS: "${BS_UPLOAD_KBPS:-20000}"
       BS_NETEM_PROFILE: "${BS_NETEM_PROFILE:-clean}"
-    ports:
-      # one host port per replica: viewer N is reachable at localhost:80(80+N)
-      - "8080-8199:8080"
+    # Host ports for the viewers' status pages are in docker-compose.ports.yml;
+    # up.sh adds that file unless --no-ports is given.
     volumes:
       - ./netem.sh:/usr/local/bin/netem.sh:ro
       - ./profiles:/profiles:ro
@@ -54,6 +59,9 @@ services:
 networks:
   swarm:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 10.77.0.0/16
 
 volumes:
   results:

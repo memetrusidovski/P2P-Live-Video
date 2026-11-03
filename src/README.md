@@ -6,6 +6,7 @@ plus the simulator, tooling and clients around it.
 - [`ARCHITECTURE.md`](ARCHITECTURE.md): what each crate does and why the core is sans-I/O.
 - [`MILESTONES.md`](MILESTONES.md): phases, exit gates, status.
 - [`docs/TESTING.md`](docs/TESTING.md): the test levels and how failures explain themselves.
+- [`docs/MULTI_MACHINE.md`](docs/MULTI_MACHINE.md): one publisher and swarms of viewers across machines, on a LAN or a VPN.
 - [`docs/wire_coverage.md`](docs/wire_coverage.md): which frames are implemented.
 
 Run everything:
@@ -43,3 +44,7 @@ python3 fleet/report.py --out results/fleet && fleet/down.sh
 ```
 
 http://localhost:9000/ is the fleet dashboard.
+
+Across machines: `bsnode publish --listen 0.0.0.0:4000` prints the join commands, and
+`bsnode swarm --count 10 --results DIR` runs ten viewers on any other machine. See
+[`docs/MULTI_MACHINE.md`](docs/MULTI_MACHINE.md).

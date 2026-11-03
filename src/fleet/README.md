@@ -28,6 +28,19 @@ The hash check compares each viewer that started at segment 1 with the publisher
 stream. The stream must therefore end before the viewers do. `--max-bytes` bounds it
 (25 MB is about a minute of the sample) and `--duration` outlasts it.
 
+Size the stream to the fleet. Docker Desktop starts a hundred containers over two to
+four minutes on a loaded laptop. A viewer that starts after the stream ended finds no
+bootstrap, reports `bootstrap ...: no answer` and never plays. For 100 viewers pass
+no `--max-bytes` (the whole 248 MB sample, 5.5 minutes) with `--duration 330` and
+`--no-ports`. Publishing a host port per viewer is the slow part of the start; without
+the ports the status pages are reachable only from inside the fleet network. Viewers do
+not write their output file unless `BS_KEEP_OUTPUT=1`; the hash needs no file, and a
+hundred copies of the stream fill the results volume.
+
+The publisher has the fixed address 10.77.0.2 on the fleet network and viewers bootstrap
+by that address. Docker's embedded DNS answers "not found" for part of a hundred-container
+start, which took most viewers down before they ran.
+
 `churn.sh` is Ch8 §8.3 scenario A on real nodes. It records the killed containers in
 `.churned`; `report.py` scores the survivors only and adds a `survivors_stalled` KPI
 (a survivor must not starve more than 10 % of its chunks after the churn).
@@ -43,8 +56,9 @@ Files:
 | File | Role |
 |---|---|
 | `Dockerfile` | multi-stage: rust builder for `bs-node`, debian-slim runtime with iproute2 |
-| `entrypoint.sh` | applies netem, runs `bsnode` as publisher or viewer, writes `/results/<host>/result.json` |
+| `entrypoint.sh` | applies netem, resolves the bootstrap with retries, runs `bsnode` as publisher or viewer, writes `/results/<host>/result.json` |
 | `docker-compose.yml` | `publisher` + scalable `viewer` service, shared `results` volume |
+| `docker-compose.ports.yml` | one host port per viewer for the status pages; left out by `up.sh --no-ports` |
 | `netem.sh` | applies a profile with `tc qdisc ... netem` (needs `NET_ADMIN`, granted in compose) |
 | `up.sh` / `down.sh` | scale up under a profile; tear down (`--keep-results` keeps the volume) |
 | `report.py` | copies the results volume out and builds `verdict.json` |
@@ -60,15 +74,17 @@ lists every viewer under `facts.per_viewer`.
 
 Every container serves its player page and status API on port 8080 inside the
 container. Compose publishes them to the host: the publisher on `localhost:8079`,
-viewers on one port each from `8080-8199` (viewer N is `localhost:80(80+N)`,
-`docker compose ps` shows the exact mapping).
+viewers on one port each from `8080-8199` in start order (`docker compose ps` shows
+which viewer has which port). `up.sh --no-ports` skips the viewer ports.
 
 - `fleet/dashboard.py` then `open http://localhost:9000/`: one row per viewer with
   state, depth per tree, chunks played and starved, blocks rejected, bytes, running
   Blake3, and an **integrity** column that compares the viewer's per-chunk,
   per-layer Blake3 checkpoints with the publisher's for the same segment and chunk.
   "OK (n layer-chunks)" means n layer-chunks matched the publisher byte for byte and
-  none differed. Each row links to that viewer's own page.
+  none differed. Each row links to that viewer's own page. `--publisher host:port`
+  and `--viewers host:lo-hi,host:lo-hi` point it at nodes on other machines
+  (see `docs/MULTI_MACHINE.md`).
 - A viewer's page (`http://localhost:8081/` etc.) shows its status panel and, in
   ffmpeg mode (`up.sh --ingest ffmpeg`), plays the video the swarm delivered to it
   through Media Source Extensions with a rendition selector.

@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Live fleet dashboard.
 
-Polls every container's /api/status (publisher on host port 8079, viewers on the
-8080-8199 range published by docker compose) and checks, chunk by chunk, that each
-viewer's per-layer Blake3 checkpoints equal the publisher's. Serves a page at
-http://localhost:9000/ that refreshes every two seconds and links to each viewer's
-own player page (video plays there in ffmpeg mode).
+Polls every node's /api/status and checks, chunk by chunk, that each viewer's
+per-layer Blake3 checkpoints equal the publisher's. The default targets are the
+docker fleet: the publisher on host port 8079 and viewers on the 8080-8199 range.
+Any list of host:lo-hi ranges reaches a swarm on other machines. Serves a page at
+http://localhost:9000/ that refreshes every two seconds. Each row links to the
+viewer's own player page, where video plays in ffmpeg mode.
 
-Usage: fleet/dashboard.py [--port 9000] [--publisher localhost:8079] [--viewers localhost:8080-8199]
+Usage:
+  fleet/dashboard.py [--port 9000] [--publisher localhost:8079] [--viewers localhost:8080-8199]
+  fleet/dashboard.py --publisher 192.168.1.10:8079 --viewers 192.168.1.10:8080-8089,192.168.1.11:8080-8099
 """
 from __future__ import annotations
 
@@ -20,7 +23,7 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-STATE = {"publisher": None, "viewers": [], "updated": 0.0, "error": None}
+STATE = {"publisher": None, "publisher_url": "", "viewers": [], "updated": 0.0, "error": None}
 
 
 def fetch(url: str, timeout: float = 1.5):
@@ -31,8 +34,31 @@ def fetch(url: str, timeout: float = 1.5):
         return None
 
 
-def viewer_ports(range_spec: str) -> list[int]:
-    """Prefer docker's view of published ports; fall back to probing the range."""
+def viewer_targets(spec: str) -> list[tuple[str, int]]:
+    """The (host, port) pairs to poll.
+
+    spec is a comma-separated list of host:port or host:lo-hi. For the compose default
+    (localhost) docker's view of the published ports is preferred over probing the range.
+    """
+    targets: list[tuple[str, int]] = []
+    for item in spec.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        host, rng = item.rsplit(":", 1)
+        if host == "localhost":
+            ports = docker_ports()
+            if ports:
+                targets.extend((host, p) for p in ports)
+                continue
+        lo, _, hi = rng.partition("-")
+        for p in range(int(lo), int(hi or lo) + 1):
+            targets.append((host, p))
+    return sorted(set(targets))
+
+
+def docker_ports() -> list[int]:
+    """Host ports docker compose published for the viewer service, or [] without a fleet."""
     ports: list[int] = []
     try:
         out = subprocess.run(
@@ -54,10 +80,6 @@ def viewer_ports(range_spec: str) -> list[int]:
                         ports.append(int(host))
     except Exception:  # noqa: BLE001
         pass
-    if not ports:
-        host, rng = range_spec.rsplit(":", 1)
-        lo, hi = (int(x) for x in rng.split("-"))
-        ports = list(range(lo, hi + 1))
     return sorted(set(ports))
 
 
@@ -85,16 +107,16 @@ def poll(pub_addr: str, viewers_spec: str, interval: float) -> None:
     while True:
         pub = fetch(f"http://{pub_addr}/api/status")
         rows = []
-        for port in viewer_ports(viewers_spec):
-            st = fetch(f"http://localhost:{port}/api/status", timeout=0.8)
+        for host, port in viewer_targets(viewers_spec):
+            st = fetch(f"http://{host}:{port}/api/status", timeout=0.8)
             if st is None:
                 continue
-            row = {"port": port, "url": f"http://localhost:{port}/", **{k: st.get(k) for k in (
+            row = {"port": port, "host": host, "url": f"http://{host}:{port}/", **{k: st.get(k) for k in (
                 "node_id", "state", "depth", "played", "starved", "chunks_full", "chunks_ok", "blocks_rejected",
                 "parent_lost", "bytes", "hash_so_far", "first_chunk_s", "layers", "layers_complete_last", "descriptor_version")}}
             row["integrity"] = compare(pub, st)
             rows.append(row)
-        STATE.update(publisher=pub, viewers=rows, updated=time.time())
+        STATE.update(publisher=pub, publisher_url=f"http://{pub_addr}/", viewers=rows, updated=time.time())
         time.sleep(interval)
 
 
@@ -108,10 +130,10 @@ PAGE = """<!doctype html><meta charset=utf-8><title>BitStream fleet</title>
 <script>
 async function tick(){const r=await fetch('/api/fleet');const d=await r.json();
 document.getElementById('upd').textContent=new Date(d.updated*1000).toLocaleTimeString();
-const p=d.publisher;document.getElementById('pub').innerHTML=p?`<b>publisher</b> ${p.state} · published bytes ${p.bytes} · hash so far <code>${(p.hash_so_far||'').slice(0,16)}</code>${p.source_hash?` · source file <code>${p.source_hash.slice(0,16)}</code>`:''} · <a href="http://localhost:8079/">status</a>`:'<b>publisher</b> unreachable';
+const p=d.publisher;document.getElementById('pub').innerHTML=p?`<b>publisher</b> ${p.state} · published bytes ${p.bytes} · hash so far <code>${(p.hash_so_far||'').slice(0,16)}</code>${p.source_hash?` · source file <code>${p.source_hash.slice(0,16)}</code>`:''} · <a href="${d.publisher_url}">status</a>`:'<b>publisher</b> unreachable';
 const tb=document.querySelector('#t tbody');tb.innerHTML='';
 for(const v of d.viewers){const i=v.integrity;const cls=i.verdict==='OK'?'ok':(i.verdict==='MISMATCH'?'bad':'warn');
-tb.insertAdjacentHTML('beforeend',`<tr><td><a href="${v.url}" target=_blank>:${v.port}</a> <code>${(v.node_id||'').slice(0,8)}</code></td><td>${v.state}</td><td>${(v.depth||[]).map(x=>x===255?'-':x).join(' ')}</td><td>${v.layers_complete_last}/${v.layers}</td><td>${v.played}</td><td class="${v.starved?'bad':''}">${v.starved}</td><td class="${v.blocks_rejected?'bad':''}">${v.blocks_rejected}</td><td>${v.parent_lost}</td><td>${v.bytes}</td><td><code>${(v.hash_so_far||'').slice(0,16)}</code></td><td class="${cls}">${i.verdict} (${i.match} layer-chunks)</td></tr>`)}}
+tb.insertAdjacentHTML('beforeend',`<tr><td><a href="${v.url}" target=_blank>${v.host==='localhost'?'':v.host}:${v.port}</a> <code>${(v.node_id||'').slice(0,8)}</code></td><td>${v.state}</td><td>${(v.depth||[]).map(x=>x===255?'-':x).join(' ')}</td><td>${v.layers_complete_last}/${v.layers}</td><td>${v.played}</td><td class="${v.starved?'bad':''}">${v.starved}</td><td class="${v.blocks_rejected?'bad':''}">${v.blocks_rejected}</td><td>${v.parent_lost}</td><td>${v.bytes}</td><td><code>${(v.hash_so_far||'').slice(0,16)}</code></td><td class="${cls}">${i.verdict} (${i.match} layer-chunks)</td></tr>`)}}
 tick();setInterval(tick,2000);
 </script>"""
 
@@ -137,8 +159,9 @@ class H(BaseHTTPRequestHandler):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=9000)
-    ap.add_argument("--publisher", default="localhost:8079")
-    ap.add_argument("--viewers", default="localhost:8080-8199")
+    ap.add_argument("--publisher", default="localhost:8079", help="host:port of the publisher's status API")
+    ap.add_argument("--viewers", default="localhost:8080-8199",
+                    help="comma-separated host:lo-hi ranges of viewer status APIs, one per machine")
     ap.add_argument("--interval", type=float, default=2.0)
     a = ap.parse_args()
     threading.Thread(target=poll, args=(a.publisher, a.viewers, a.interval), daemon=True).start()
