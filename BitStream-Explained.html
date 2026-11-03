@@ -1,0 +1,906 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>BitStream Explained</title>
+<meta name="description" content="How the BitStream protocol carries one live video stream to a million viewers over the viewers' own uplinks: identity, discovery, the multi-forest, media verification, repair, incentives and NAT traversal, with interactive diagrams.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/contrib/auto-render.min.js"></script>
+<style>
+/* Layout: one reading column with a sticky section nav on wide screens; figures break out to a wider measure. */
+:root {
+  --bg: #f4f6f9;
+  --surface: #ffffff;
+  --surface-2: #e9edf3;
+  --fg: #13192a;
+  --muted: #5a6478;
+  --line: #d3d9e3;
+  --accent: #d6453f;      /* the live edge */
+  --accent-ink: #ffffff;
+  --ok: #1f8a5a;
+  --warn: #b7791f;
+  --t1: #2f6fde; --t2: #3f8fcf; --t3: #1f9e8a; --t4: #5aa84a; --t5: #c77d1e; --t6: #b34a9a;
+  --l0: #2f6fde; --l1: #1f9e8a; --l2: #c77d1e;
+  --display: "Bricolage Grotesque", "Avenir Next", "Helvetica Neue", Arial, sans-serif;
+  --body: "IBM Plex Sans", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: "IBM Plex Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f131c; --surface: #161c28; --surface-2: #1f2735; --fg: #e8ecf3; --muted: #9aa5b8; --line: #2b3444;
+    --accent: #ff6a5f; --accent-ink: #1a0b0a; --ok: #4cc68a; --warn: #e0a84a;
+    --t1: #6b9cff; --t2: #74b5e8; --t3: #4fc9b3; --t4: #8bd072; --t5: #e8a24a; --t6: #d57ac0;
+    --l0: #6b9cff; --l1: #4fc9b3; --l2: #e8a24a;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f131c; --surface: #161c28; --surface-2: #1f2735; --fg: #e8ecf3; --muted: #9aa5b8; --line: #2b3444;
+  --accent: #ff6a5f; --accent-ink: #1a0b0a; --ok: #4cc68a; --warn: #e0a84a;
+  --t1: #6b9cff; --t2: #74b5e8; --t3: #4fc9b3; --t4: #8bd072; --t5: #e8a24a; --t6: #d57ac0;
+  --l0: #6b9cff; --l1: #4fc9b3; --l2: #e8a24a;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { animation: none !important; transition: none !important; } }
+body {
+  margin: 0; background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 16px; line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 0;
+}
+a { color: var(--t1); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+h1, h2, h3, h4 { font-family: var(--display); text-wrap: balance; line-height: 1.12; margin: 0; }
+h1 { font-size: clamp(2.6rem, 7vw, 5rem); font-weight: 700; letter-spacing: -0.02em; }
+h2 { font-size: clamp(1.7rem, 3.4vw, 2.4rem); font-weight: 700; letter-spacing: -0.015em; }
+h3 { font-size: 1.25rem; font-weight: 700; margin-top: 2rem; }
+h4 { font-size: 1rem; font-weight: 700; margin-top: 1.4rem; }
+p, li { max-width: 68ch; }
+code, pre, .mono { font-family: var(--mono); font-size: 0.92em; }
+code { background: var(--surface-2); padding: 0.05em 0.35em; border-radius: 4px; }
+pre { background: var(--surface-2); padding: 0.9rem 1rem; border-radius: 8px; overflow-x: auto; max-width: 100%; }
+.eyebrow { font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.12em; font-size: 0.72rem; color: var(--muted); }
+.page { max-width: 1180px; margin: 0 auto; display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 3rem; }
+@media (max-width: 900px) { .page { grid-template-columns: minmax(0, 1fr); gap: 0; } }
+nav.toc { position: sticky; top: 1rem; align-self: start; max-height: calc(100vh - 2rem); overflow: auto; padding-block: 2.2rem 1rem; }
+nav.toc ol { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.3rem; }
+nav.toc a { color: var(--muted); text-decoration: none; font-size: 0.86rem; display: block; padding: 0.15rem 0; border-left: 2px solid transparent; padding-left: 0.6rem; }
+nav.toc a:hover, nav.toc a.active { color: var(--fg); border-left-color: var(--accent); }
+@media (max-width: 900px) { nav.toc { position: static; max-height: none; padding-block: 1rem 0; } nav.toc ol { display: flex; flex-wrap: wrap; gap: 0.3rem 0.9rem; } nav.toc a { border-left: 0; padding-left: 0; } }
+main { min-width: 0; padding-block: 2rem 5rem; }
+section { padding-block: 2.6rem 1rem; border-top: 1px solid var(--line); }
+section:first-of-type { border-top: 0; padding-top: 1rem; }
+.lede { font-size: 1.15rem; color: var(--muted); max-width: 60ch; }
+.hero { padding-block: 2rem 1.5rem; }
+.hero .thesis { font-size: 1.25rem; max-width: 58ch; margin-top: 1rem; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-top: 2rem; }
+.stats > div { background: var(--surface); padding: 0.9rem 1rem; }
+.stats b { display: block; font-family: var(--display); font-size: 1.7rem; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.stats span { color: var(--muted); font-size: 0.85rem; }
+figure { margin: 1.6rem 0; }
+figure.wide { margin-inline: 0; }
+figcaption { color: var(--muted); font-size: 0.88rem; margin-top: 0.6rem; max-width: 78ch; }
+figure svg { max-width: 100%; height: auto; display: block; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 1.1rem 1.2rem; }
+.panel .controls { display: flex; flex-wrap: wrap; gap: 1rem 1.6rem; align-items: end; margin-bottom: 0.8rem; }
+.panel label { display: grid; gap: 0.25rem; font-size: 0.85rem; color: var(--muted); min-width: 160px; }
+.panel label output { color: var(--fg); font-family: var(--mono); font-size: 0.9rem; }
+.panel input[type=range] { width: 100%; accent-color: var(--accent); }
+.panel select { font: inherit; padding: 0.3rem 0.5rem; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); }
+.readout { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.8rem; margin-top: 0.8rem; }
+.readout div { background: var(--surface-2); border-radius: 8px; padding: 0.6rem 0.8rem; }
+.readout b { display: block; font-family: var(--mono); font-size: 1.1rem; font-variant-numeric: tabular-nums; }
+.readout span { font-size: 0.8rem; color: var(--muted); }
+table { border-collapse: collapse; width: 100%; font-size: 0.92rem; font-variant-numeric: tabular-nums; }
+.tablewrap { overflow-x: auto; max-width: 100%; margin: 1rem 0; }
+th, td { text-align: left; padding: 0.45rem 0.7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; }
+td.num, th.num { text-align: right; }
+.pill { display: inline-block; font-family: var(--mono); font-size: 0.74rem; padding: 0.1em 0.5em; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.pill.ok { color: var(--ok); border-color: var(--ok); }
+.pill.warn { color: var(--warn); border-color: var(--warn); }
+.pill.bad { color: var(--accent); border-color: var(--accent); }
+.callout { border-left: 3px solid var(--accent); padding: 0.2rem 0 0.2rem 1rem; color: var(--fg); margin: 1.2rem 0; max-width: 68ch; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.2rem; }
+.grid2 > * { min-width: 0; }
+.layers { display: grid; gap: 0.5rem; margin: 1.4rem 0; }
+.layer { display: grid; grid-template-columns: 2.4rem minmax(0, 1fr); gap: 0.8rem; align-items: start; padding: 0.8rem 1rem; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+.layer .n { font-family: var(--display); font-size: 1.4rem; font-weight: 700; color: var(--muted); }
+.layer b { display: block; }
+.layer small { color: var(--muted); }
+.mermaid { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 0.6rem; overflow-x: auto; }
+.legend { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; font-size: 0.82rem; color: var(--muted); margin-top: 0.5rem; }
+.legend i { display: inline-block; width: 0.8em; height: 0.8em; border-radius: 3px; margin-right: 0.35em; vertical-align: -0.05em; }
+.src { font-size: 0.8rem; color: var(--muted); }
+.src a { color: var(--muted); }
+footer { color: var(--muted); font-size: 0.85rem; padding-block: 2rem; border-top: 1px solid var(--line); }
+.katex { font-size: 1.02em; }
+.katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.2rem 0; }
+.states { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.6rem; }
+.state { border: 1px solid var(--line); border-radius: 8px; padding: 0.6rem 0.8rem; background: var(--surface); font-size: 0.9rem; }
+.state b { font-family: var(--mono); font-size: 0.85rem; }
+.state small { color: var(--muted); display: block; }
+.badge-row { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 0.6rem 0; }
+svg text { font-family: var(--body); fill: currentColor; }
+svg .mono { font-family: var(--mono); }
+.note { color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<div class="page">
+<nav class="toc" aria-label="Sections">
+  <div class="eyebrow">BitStream explained</div>
+  <ol>
+    <li><a href="#problem">1. The problem</a></li>
+    <li><a href="#pipeline">2. One chunk's journey</a></li>
+    <li><a href="#identity">3. Identity and discovery</a></li>
+    <li><a href="#forest">4. The multi-forest</a></li>
+    <li><a href="#parents">5. Choosing a parent</a></li>
+    <li><a href="#lifecycle">6. A peer's lifecycle</a></li>
+    <li><a href="#repair">7. Losing a parent</a></li>
+    <li><a href="#media">8. Blocks, proofs and parity</a></li>
+    <li><a href="#buffer">9. The playout buffer</a></li>
+    <li><a href="#capacity">10. When upload runs short</a></li>
+    <li><a href="#incentives">11. Receipts and rank</a></li>
+    <li><a href="#nat">12. NATs and relays</a></li>
+    <li><a href="#security">13. What an attacker gets</a></li>
+    <li><a href="#requirements">14. The requirements</a></li>
+    <li><a href="#reading">15. Where to read more</a></li>
+  </ol>
+</nav>
+<main>
+
+<header class="hero">
+  <div class="eyebrow">A tokenless, trackerless live-video protocol</div>
+  <h1>BitStream</h1>
+  <p class="thesis">One broadcaster, up to a million viewers, no CDN. The stream is cut into 250 ms signed chunks, split across a forest of up to six trees, and carried by the viewers' own uplinks. Every byte is verified against the broadcaster's signature before it is forwarded.</p>
+  <div class="stats">
+    <div><b>10<sup>6</sup></b><span>viewers at mean depth ≤ 7</span></div>
+    <div><b>≈ 4.0 s</b><span>glass to glass</span></div>
+    <div><b>250 ms</b><span>signing unit (chunk)</span></div>
+    <div><b>2 → 6</b><span>trees, sized by relay count</span></div>
+    <div><b>≈ 5 Mbps</b><span>the broadcaster's bounded cost</span></div>
+    <div><b>0</b><span>servers, trackers, tokens</span></div>
+  </div>
+  <p class="note" style="margin-top:1rem">This page walks the algorithm as the specification in <code>protocol/</code> defines it. Every number is the spec's own. Sliders and diagrams recompute the spec's formulas live.</p>
+</header>
+
+<section id="problem">
+  <div class="eyebrow">1</div>
+  <h2>The problem: a stream costs the sender N times its bitrate</h2>
+  <p class="lede">A CDN pays for every viewer. A swarm pays nothing extra per viewer, but only if the viewers' uploads add up.</p>
+  <p>A 6 Mbps stream to a million viewers is 6 Tbps of egress from a CDN. BitStream makes the viewers the edge. That only works when the swarm can carry itself, and the spec writes that condition with the overheads it actually pays:</p>
+  $$\sum_{i=1}^{N} (1 - r_{\text{pull}})\, u_i \;\ge\; \Omega \cdot N \cdot B$$
+  <p>\(u_i\) is a viewer's upload, \(B\) the stream bitrate, \(\Omega \approx 1.15\) the parity and framing overhead on every forwarded byte, and \(r_{\text{pull}} = 0.10\) the slice of upload every node holds back for repair traffic. The naive form \(\sum u_i \ge N B\) understates the requirement by about 28 %.</p>
+  <figure class="wide">
+    <div id="fig-egress" class="panel"></div>
+    <figcaption>Sender egress as the audience grows. A CDN scales with N. The BitStream source holds at its own slots plus a fixed base-layer reserve of about 5.2 Mbps, whatever N is. Log scales on both axes.</figcaption>
+  </figure>
+  <p>Two bars matter, and they differ. Mean upload above about 7.7 Mbps makes full quality deliverable. Mean upload above about 10.2 Mbps also buys a fan-out of 8, which is what the depth proof of section 2 assumes. The spec treats failure of the first bar as the common case, not a corner, and defines what happens then (section 10).</p>
+</section>
+
+<section id="pipeline">
+  <div class="eyebrow">2</div>
+  <h2>One chunk's journey, and where the four seconds go</h2>
+  <p>The encoder produces 1 s closed-GOP segments. Each segment is cut into four 250 ms chunks. The broadcaster hashes each chunk's 16 KB blocks into a Blake3 Merkle tree, signs the root in a <code>MANIFEST</code>, and starts pushing the moment the signature exists.</p>
+  <figure class="wide">
+    <svg viewBox="0 0 1000 170" role="img" aria-label="A chunk moves from the encoder through signing, RaptorQ encoding, the tree, per-hop verification and the playout buffer to the screen.">
+      <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+      <g font-size="12" stroke="currentColor" fill="none" stroke-width="1.2">
+        <rect x="10" y="40" width="130" height="64" rx="8"/>
+        <rect x="185" y="40" width="130" height="64" rx="8"/>
+        <rect x="360" y="40" width="130" height="64" rx="8"/>
+        <rect x="535" y="40" width="130" height="64" rx="8"/>
+        <rect x="710" y="40" width="130" height="64" rx="8"/>
+        <rect x="885" y="40" width="105" height="64" rx="8"/>
+        <line x1="140" y1="72" x2="183" y2="72" marker-end="url(#arr)"/>
+        <line x1="315" y1="72" x2="358" y2="72" marker-end="url(#arr)"/>
+        <line x1="490" y1="72" x2="533" y2="72" marker-end="url(#arr)"/>
+        <line x1="665" y1="72" x2="708" y2="72" marker-end="url(#arr)"/>
+        <line x1="840" y1="72" x2="883" y2="72" marker-end="url(#arr)"/>
+      </g>
+      <g font-size="12" text-anchor="middle">
+        <text x="75" y="64" font-weight="600">Encoder</text><text x="75" y="82" fill="var(--muted)">1 s GOP → 4 chunks</text>
+        <text x="250" y="64" font-weight="600">Sign</text><text x="250" y="82" fill="var(--muted)">Merkle root, Ed25519</text>
+        <text x="425" y="64" font-weight="600">RaptorQ</text><text x="425" y="82" fill="var(--muted)">16 + E symbols per block</text>
+        <text x="600" y="64" font-weight="600">Tree push</text><text x="600" y="82" fill="var(--muted)">≤ 7 hops, paced</text>
+        <text x="775" y="64" font-weight="600">Verify, re-encode</text><text x="775" y="82" fill="var(--muted)">at every relay</text>
+        <text x="937" y="64" font-weight="600">Playout</text><text x="937" y="82" fill="var(--muted)">3.0 s behind edge</text>
+      </g>
+      <g font-size="11" text-anchor="middle" fill="var(--muted)">
+        <text x="162" y="128">0.1 – 0.3 s</text><text x="337" y="128">0.25 s barrier</text><text x="512" y="128">≤ 0.125 s pacing</text><text x="687" y="128">≈ 0.51 s</text><text x="862" y="128">µs per hop</text>
+      </g>
+      <text x="500" y="160" font-size="12" text-anchor="middle" fill="var(--accent)" font-weight="600">glass to glass ≈ 4.0 – 4.2 s</text>
+    </svg>
+    <figcaption>The pipeline and its latency terms (Ch1 §1.1.3). The signing unit is a 250 ms chunk rather than the 1 s segment; a segment-sized barrier would add 0.75 s.</figcaption>
+  </figure>
+  <figure class="wide">
+    <div id="fig-budget" class="panel"></div>
+    <figcaption>The glass-to-glass budget stacked. The playout buffer is three quarters of it. Propagation at depth 7 is 7 × (40 ms propagation + 13 ms transmission + 20 ms queue) = 511 ms.</figcaption>
+  </figure>
+  <p>The depth bound comes from fan-out. With each relay feeding \(k = 8\) children, a million nodes fit in \(D = \log_8(7{,}000{,}001) - 1 \approx 6.6\) levels, so the forest caps depth at \(D_{\max} = 8\) and a parent refuses any join that would go deeper.</p>
+</section>
+
+<section id="identity">
+  <div class="eyebrow">3</div>
+  <h2>Identity and discovery: who you are, where the stream is</h2>
+  <p>There is no tracker. Peers find each other through an S/Kademlia distributed hash table. A stream is named by the hash of the broadcaster's Ed25519 public key, so a stream record is self-authenticating: whoever serves it, only the broadcaster can have signed it.</p>
+  <h3>Two proof-of-work puzzles</h3>
+  <p>A node identity is a keypair plus two nonces. The static puzzle is paid once per identity, the dynamic one every time the public address changes. The spec is explicit that these make identities <em>rate-limited</em>, not expensive. The Sybil bound is address diversity, enforced by per-prefix caps wherever identities are counted.</p>
+  $$\text{Blake3}(PK \parallel N_{\text{static}}) \le 2^{256 - C_1}, \qquad \text{Blake3}\big(\text{NodeID} \parallel IP \parallel N_{\text{dyn}}\big) \le 2^{256 - C_2}$$
+  <div class="tablewrap"><table>
+    <thead><tr><th>Puzzle</th><th>Bits</th><th>Binds</th><th>Paid</th></tr></thead>
+    <tbody>
+      <tr><td>Static</td><td class="num">C₁ = 16</td><td>key → NodeID</td><td>once per identity</td></tr>
+      <tr><td>Dynamic</td><td class="num">C₂ = 8 / 10 / 12 / 14</td><td>NodeID → observed IP</td><td>per IP change; tier by swarm size N &lt; 50 / 10³ / 10⁵ / ≥ 10⁵</td></tr>
+    </tbody></table></div>
+  <p>Receivers verify the dynamic puzzle against the address the packet actually arrived from. That is why a peer cannot declare its own address, and why a node that bootstraps through 127.0.0.1 while advertising a LAN address is rejected by every peer it talks to.</p>
+  <h3>Registration that stays cheap at a million viewers</h3>
+  <p>Twenty DHT nodes nearest the stream key act as guardians. Registration is sampled: a peer registers with probability \(2^{-s}\) where \(s = \lceil \log_2(N / 10^4) \rceil\), so guardian load is bounded whatever N is. Registrations live 180 s and are refreshed every 90 s. A record counts toward the swarm size only if refreshed within 135 s, so departed peers stop inflating counts within one refresh period.</p>
+  <p>Each guardian also counts, per tree, the peers that re-queried it with a starved bit in the last 10 s. The publisher reads those counts on every record store and uses them as its only global signal (section 10).</p>
+  <h3>The join handshake</h3>
+  <figure class="wide">
+    <pre class="mermaid">
+sequenceDiagram
+    autonumber
+    actor V as Joining viewer
+    participant G as DHT guardians
+    participant P as Parent candidate
+    Note over V: BOOTSTRAP: solve static and dynamic puzzles
+    V->>G: PING (carries proof of work)
+    G-->>V: PONG (reflects the observed address)
+    Note over V: DISCOVERY
+    V->>G: GET_PEERS(stream, WantedTrees)
+    G-->>V: ≤ 20 Peer Records + signed Stream Record
+    Note over V: JOINING → CONNECTING: live edge anchored from the record
+    V->>P: PROBE(tree m)
+    P-->>V: PROBE_RESPONSE(K_avail, depth, TreeState)
+    V->>P: QUIC handshake, NEIGHBOR(TreeID = m) [+ RANK_PROOF]
+    P-->>V: ACCEPTED or DISCONNECT(REJECTED_*) within τ_sched
+    V->>P: MANIFEST_REQUEST (segment X manifests + STREAM_DESCRIPTOR)
+    P-->>V: blocks pushed from segment X+1
+    </pre>
+    <figcaption>Join sequence (Appendix A.1 and Ch4 §4.3.1). A refusal is always a frame, never silence, so a full parent costs the joiner one round trip rather than a probe timeout.</figcaption>
+  </figure>
+</section>
+
+<section id="forest">
+  <div class="eyebrow">4</div>
+  <h2>The multi-forest: split the stream so no home uplink carries all of it</h2>
+  <p class="lede">A 10 Mbps uplink can feed one child at 6 Mbps, or eight children at 0.75 Mbps. The forest is how the second happens.</p>
+  <p>The stream is encoded as scalable layers: a 480p base layer at 1.5 Mbps, a 720p enhancement at 1.5 Mbps and a 1080p enhancement at 3.0 Mbps on the reference ladder. The source stripes those layers over \(M\) trees. A relay is an interior node in exactly one tree, chosen by a rendezvous hash of its own identity, and a leaf in every other tree. So a relay uploads one stripe to its children and downloads everything else.</p>
+  <h3>How many trees, and what each one carries</h3>
+  <p>\(M\) grows with the number of relay-class peers, from 2 up to 6. Too many trees at small N would leave some tree with no relay at all. The source maps layers to trees by a minimax rule: give every layer one tree, then hand each spare tree to the layer with the largest per-tree bitrate, ties to the lower layer. The largest stripe is then as small as M allows, and the trees carrying lower layers are never harder to relay than the trees carrying higher ones.</p>
+  <figure class="wide">
+    <div class="panel" id="forest-panel">
+      <div class="controls">
+        <label><span>Relay-class peers in the swarm</span> <output id="relay-out">30</output><input type="range" id="relay-count" min="2" max="60" value="30" step="1"></label>
+        <label><span>Relays drawn per tree</span> <output id="draw-out">6</output><input type="range" id="draw-count" min="3" max="10" value="6" step="1"></label>
+      </div>
+      <div class="readout">
+        <div><b id="m-out">6</b><span>trees (M)</span></div>
+        <div><b id="map-out">0.75×4, 1.5×2</b><span>per-tree bitrates, Mbps</span></div>
+        <div><b id="cover-out">—</b><span>relays per tree (expected N<sub>relay</sub>/M)</span></div>
+      </div>
+      <div id="forest-svg"></div>
+      <div class="legend"><span><i style="background:var(--l0)"></i>L0 base 480p</span><span><i style="background:var(--l1)"></i>L1 720p</span><span><i style="background:var(--l2)"></i>L2 1080p</span><span>◉ source &nbsp; ● relay interior in this tree &nbsp; ○ every other peer, a leaf here</span></div>
+    </div>
+    <figcaption>The forest at each rung of the ladder (Ch1 §1.2.1 §1.4, §1.2.4 §4.2.1). Move the first slider across 12, 18, 24 and 30 relays to watch M step and the mapping re-run. Each tree shows a sample of the relays assigned to it as interior nodes; every other peer hangs off them as a leaf.</figcaption>
+  </figure>
+  <h3>Slots: what one uplink can promise</h3>
+  <p>A relay's slot count in its tree is computed against that tree's own bitrate, with the overhead and the PULL reserve removed first:</p>
+  $$K_v(m) = \left\lfloor \frac{(1 - r_{\text{pull}})\, u_v}{t_v \cdot B_m \cdot \Omega_v} \right\rfloor, \qquad \Omega_v = \Big(1 + \frac{\bar E_v}{16}\Big)(1 + 0.085)$$
+  <figure class="wide">
+    <div class="panel">
+      <div class="controls">
+        <label><span>Relay upload u<sub>v</sub>, Mbps</span> <output id="u-out">10</output><input type="range" id="u-range" min="2" max="100" value="10" step="1"></label>
+        <label><span>Mean parity symbols per block Ē</span> <output id="e-out">1</output><input type="range" id="e-range" min="1" max="5" value="1" step="1"></label>
+      </div>
+      <div class="readout">
+        <div><b id="omega-out">1.15</b><span>overhead factor Ω</span></div>
+        <div><b id="k075-out">10</b><span>slots on a 0.75 Mbps stripe</span></div>
+        <div><b id="k15-out">5</b><span>slots on a 1.5 Mbps stripe</span></div>
+        <div><b id="k30-out">2</b><span>slots on a 3.0 Mbps tree</span></div>
+        <div><b id="trees-out">1</b><span>trees this node may be interior in</span></div>
+      </div>
+      <p class="note" style="margin:0.8rem 0 0">A node that can carry at least two full streams becomes interior in more trees, up to M, but only as its delivered throughput proves it: one extra tree per full stream of receipts over the last minute. A 10 Gbps server reaches every tree within minutes; a node that claims 10 Gbps and forwards nothing never leaves its first tree.</p>
+    </div>
+    <figcaption>Slot arithmetic (Ch1 §1.2.1 §1.3). Rising loss raises parity, which lowers the slot count, so the parity loop damps itself instead of oversubscribing the uplink.</figcaption>
+  </figure>
+  <div class="callout">A relay's upload is available only to the layer its tree carries. Idle slots on a 1080p tree cannot feed a starving base-layer tree. Only the source can change the mapping, and section 10 is about when it does.</div>
+</section>
+
+<section id="parents">
+  <div class="eyebrow">5</div>
+  <h2>Choosing a parent: capacity, latency and depth in one unit</h2>
+  <p>A joiner probes every candidate that relays the tree it wants and scores each one in milliseconds, so the three terms are directly comparable:</p>
+  $$\text{Score}(p) = 12 \cdot \min\!\big(\sqrt{K_{\text{avail}}},\ 16\big)\, R \;-\; RTT(p) \;-\; 20\,\big(e^{0.5\,h_p} - 1\big)$$
+  <p>Capacity credit saturates at 256 free slots (192 ms). RTT enters at unit weight. The depth term is exponential, so depth dominates everything: a parent at depth 7 costs 643 ms of penalty before its RTT is counted.</p>
+  <figure class="wide">
+    <div class="panel">
+      <div class="controls">
+        <label><span>Free slots K<sub>avail</sub></span> <output id="s-k-out">10</output><input type="range" id="s-k" min="0" max="10000" value="10" step="1"></label>
+        <label><span>RTT to the candidate, ms</span> <output id="s-rtt-out">20</output><input type="range" id="s-rtt" min="5" max="400" value="20" step="5"></label>
+        <label><span>Candidate's depth h<sub>p</sub></span> <output id="s-h-out">3</output><input type="range" id="s-h" min="0" max="8" value="3" step="1"></label>
+        <label><span>Reliability R</span> <output id="s-r-out">1.00</output><input type="range" id="s-r" min="0.5" max="1" value="1" step="0.01"></label>
+      </div>
+      <div class="readout">
+        <div><b id="s-cap">+38</b><span>capacity credit, ms</span></div>
+        <div><b id="s-lat">−20</b><span>latency penalty, ms</span></div>
+        <div><b id="s-hop">−70</b><span>depth penalty, ms</span></div>
+        <div><b id="s-score">−52</b><span>score</span></div>
+      </div>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Candidate</th><th class="num">RTT</th><th class="num">h<sub>p</sub></th><th class="num">K<sub>avail</sub></th><th class="num">Score</th><th>Outcome</th></tr></thead>
+        <tbody>
+          <tr><td>Local mid-tier peer</td><td class="num">20</td><td class="num">3</td><td class="num">10</td><td class="num">−52</td><td>preferred</td></tr>
+          <tr><td>Distant super node</td><td class="num">250</td><td class="num">1</td><td class="num">10,000</td><td class="num">−71</td><td>not worth the RTT</td></tr>
+          <tr><td>Local super node</td><td class="num">20</td><td class="num">1</td><td class="num">10,000</td><td class="num">+159</td><td>strongly preferred</td></tr>
+          <tr><td>Deep local peer</td><td class="num">20</td><td class="num">7</td><td class="num">10</td><td class="num">−625</td><td>strongly avoided</td></tr>
+        </tbody></table></div>
+    </div>
+    <figcaption>The scoring function with the spec's worked comparisons (Ch1 §1.2.2 §2.1.1). Backbone capacity wins when it is reachable and loses to a good local peer when it is not.</figcaption>
+  </figure>
+  <h3>Who gets the slot when the tree is full</h3>
+  <p>A join carries the joiner's rank: full-stream-equivalents it is currently delivering to others, proven from signed receipts (section 11). The parent decides in order:</p>
+  <ol>
+    <li><b>Free slot:</b> accepted.</li>
+    <li><b>Enhancement tree, no slot, joiner's rank above 1.25× the lowest child's:</b> accepted; that child is drained out over 5 segments while still being served.</li>
+    <li><b>Base-layer tree, no slot, joiner is leaf-class, leaves hold less than 20 % of the slots:</b> accepted; the lowest-ranked relay-class child that does not itself relay this tree is drained out. Nobody is orphaned.</li>
+    <li><b>Base-layer tree otherwise:</b> refused. Base-layer slots are never taken from a sitting child by rank.</li>
+  </ol>
+  <p>Two things follow. A new relay bootstraps through the base layer: it ranks zero, takes a free base-layer slot, forwards, earns receipts, and within a minute can preempt into enhancement trees. And contributors drift toward the source: every 5 s a node re-scores its parents and migrates up when a candidate beats the current one by a hysteresis margin, which is halved in the shallower direction so one hop of depth always wins.</p>
+</section>
+
+<section id="lifecycle">
+  <div class="eyebrow">6</div>
+  <h2>A peer's lifecycle</h2>
+  <p>Every node runs one state machine. Repair is a per-tree sub-state of ACTIVE, not a node state: an earlier draft stopped a node forwarding every tree while it repaired one, and a single dead parent became a churn wave down every subtree.</p>
+  <figure class="wide">
+    <svg viewBox="0 0 1000 300" role="img" aria-label="State machine: BOOTSTRAP to DISCOVERY to JOINING to CONNECTING to ACTIVE, with per-tree CHURN_REPAIR inside ACTIVE, and TERMINATED at the end.">
+      <defs><marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+      <g stroke="currentColor" fill="none" stroke-width="1.2" font-size="12">
+        <rect x="10" y="30" width="120" height="44" rx="8"/><rect x="170" y="30" width="120" height="44" rx="8"/><rect x="330" y="30" width="120" height="44" rx="8"/><rect x="490" y="30" width="130" height="44" rx="8"/>
+        <rect x="660" y="30" width="330" height="200" rx="10" stroke="var(--accent)"/>
+        <rect x="690" y="110" width="120" height="44" rx="8"/><rect x="840" y="110" width="130" height="44" rx="8"/>
+        <rect x="330" y="210" width="120" height="44" rx="8"/>
+        <line x1="130" y1="52" x2="168" y2="52" marker-end="url(#arr2)"/><line x1="290" y1="52" x2="328" y2="52" marker-end="url(#arr2)"/><line x1="450" y1="52" x2="488" y2="52" marker-end="url(#arr2)"/><line x1="620" y1="52" x2="658" y2="52" marker-end="url(#arr2)"/>
+        <path d="M810 125 L838 125" marker-end="url(#arr2)"/><path d="M840 140 L812 140" marker-end="url(#arr2)"/>
+        <path d="M660 200 C 520 200, 400 200, 230 90" stroke-dasharray="4 3" marker-end="url(#arr2)"/>
+        <path d="M660 215 C 560 240, 500 240, 452 232" marker-end="url(#arr2)"/>
+      </g>
+      <g font-size="12" text-anchor="middle">
+        <text x="70" y="57" class="mono">BOOTSTRAP</text><text x="230" y="57" class="mono">DISCOVERY</text><text x="390" y="57" class="mono">JOINING</text><text x="555" y="57" class="mono">CONNECTING</text>
+        <text x="825" y="57" class="mono" font-weight="600">ACTIVE</text>
+        <text x="750" y="137" class="mono">streaming(m)</text><text x="905" y="137" class="mono">CHURN_REPAIR(m)</text>
+        <text x="825" y="185" fill="var(--muted)">per tree m: forward, serve PULLs, send rosters,</text><text x="825" y="201" fill="var(--muted)">issue receipts for every tree that still has a parent</text>
+        <text x="390" y="237" class="mono">TERMINATED</text>
+      </g>
+      <g font-size="10.5" fill="var(--muted)" text-anchor="middle">
+        <text x="149" y="44">seed loaded</text><text x="309" y="44">records fetched</text><text x="469" y="44">|A| ≥ θ_join</text><text x="639" y="44">parents in T_sub</text>
+        <text x="825" y="104">parent timeout → · ← re-route success</text>
+        <text x="430" y="150">every parent lost</text><text x="560" y="262">verified STREAM_END</text>
+      </g>
+    </svg>
+    <figcaption>The lifecycle (Ch1 §1.3). ACTIVE is gated on parents for the <em>subscribed</em> trees only, so a peer that shed a layer still plays. The base-layer trees are never shed; a peer that cannot get a base-layer parent keeps retrying and the source's reserve serves it last.</figcaption>
+  </figure>
+  <p>The join threshold adapts to the swarm: \(\theta_{\text{join}} = \max(1, \min(4, N - 1))\). At N = 2 the first viewer connects straight to the source; at N ≥ 5 it waits for four active-set peers. A fixed threshold of 4 would have blocked every stream at N &lt; 5 forever.</p>
+</section>
+
+<section id="repair">
+  <div class="eyebrow">7</div>
+  <h2>Losing a parent: detection, election, re-attach, all scaled by RTT</h2>
+  <p>Media arrives in bursts, so silence alone proves nothing. A parent that has sent nothing for 100 ms sends a heartbeat. A child that sees 100 ms of silence probes. The eviction deadline is taken from the connection's own QUIC RTT estimator, so a far parent is not declared dead on its first lost heartbeat:</p>
+  $$\tau_{\text{evict}} = \max\big(200\text{ ms},\ 2\tau_{\text{ping}} + SRTT + 4\,RTTVAR\big)$$
+  <figure class="wide">
+    <div class="panel">
+      <div class="controls">
+        <label><span>Path round-trip time</span> <select id="rtt-select"><option value="20">20 ms (local)</option><option value="80" selected>80 ms (reference)</option><option value="250">250 ms (intercontinental)</option></select></label>
+      </div>
+      <div id="fig-repair"></div>
+      <div class="readout">
+        <div><b id="r-evict">320 ms</b><span>parent declared dead</span></div>
+        <div><b id="r-attach">≈ 480 ms</b><span>standby delivering (2 RTT)</span></div>
+        <div><b id="r-pull">≈ 640 ms</b><span>plus two PULL round trips</span></div>
+        <div><b id="r-wpull">1.5 s</b><span>PULL zone width covering it</span></div>
+      </div>
+    </div>
+    <figcaption>The recovery timeline for one tree (Ch3 §3.3). The other trees keep flowing throughout. The last bar is what the PULL zone of section 9 must cover, which is why that zone widens with RTT.</figcaption>
+  </figure>
+  <h3>Siblings elect a deputy without talking to each other</h3>
+  <p>When a relay dies, its children in that tree are orphaned together. Each already holds the same per-tree <code>ROSTER</code> its parent sent every second: the top 8 children that relay this tree, ordered by free slots, ties by lowest NodeID. Every orphan computes the same deputy from the same snapshot. The deputy finds its own new parent from its passive set; the other orphans send it a high-priority join and wait 45 ms before falling back to the ordinary path. The subtree re-attaches as a unit instead of a thundering herd.</p>
+  <figure class="wide">
+    <svg viewBox="0 0 1000 230" role="img" aria-label="Before: source feeds A, which feeds B, C and D. After A fails, C is elected deputy, re-attaches to the source, and B and D attach to C.">
+      <defs><marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+      <g font-size="12" text-anchor="middle" stroke="currentColor" fill="none" stroke-width="1.2">
+        <circle cx="230" cy="40" r="16"/><circle cx="230" cy="110" r="16" stroke="var(--accent)" stroke-dasharray="3 3"/><circle cx="150" cy="190" r="16"/><circle cx="230" cy="190" r="16"/><circle cx="310" cy="190" r="16"/>
+        <line x1="230" y1="56" x2="230" y2="92" marker-end="url(#arr3)"/>
+        <line x1="222" y1="124" x2="158" y2="174" marker-end="url(#arr3)" stroke-dasharray="3 3"/><line x1="230" y1="126" x2="230" y2="172" marker-end="url(#arr3)" stroke-dasharray="3 3"/><line x1="238" y1="124" x2="302" y2="174" marker-end="url(#arr3)" stroke-dasharray="3 3"/>
+        <circle cx="770" cy="40" r="16"/><circle cx="770" cy="110" r="16" stroke="var(--ok)" stroke-width="2"/><circle cx="690" cy="190" r="16"/><circle cx="850" cy="190" r="16"/>
+        <line x1="770" y1="56" x2="770" y2="92" marker-end="url(#arr3)"/><line x1="762" y1="124" x2="698" y2="174" marker-end="url(#arr3)"/><line x1="778" y1="124" x2="842" y2="174" marker-end="url(#arr3)"/>
+        <line x1="470" y1="115" x2="530" y2="115" marker-end="url(#arr3)"/>
+      </g>
+      <g font-size="12" text-anchor="middle">
+        <text x="230" y="44">S</text><text x="230" y="114" fill="var(--accent)">A ✕</text><text x="150" y="194">B</text><text x="230" y="194">C</text><text x="310" y="194">D</text>
+        <text x="770" y="44">S</text><text x="770" y="114" fill="var(--ok)">C</text><text x="690" y="194">B</text><text x="850" y="194">D</text>
+        <text x="500" y="105" fill="var(--muted)" font-size="11">τ_evict + 2 RTT</text>
+      </g>
+      <g font-size="11" fill="var(--muted)" text-anchor="middle"><text x="230" y="222">roster: B 8 slots, C 15, D 2 → C is deputy</text><text x="770" y="222">C re-attached, B and D joined C at the roster's address</text></g>
+    </svg>
+    <figcaption>Deterministic sibling election (Ch1 §1.2.3). With many orphans the roster's entries share them by a hash of each orphan's NodeID; orphans beyond the deputies' free slots skip the election and repair on their own, so the 45 ms wait is only ever paid by an orphan that had a chance.</figcaption>
+  </figure>
+</section>
+
+<section id="media">
+  <div class="eyebrow">8</div>
+  <h2>Blocks, proofs and parity: verify before you forward</h2>
+  <p>Each 250 ms chunk is cut, layer by layer, into 16 KB blocks. The blocks are leaves of a Blake3 Merkle tree whose root the broadcaster signs. A block travels with its sibling hashes, so any node can check it against the signed root in microseconds and forward it only then. Corrupt data cannot travel more than one hop.</p>
+  <figure class="wide">
+    <svg viewBox="0 0 1000 250" role="img" aria-label="A Merkle tree over four blocks with the signed root, and the path a verifier recomputes for block 0.">
+      <g stroke="currentColor" fill="none" stroke-width="1.2" font-size="12">
+        <rect x="380" y="16" width="240" height="40" rx="8" stroke="var(--accent)"/>
+        <rect x="230" y="90" width="120" height="34" rx="6" stroke="var(--muted)"/><rect x="650" y="90" width="120" height="34" rx="6"/>
+        <rect x="150" y="160" width="90" height="30" rx="6"/><rect x="310" y="160" width="90" height="30" rx="6" stroke="var(--muted)"/><rect x="600" y="160" width="90" height="30" rx="6"/><rect x="760" y="160" width="90" height="30" rx="6"/>
+        <rect x="150" y="212" width="90" height="26" rx="4" stroke="var(--accent)"/><rect x="310" y="212" width="90" height="26" rx="4"/><rect x="600" y="212" width="90" height="26" rx="4"/><rect x="760" y="212" width="90" height="26" rx="4"/>
+        <line x1="290" y1="90" x2="470" y2="56"/><line x1="710" y1="90" x2="530" y2="56"/>
+        <line x1="195" y1="160" x2="270" y2="124"/><line x1="355" y1="160" x2="310" y2="124"/><line x1="645" y1="160" x2="690" y2="124"/><line x1="805" y1="160" x2="730" y2="124"/>
+        <line x1="195" y1="212" x2="195" y2="190"/><line x1="355" y1="212" x2="355" y2="190"/><line x1="645" y1="212" x2="645" y2="190"/><line x1="805" y1="212" x2="805" y2="190"/>
+      </g>
+      <g font-size="12" text-anchor="middle">
+        <text x="500" y="34" font-weight="600">MANIFEST: H_root, SegmentSeq, ChunkIndex</text><text x="500" y="49" fill="var(--muted)" font-size="11">signed by SK_source, one per 250 ms chunk</text>
+        <text x="290" y="111" class="mono">h(0,1)</text><text x="710" y="111" class="mono">h(2,3)</text>
+        <text x="195" y="179" class="mono">h0</text><text x="355" y="179" class="mono">h1</text><text x="645" y="179" class="mono">h2</text><text x="805" y="179" class="mono">h3</text>
+        <text x="195" y="230" class="mono">B0 16 KB</text><text x="355" y="230" class="mono">B1</text><text x="645" y="230" class="mono">B2</text><text x="805" y="230" class="mono">B3</text>
+      </g>
+      <text x="40" y="120" font-size="11" fill="var(--muted)">to verify B0, a node needs</text><text x="40" y="136" font-size="11" fill="var(--muted)">h1 and h(2,3) (grey), then</text><text x="40" y="152" font-size="11" fill="var(--muted)">recomputes up to H_root</text>
+    </svg>
+    <figcaption>Progressive Blake3 verification (Ch4 §4.1.2). At 6 Mbps a chunk holds about 12 blocks and the tree is 4 levels deep; a proof is at most 4 sibling hashes.</figcaption>
+  </figure>
+  <h3>Loss is repaired on the link, not by asking again</h3>
+  <p>Each block is one RaptorQ source block: 16 symbols of 1024 bytes plus \(E\) parity symbols sized per child link from the loss rate \(\rho\) the child reports in its receipt every second. The first 16 symbols are the raw bytes, so on a clean link a relay reconstructs the block by concatenation and never runs the decoder.</p>
+  $$E = \max\Big(1,\ \big\lceil \text{clamp}(2\rho K,\ 0.05K,\ 0.30K) \big\rceil\Big), \qquad K = 16$$
+  <figure class="wide">
+    <div class="panel">
+      <div class="controls"><label><span>Loss on the child's link ρ</span> <output id="rho-out">2.0 %</output><input type="range" id="rho-range" min="0" max="25" value="2" step="0.5"></label></div>
+      <div class="readout">
+        <div><b id="e-par">1</b><span>parity symbols per block</span></div>
+        <div><b id="e-pct">6.3 %</b><span>parity overhead</span></div>
+        <div><b id="e-omega">1.15</b><span>Ω at this parity</span></div>
+      </div>
+    </div>
+    <figcaption>Per-link parity (Ch4 §4.2.2). A 15 % cellular link gets the 30 % ceiling, five symbols. Parity is charged to the relay's slot count, so a lossy link buys fewer children, never an oversubscribed uplink.</figcaption>
+  </figure>
+  <p>The verification boundary is the block, never the symbol. A relay does decode → verify → re-encode → push at 16 KB granularity. Receipts (section 11) attest verified blocks, one per segment per tree with a bitmap of the blocks verified.</p>
+</section>
+
+<section id="buffer">
+  <div class="eyebrow">9</div>
+  <h2>The playout buffer: push at the edge, pull before the deadline</h2>
+  <p>A peer plays 3.0 s behind the live edge it receives. The newest part of the buffer is filled by the tree push with no requests at all. The oldest part, the PULL zone, is where a peer asks neighbours for anything still missing, by block, from mesh neighbours in other branches. The zone is sized to cover one parent repair plus two PULL round trips on the peer's own paths:</p>
+  $$W_{\text{pull}} = \text{clamp}\big(\tau_{\text{evict}}^{\max} + 6\,SRTT^{\max},\ 1.5\text{ s},\ 2.0\text{ s}\big)$$
+  <figure class="wide">
+    <div id="fig-buffer" class="panel"></div>
+    <figcaption>The sliding timeline (Ch4 §4.3.1). The PULL zone is 1.5 s for paths up to about 150 ms RTT and 2.0 s on a 250 ms path, where a repair alone takes about a second.</figcaption>
+  </figure>
+  <h3>Joining mid-stream</h3>
+  <p>The Stream Record names the live edge, but that hint is up to about 1.7 s stale by the time a joiner acts on it. So the record is a bootstrap hint only. The peer re-anchors on the highest segment actually arriving on the push path once it is ACTIVE, and never moves the anchor backward. Two viewers in the same room converge on the same offset however slow their lookups were. Every peer retains 8 s of verified segments so a joiner can backfill segment X from a neighbour while segment X+1 is already being pushed to it.</p>
+</section>
+
+<section id="capacity">
+  <div class="eyebrow">10</div>
+  <h2>When upload runs short: shed, fold, reserve</h2>
+  <p class="lede">The sustainability condition fails often on real residential links. The spec's answer is resolution loss, never a frozen player.</p>
+  <p>Shortage shows up locally, as a failed join: every candidate for a tree answers <code>REJECTED_SATURATED</code> or sits at the depth limit. After two consecutive failed rounds in any tree of a layer, the peer sheds that layer and everything above it, renders the layer below, and does not retry for 10 s. Rounds in which some candidate was still warming up do not count, so a growth burst is never mistaken for a shortage. The base layer is never shed.</p>
+  <figure class="wide">
+    <div class="panel">
+      <div class="controls"><label><span>Mean relay upload ū<sub>relay</sub>, Mbps</span> <output id="cap-out">8</output><input type="range" id="cap-range" min="1" max="14" value="8" step="0.5"></label></div>
+      <div class="tablewrap"><table id="cap-table">
+        <thead><tr><th>M</th><th>Per-tree bitrates</th><th class="num">1080p needs</th><th class="num">720p after one fold</th><th class="num">480p after two folds</th><th>At this upload</th></tr></thead>
+        <tbody></tbody></table></div>
+    </div>
+    <figcaption>Required mean relay upload per layer set at each rung, no leaves, Ω = 1.15 (Ch1 §1.1.5 §5.2). Each entry is M × (largest stripe) × Ω / 0.9. The base layer's threshold is 1.92 Mbps at every rung once the layers above it are folded.</figcaption>
+  </figure>
+  <h3>Shedding cannot move capacity. Folding can.</h3>
+  <p>A relay's slots are in its assigned tree, and that tree carries whatever layer the source put there. When the base layer starves at M = 6 with 4 Mbps relays, peers shedding 1080p free nothing for 480p: a third of the relays sit on 1080p stripes nobody can afford. Only the source can re-map, and it already has the signal: the guardians' per-tree starved counts. If a tree of a <em>lower</em> layer shows more than 5 % of the swarm starved on average over 10 s (base layer) or 30 s (others), the source emits a <code>MANIFEST_UPDATE</code> with the same M, one fewer layer, and the mapping re-run. No relay moves; no remaining tree's bitrate rises; slot counts rise. The base layer re-striped over three trees at 0.5 Mbps is exactly sustainable where (2,2,2) left one peer in three without it.</p>
+  <p>Unfolding is gated on the relay count growing by 50 % since the fold, never on a timer: a wrong unfold would re-create the freeze that caused the fold.</p>
+  <h3>The last resort costs the broadcaster a constant</h3>
+  <p>The source holds back \(R_{\text{src}} = 3 \cdot b_0 \cdot \Omega \approx 5.2\) Mbps, three full copies of the base layer, as an emergency pool that serves base-layer slots directly when the starved counts say no mapping can carry them. That is the whole worst case: 480p, partly source-fed, at a cost that never grows with N.</p>
+</section>
+
+<section id="incentives">
+  <div class="eyebrow">11</div>
+  <h2>Receipts and rank: contribution buys placement</h2>
+  <p>Every child signs one receipt per segment per tree for the blocks it verified from its parent. A relay's rank is the throughput those receipts prove over the last 60 segments, divided by the stream bitrate: how many full streams it is currently delivering to others. Receipts are capped at what one segment of the named tree can honestly contain, so declaring bytes buys nothing.</p>
+  $$\Theta^{\text{rate}}_A = \frac{1}{60\text{ s}} \sum_{\text{last 60 segments}} w_j \cdot \min\big(\text{Bytes}_j,\ \text{Cap}_j\big) \cdot 8, \qquad \text{rank} = \Theta^{\text{rate}}_A / B$$
+  <h3>Proving rank in a few kilobytes</h3>
+  <p>A super node holds half a million receipts a minute, and no verifier would trust a self-reported total. So rank is presented as a commit-then-sample proof. The prover sorts its receipts by a canonical key, commits to a Merkle root and a count, and the sample is chosen by the root of a manifest the broadcaster signed <em>after</em> the commitment, which the prover could not have known. Eight adjacent pairs are opened. Each pair must be in strict key order, which is what makes the count a count of distinct receipts: a duplicate must sit next to its original in sorted order and the pair check catches it.</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Fraction of fake or duplicated receipts</th><th class="num">Survives 8 pairs</th></tr></thead>
+    <tbody><tr><td>10 %</td><td class="num">43 %</td></tr><tr><td>25 %</td><td class="num">10 %</td></tr><tr><td>50 %</td><td class="num">0.4 %</td></tr></tbody></table></div>
+  <p>The proof is about 6 to 10 KB and is sent once per admission attempt, never per block.</p>
+  <h3>What rank buys, and what it cannot touch</h3>
+  <div class="grid2">
+    <div class="panel"><b>Rank buys</b><ul><li>enhancement-layer slots, by preempting a child ranked below 1/1.25 of the joiner</li><li>shallower placement, through the 5 s migration loop</li><li>interior status in more trees, one per full stream delivered</li><li>standing to accuse (rank ≥ 0.25)</li></ul></div>
+    <div class="panel"><b>Rank never touches</b><ul><li>a sitting child's base-layer slot</li><li>the leaf share: 20 % of base-layer slots a leaf can claim by displacing a pure subscriber</li><li>repair traffic, which Tit-for-Tat governs separately over the 10 % PULL reserve in 500 ms cycles</li></ul></div>
+  </div>
+  <p>Leaf-class devices, phones on cellular for instance, never upload and rank zero. They receive the base layer by right and pay in quality ceiling: they are the first child preempted when an enhancement tree is contended. The spec states the residual honestly: a colluding uploader with Sybil downloaders can forge rank at a cost of identities, not bandwidth, so everything rank buys is bounded independently by the prefix cap and by children that observe non-delivery and leave.</p>
+</section>
+
+<section id="nat">
+  <div class="eyebrow">12</div>
+  <h2>NATs and emergent relays</h2>
+  <p>Reachability is measured at bootstrap from two PONG reflections and decides what a node may be:</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Reachability</th><th>NAT</th><th>May relay?</th><th>How it is reached</th></tr></thead>
+    <tbody>
+      <tr><td><code>PUBLIC</code></td><td>none or full cone</td><td>yes</td><td>probed directly</td></tr>
+      <tr><td><code>CONE</code></td><td>restricted, port-restricted</td><td>yes</td><td>a <code>PUNCH_REQUEST</code> relayed through whoever introduced it, then the probe; one extra RTT, 1 s validity</td></tr>
+      <tr><td><code>SYMMETRIC</code></td><td>symmetric, CGNAT</td><td>no, leaf class</td><td>connects outbound to PUBLIC parents; bridged by an emergent relay where it needs a CONE parent or wants to contribute</td></tr>
+    </tbody></table></div>
+  <figure class="wide">
+    <svg viewBox="0 0 1000 150" role="img" aria-label="A cone parent B pushes a tree stripe to relay R, which pushes it on to symmetric-NAT peer A; A's receipts to R carry the RELAYED flag.">
+      <defs><marker id="arr4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+      <g stroke="currentColor" fill="none" stroke-width="1.2">
+        <rect x="60" y="40" width="200" height="60" rx="8"/><rect x="400" y="40" width="200" height="60" rx="8" stroke="var(--ok)"/><rect x="740" y="40" width="200" height="60" rx="8"/>
+        <line x1="260" y1="62" x2="398" y2="62" marker-end="url(#arr4)"/><line x1="600" y1="62" x2="738" y2="62" marker-end="url(#arr4)"/>
+        <line x1="738" y1="84" x2="602" y2="84" marker-end="url(#arr4)" stroke-dasharray="4 3"/><line x1="398" y1="84" x2="262" y2="84" marker-end="url(#arr4)" stroke-dasharray="4 3"/>
+      </g>
+      <g font-size="12" text-anchor="middle">
+        <text x="160" y="66" font-weight="600">Cone parent B</text><text x="160" y="84" fill="var(--muted)">R is an ordinary child in one of B's slots</text>
+        <text x="500" y="66" font-weight="600">Emergent relay R</text><text x="500" y="84" fill="var(--muted)">PUBLIC, ≥ 20 Mbps, 30 min uptime</text>
+        <text x="840" y="66" font-weight="600">Symmetric peer A</text><text x="840" y="84" fill="var(--muted)">leaf class, child of R</text>
+        <text x="329" y="54" font-size="11" fill="var(--muted)">tree stripe</text><text x="669" y="54" font-size="11" fill="var(--muted)">tree stripe</text>
+        <text x="669" y="100" font-size="11" fill="var(--muted)">receipts ×3 (RELAYED)</text><text x="329" y="100" font-size="11" fill="var(--muted)">receipts</text>
+      </g>
+      <text x="500" y="135" font-size="11" fill="var(--muted)" text-anchor="middle">A bridge is a tree edge twice; it costs R what any child costs, charged to R's tree budget, capped at half of it. A's depth is B's plus two.</text>
+    </svg>
+    <figcaption>An emergent relay bridging a NAT-blocked peer (Ch6 §6.3). Relays are paid in reputation: receipts for relayed traffic weigh three times. A broadcaster behind NAT binds two such relays as ingress roots and delegates its base-layer reserve to them.</figcaption>
+  </figure>
+  <p class="note">Status of the reference implementation: reflection decides the NAT class, but a node still advertises the address it was configured with, so viewers behind a NAT need a VPN or an explicit public address today. See <code>src/docs/MULTI_MACHINE.md</code>.</p>
+</section>
+
+<section id="security">
+  <div class="eyebrow">13</div>
+  <h2>What an attacker gets, by mechanism</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Attack</th><th>Mechanism</th><th>What is left</th></tr></thead>
+    <tbody>
+      <tr><td>Inject corrupt blocks</td><td>Merkle proof against the signed manifest at every hop; forged source signature → local ban 10 min, doubling to 24 h</td><td>One hop of wasted download, then nothing</td></tr>
+      <tr><td>Sybil identities</td><td>Two PoW puzzles rate-limit creation; per-prefix caps of max(1, ⌈K / min(P<sub>obs</sub>, 20)⌉) on every slot set; 1 of 20 per k-bucket</td><td>As many identities as addresses, not as CPU</td></tr>
+      <tr><td>Eclipse a lookup</td><td>Three disjoint parallel lookups; a hijack needs every path, P ≤ f³</td><td>Negligible below a third of the DHT</td></tr>
+      <tr><td>Under-report N to pin a joiner to one peer</td><td>Stream Record is publisher-signed; a peer ACTIVE with fewer than two active-set peers keeps a DHT re-query in flight</td><td>A forged N needs the publisher's key</td></tr>
+      <tr><td>Replay old manifests</td><td>Sequence window: 8 s below the live edge, 2 segments above; strictly increasing matrix versions</td><td>Dropped</td></tr>
+      <tr><td>Inflate rank</td><td>Commit-then-sample proof, capped bytes, adjacent-pair order check</td><td>Forgeable only with Sybil downloaders, bounded by prefix caps and children leaving</td></tr>
+      <tr><td>Collude to evict an honest peer</td><td>Evidence-carrying accusations; 3 accusers from 3 prefixes with rank ≥ 0.25 within 10 min; 4 accusations per accuser per minute</td><td>Local, bounded, never gossiped as a ban</td></tr>
+      <tr><td>Flood a node</td><td>XDP token buckets: 2000 pps per allowlisted peer, 50 pps per unknown source, 5000 pps new-connection ceiling</td><td>Dropped in the kernel before user space</td></tr>
+    </tbody></table></div>
+  <p>No peer declares its own address, no byte is forwarded unverified, and the broadcaster's key is the only trust anchor. Those three sentences are the threat model in short; Appendix C has the long form.</p>
+</section>
+
+<section id="requirements">
+  <div class="eyebrow">14</div>
+  <h2>The requirements the design is held to</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Requirement</th><th>Target</th><th>Where it is derived</th><th>What enforces it</th></tr></thead>
+    <tbody>
+      <tr><td>Glass-to-glass latency</td><td>3 – 5 s, ≈ 4.0 s reference</td><td>Ch1 §1.1.3</td><td>250 ms chunks, 3.0 s buffer, D<sub>max</sub> = 8</td></tr>
+      <tr><td>Startup</td><td>first frame ≤ 1.5 s</td><td>Ch8 §8.2</td><td>one GET_PEERS, parallel probes, manifests and descriptor in one request</td></tr>
+      <tr><td>Scale</td><td>10⁶ viewers, mean depth ≤ 7</td><td>Ch1 §1.1.3</td><td>fan-out 8, depth admission rule, sampled registration</td></tr>
+      <tr><td>Cold start</td><td>works at N = 2</td><td>Ch1 §1.2.1, §1.3</td><td>adaptive join threshold, M starts at 2, coverage grant</td></tr>
+      <tr><td>Resilience</td><td>sub-second repair of one tree</td><td>Ch3 §3.3</td><td>heartbeats, RTT-scaled eviction, deputy election, per-tree repair</td></tr>
+      <tr><td>Fairness</td><td>contribution buys quality; base layer for all</td><td>Ch1 §1.2.2, Ch5</td><td>rank admission, leaf share, never-preempted base slots</td></tr>
+      <tr><td>Trust</td><td>verify before forward; bound identities</td><td>Ch4, Ch2, Ch7</td><td>Merkle proofs per block, dynamic PoW on the observed address</td></tr>
+      <tr><td>Broadcaster cost</td><td>a small constant</td><td>Ch1 §1.1.5 §5.4</td><td>source reserve of 3 base-layer copies</td></tr>
+      <tr><td>Starvation (PSR)</td><td>≤ 0.1 %</td><td>Ch8 §8.2</td><td>parity per link, PULL zone, repair timeline</td></tr>
+      <tr><td>Control overhead (CDO)</td><td>≤ 2 %</td><td>Ch8 §8.2</td><td>bounded rosters, one receipt per segment per tree, sampled proofs</td></tr>
+    </tbody></table></div>
+  <p>The simulator in <code>src/crates/bs-sim</code> gates these on every check run, and the Docker fleet and the multi-machine swarm measure them on real sockets. The audit record that connects spec and implementation lives in <code>issues/</code> and <code>solutions/</code>.</p>
+</section>
+
+<section id="reading">
+  <div class="eyebrow">15</div>
+  <h2>Where to read more</h2>
+  <div class="grid2">
+    <div class="panel"><b>Specification</b><ul>
+      <li><a href="protocol/INDEX.md">protocol/INDEX.md</a>, the map of every chapter</li>
+      <li><a href="protocol/appendix_b_parameters.md">Appendix B</a>, every constant used on this page</li>
+      <li><a href="protocol/appendix_d_frame_registry.md">Appendix D</a>, the byte layout of every frame</li>
+      <li><a href="protocol/chapter1/1.2_multi_forest_overlays/2_parent_selection_algorithm.md">Ch1 §1.2.2</a>, parent selection and admission</li>
+      <li><a href="protocol/chapter1/1.1_scale_latency/5_capacity_adaptation.md">Ch1 §1.1.5</a>, shed, fold and reserve</li>
+    </ul></div>
+    <div class="panel"><b>Implementation and record</b><ul>
+      <li><a href="src/ARCHITECTURE.md">src/ARCHITECTURE.md</a>, the sans-I/O core and the crate map</li>
+      <li><a href="src/docs/TESTING.md">src/docs/TESTING.md</a>, the five test levels</li>
+      <li><a href="src/docs/MULTI_MACHINE.md">src/docs/MULTI_MACHINE.md</a>, running a swarm across machines</li>
+      <li><a href="issues/README.md">issues/</a> and <a href="solutions/README.md">solutions/</a>, open defects and decided designs</li>
+    </ul></div>
+  </div>
+  <h3>Reference parameters used on this page</h3>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Symbol</th><th class="num">Value</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>τ<sub>ping</sub></td><td class="num">100 ms</td><td>heartbeat after this much silence</td></tr>
+      <tr><td>τ<sub>evict</sub></td><td class="num">max(200, 200 + SRTT + 4 RTTVAR) ms</td><td>parent declared dead</td></tr>
+      <tr><td>τ<sub>deputy</sub></td><td class="num">45 ms</td><td>wait for the elected deputy</td></tr>
+      <tr><td>Δ<sub>buffer</sub></td><td class="num">3.0 s</td><td>playout behind the live edge</td></tr>
+      <tr><td>W<sub>pull</sub></td><td class="num">1.5 – 2.0 s</td><td>PULL zone width</td></tr>
+      <tr><td>τ<sub>retain</sub></td><td class="num">8 s</td><td>verified segments kept for late joiners</td></tr>
+      <tr><td>Chunk</td><td class="num">250 ms</td><td>signing unit, 4 per segment</td></tr>
+      <tr><td>Block</td><td class="num">16 KB</td><td>Merkle leaf and RaptorQ source block</td></tr>
+      <tr><td>Ω</td><td class="num">1.15 – 1.42</td><td>parity plus framing overhead</td></tr>
+      <tr><td>r<sub>pull</sub></td><td class="num">0.10</td><td>upload reserved for repair</td></tr>
+      <tr><td>D<sub>max</sub></td><td class="num">8</td><td>depth a parent refuses to exceed</td></tr>
+      <tr><td>M</td><td class="num">2 – 6</td><td>trees, by relay count 12 / 18 / 24 / 30</td></tr>
+      <tr><td>Shed rule</td><td class="num">2 rounds, 10 s</td><td>failed join rounds before shedding; hysteresis</td></tr>
+      <tr><td>s<sub>fold</sub>, τ<sub>fold</sub></td><td class="num">5 %, 10 / 30 s</td><td>starved fraction and window that fold a layer</td></tr>
+      <tr><td>R<sub>src</sub></td><td class="num">3 b₀ Ω ≈ 5.2 Mbps</td><td>source base-layer reserve</td></tr>
+      <tr><td>Preemption margin</td><td class="num">1.25×</td><td>rank needed to displace an enhancement child</td></tr>
+      <tr><td>Leaf share</td><td class="num">⌈0.2 K<sub>v</sub>⌉</td><td>base-layer slots leaves can claim</td></tr>
+      <tr><td>C₁, C₂</td><td class="num">16, 8 – 14 bits</td><td>static and dynamic proof of work</td></tr>
+    </tbody></table></div>
+</section>
+
+<footer>
+  BitStream specification and reference implementation. Diagrams drawn with D3 7.9, Mermaid 10.9 and KaTeX 0.16 from cdnjs; open this file with an Internet connection for the interactive figures. Specification sections are cited in each caption.
+</footer>
+</main>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const isDark = () => {
+    const t = document.documentElement.getAttribute('data-theme');
+    if (t) return t === 'dark';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  };
+  const fmt1 = d3.format('.1f'), fmt0 = d3.format(',.0f');
+
+  // ---------- Spec formulas ----------
+  const B = 6.0, LAYERS = [1.5, 1.5, 3.0], R_PULL = 0.10, F_FRAME = 0.085, K_SYM = 16;
+  const omega = (ebar) => (1 + ebar / K_SYM) * (1 + F_FRAME);
+  function ladderM(nRelay) { return nRelay >= 30 ? 6 : nRelay >= 24 ? 5 : nRelay >= 18 ? 4 : nRelay >= 12 ? 3 : 2; }
+  // Ch1 §1.2.4 §4.2.1: every layer one tree, each spare tree to the layer with the largest per-tree bitrate, ties to the lower layer.
+  function mapping(M) {
+    if (M < LAYERS.length) return [{ layer: 0, bitrate: 3.0, label: 'L0+L1' }, { layer: 2, bitrate: 3.0, label: 'L2' }];
+    const t = LAYERS.map(() => 1);
+    for (let s = 0; s < M - LAYERS.length; s++) {
+      let best = 0;
+      for (let l = 1; l < LAYERS.length; l++) if (LAYERS[l] / t[l] > LAYERS[best] / t[best]) best = l;
+      t[best] += 1;
+    }
+    const trees = [];
+    LAYERS.forEach((b, l) => { for (let i = 0; i < t[l]; i++) trees.push({ layer: l, bitrate: b / t[l], label: 'L' + l + (t[l] > 1 ? ' stripe ' + (i + 1) + '/' + t[l] : '') }); });
+    return trees;
+  }
+  function mapLabel(trees) {
+    const counts = new Map();
+    trees.forEach(tr => counts.set(tr.bitrate, (counts.get(tr.bitrate) || 0) + 1));
+    return [...counts.entries()].sort((a, b) => a[0] - b[0]).map(([b, n]) => n > 1 ? b.toFixed(2).replace(/0$/, '') + '×' + n : b.toFixed(1)).join(', ');
+  }
+  const slots = (u, t, bm, om) => Math.floor((1 - R_PULL) * u / (t * bm * om));
+  const layerColor = (l) => css(l === 0 ? '--l0' : l === 1 ? '--l1' : '--l2');
+  // A small deterministic hash standing in for Blake3 in the rendezvous rule.
+  function h32(str) { let h = 2166136261; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } return h; }
+  const rendezvous = (id, M) => { let best = 1, bv = -1; for (let m = 1; m <= M; m++) { const v = h32(id + ':' + m); if (v > bv) { bv = v; best = m; } } return best; };
+
+  // ---------- Figure: egress vs N ----------
+  function drawEgress() {
+    const el = d3.select('#fig-egress'); el.selectAll('*').remove();
+    const W = Math.min(el.node().clientWidth - 8, 860), H = 280, m = { t: 16, r: 24, b: 44, l: 64 };
+    const svg = el.append('svg').attr('viewBox', `0 0 ${W} ${H}`).attr('role', 'img').attr('aria-label', 'Sender egress versus audience size: a CDN grows linearly to 6 Tbps at a million viewers; the BitStream source stays near 20 Mbps.');
+    const x = d3.scaleLog().domain([1, 1e6]).range([m.l, W - m.r]);
+    const y = d3.scaleLog().domain([1, 1e7]).range([H - m.b, m.t]);
+    const fg = css('--fg'), muted = css('--muted');
+    svg.append('g').attr('transform', `translate(0,${H - m.b})`).call(d3.axisBottom(x).ticks(6, '~s')).attr('color', muted);
+    svg.append('g').attr('transform', `translate(${m.l},0)`).call(d3.axisLeft(y).ticks(7, '~s')).attr('color', muted);
+    svg.append('text').attr('x', (m.l + W - m.r) / 2).attr('y', H - 8).attr('text-anchor', 'middle').attr('font-size', 12).attr('fill', muted).text('viewers N');
+    svg.append('text').attr('transform', `translate(14,${(m.t + H - m.b) / 2}) rotate(-90)`).attr('text-anchor', 'middle').attr('font-size', 12).attr('fill', muted).text('sender egress, Mbps');
+    const pts = d3.range(0, 6.01, 0.25).map(e => Math.pow(10, e));
+    const line = d3.line().x(d => x(d)).y(d => y(Math.max(1, d * B)));
+    svg.append('path').datum(pts).attr('d', line).attr('fill', 'none').attr('stroke', fg).attr('stroke-width', 2);
+    const src = d3.line().x(d => x(d)).y(() => y(20));
+    svg.append('path').datum(pts).attr('d', src).attr('fill', 'none').attr('stroke', css('--accent')).attr('stroke-width', 2.5);
+    svg.append('text').attr('x', x(2e4)).attr('y', y(2e4 * B) - 8).attr('font-size', 12).attr('fill', fg).text('CDN: N × B');
+    svg.append('text').attr('x', x(2e4)).attr('y', y(20) - 8).attr('font-size', 12).attr('fill', css('--accent')).text('BitStream source: its slots + 5.2 Mbps reserve');
+  }
+
+  // ---------- Figure: glass-to-glass budget ----------
+  function drawBudget() {
+    const el = d3.select('#fig-budget'); el.selectAll('*').remove();
+    const terms = [
+      { k: 'Encoder', v: 0.2, c: css('--muted') }, { k: 'Signing barrier', v: 0.25, c: css('--t2') }, { k: 'Source pacing', v: 0.125, c: css('--t3') },
+      { k: 'Propagation, 7 hops', v: 0.511, c: css('--t5') }, { k: 'Playout buffer', v: 3.0, c: css('--accent') },
+    ];
+    const total = d3.sum(terms, d => d.v);
+    const W = Math.min(el.node().clientWidth - 8, 860), H = 110;
+    const svg = el.append('svg').attr('viewBox', `0 0 ${W} ${H}`).attr('role', 'img').attr('aria-label', 'Stacked bar of the glass-to-glass latency terms totalling about four seconds, dominated by the 3.0 second playout buffer.');
+    const x = d3.scaleLinear().domain([0, total]).range([8, W - 8]);
+    let acc = 0;
+    terms.forEach(t => {
+      const x0 = x(acc), x1 = x(acc + t.v);
+      svg.append('rect').attr('x', x0).attr('y', 28).attr('width', Math.max(1, x1 - x0 - 2)).attr('height', 36).attr('rx', 4).attr('fill', t.c);
+      if (x1 - x0 > 60) svg.append('text').attr('x', (x0 + x1) / 2).attr('y', 50).attr('text-anchor', 'middle').attr('font-size', 12).attr('fill', '#fff').attr('font-weight', 600).text(t.v + ' s');
+      svg.append('text').attr('x', x1 - x0 > 60 ? (x0 + x1) / 2 : x0 + 2).attr('y', 84).attr('text-anchor', x1 - x0 > 60 ? 'middle' : 'start').attr('font-size', 11).attr('fill', css('--muted')).text(t.k);
+      acc += t.v;
+    });
+    svg.append('text').attr('x', W - 8).attr('y', 18).attr('text-anchor', 'end').attr('font-size', 12).attr('fill', css('--fg')).text('total ≈ ' + total.toFixed(2) + ' s');
+  }
+
+  // ---------- Figure: the forest ----------
+  function drawForest() {
+    const nRelay = +document.getElementById('relay-count').value;
+    const nDraw = +document.getElementById('draw-count').value;
+    const M = ladderM(nRelay), trees = mapping(M);
+    document.getElementById('relay-out').textContent = nRelay;
+    document.getElementById('draw-out').textContent = nDraw;
+    document.getElementById('m-out').textContent = M;
+    document.getElementById('map-out').textContent = mapLabel(trees);
+    document.getElementById('cover-out').textContent = (nRelay / M).toFixed(1);
+    const ids = d3.range(nRelay).map(i => 'relay-' + (i + 1));
+    const assigned = d3.range(1, M + 1).map(m => ids.filter(id => rendezvous(id, M) === m));
+    const el = d3.select('#forest-svg'); el.selectAll('*').remove();
+    const W = Math.max(320, el.node().clientWidth - 4), colW = W / M, H = 250;
+    const svg = el.append('svg').attr('viewBox', `0 0 ${W} ${H}`).attr('role', 'img').attr('aria-label', `The forest at M = ${M}: each tree shows the source, its assigned relays as interior nodes and other peers as leaves.`);
+    trees.forEach((tr, i) => {
+      const g = svg.append('g').attr('transform', `translate(${i * colW},0)`);
+      const color = layerColor(tr.layer);
+      g.append('text').attr('x', colW / 2).attr('y', 16).attr('text-anchor', 'middle').attr('font-size', 12).attr('font-weight', 600).attr('fill', color).text(`Tree ${i + 1}`);
+      g.append('text').attr('x', colW / 2).attr('y', 31).attr('text-anchor', 'middle').attr('font-size', 11).attr('fill', css('--muted')).text(`${tr.label} · ${tr.bitrate.toFixed(2).replace(/0$/, '')} Mbps`);
+      const interior = assigned[i].slice(0, nDraw);
+      const cx = colW / 2, sy = 52, iy = 125, ly = 205;
+      g.append('circle').attr('cx', cx).attr('cy', sy).attr('r', 8).attr('fill', color).attr('stroke', css('--fg')).attr('stroke-width', 1.5);
+      if (interior.length === 0) {
+        g.append('text').attr('x', cx).attr('y', iy + 4).attr('text-anchor', 'middle').attr('font-size', 11).attr('fill', css('--accent')).text('no relay assigned');
+        g.append('text').attr('x', cx).attr('y', iy + 18).attr('text-anchor', 'middle').attr('font-size', 10).attr('fill', css('--muted')).text('coverage grant or source serves');
+        return;
+      }
+      const ix = d3.scalePoint().domain(interior).range([18, colW - 18]);
+      interior.forEach(id => {
+        g.append('line').attr('x1', cx).attr('y1', sy + 8).attr('x2', ix(id)).attr('y2', iy - 7).attr('stroke', color).attr('stroke-width', 1.2);
+        g.append('circle').attr('cx', ix(id)).attr('cy', iy).attr('r', 6).attr('fill', color);
+        const leaves = Math.max(2, Math.min(4, Math.round(10 / interior.length)));
+        const lx = d3.scalePoint().domain(d3.range(leaves)).range([ix(id) - 12, ix(id) + 12]);
+        d3.range(leaves).forEach(j => {
+          g.append('line').attr('x1', ix(id)).attr('y1', iy + 6).attr('x2', lx(j)).attr('y2', ly - 5).attr('stroke', css('--line'));
+          g.append('circle').attr('cx', lx(j)).attr('cy', ly).attr('r', 4).attr('fill', css('--surface')).attr('stroke', css('--muted'));
+        });
+      });
+      g.append('text').attr('x', cx).attr('y', H - 10).attr('text-anchor', 'middle').attr('font-size', 10.5).attr('fill', css('--muted')).text(`${assigned[i].length} of ${nRelay} relays interior here`);
+    });
+  }
+
+  // ---------- Slot calculator ----------
+  function drawSlots() {
+    const u = +document.getElementById('u-range').value, e = +document.getElementById('e-range').value, om = omega(e);
+    document.getElementById('u-out').textContent = u; document.getElementById('e-out').textContent = e;
+    document.getElementById('omega-out').textContent = om.toFixed(2);
+    const maxTrees = Math.min(6, Math.max(1, Math.floor((1 - R_PULL) * u / (om * B))));
+    document.getElementById('trees-out').textContent = maxTrees;
+    document.getElementById('k075-out').textContent = slots(u, 1, 0.75, om);
+    document.getElementById('k15-out').textContent = slots(u, 1, 1.5, om);
+    document.getElementById('k30-out').textContent = slots(u, 1, 3.0, om);
+  }
+
+  // ---------- Score explorer ----------
+  function drawScore() {
+    const k = +document.getElementById('s-k').value, rtt = +document.getElementById('s-rtt').value, h = +document.getElementById('s-h').value, r = +document.getElementById('s-r').value;
+    document.getElementById('s-k-out').textContent = fmt0(k); document.getElementById('s-rtt-out').textContent = rtt; document.getElementById('s-h-out').textContent = h; document.getElementById('s-r-out').textContent = r.toFixed(2);
+    const cap = 12 * Math.min(Math.sqrt(k), 16) * r, hop = 20 * (Math.exp(0.5 * h) - 1), score = cap - rtt - hop;
+    document.getElementById('s-cap').textContent = '+' + cap.toFixed(0);
+    document.getElementById('s-lat').textContent = '−' + rtt;
+    document.getElementById('s-hop').textContent = '−' + hop.toFixed(0);
+    document.getElementById('s-score').textContent = (score >= 0 ? '+' : '−') + Math.abs(score).toFixed(0);
+  }
+
+  // ---------- Repair timeline ----------
+  function evict(rtt) { const rttvar = rtt < 40 ? 5 : 10; return Math.max(200, 200 + rtt + 4 * rttvar); }
+  function drawRepair() {
+    const rtt = +document.getElementById('rtt-select').value;
+    const te = evict(rtt), attach = te + 2 * rtt, pull = attach + 2 * rtt, wp = Math.min(2.0, Math.max(1.5, (te + 6 * rtt) / 1000));
+    document.getElementById('r-evict').textContent = te + ' ms';
+    document.getElementById('r-attach').textContent = '≈ ' + attach + ' ms';
+    document.getElementById('r-pull').textContent = '≈ ' + pull + ' ms';
+    document.getElementById('r-wpull').textContent = wp.toFixed(1) + ' s';
+    const el = d3.select('#fig-repair'); el.selectAll('*').remove();
+    const W = Math.min(el.node().clientWidth - 4, 860), H = 150, m = { l: 12, r: 12 };
+    const svg = el.append('svg').attr('viewBox', `0 0 ${W} ${H}`).attr('role', 'img').attr('aria-label', `Repair timeline at ${rtt} ms RTT: probe at 100 ms, eviction at ${te} ms, standby delivering at about ${attach} ms.`);
+    const x = d3.scaleLinear().domain([0, Math.max(700, pull + 60)]).range([m.l, W - m.r]);
+    const events = [
+      { t: 0, l: 'last packet from parent', c: css('--muted') }, { t: 100, l: 'τ_ping: probe sent', c: css('--t2') },
+      { t: te, l: 'τ_evict: parent dead, standby picked', c: css('--accent') }, { t: attach, l: 'standby delivering (≈ 2 RTT)', c: css('--ok') }, { t: pull, l: '+ 2 PULL round trips', c: css('--t5') },
+    ];
+    svg.append('line').attr('x1', x(0)).attr('x2', x.range()[1]).attr('y1', 70).attr('y2', 70).attr('stroke', css('--line')).attr('stroke-width', 2);
+    svg.append('rect').attr('x', x(0)).attr('y', 62).attr('width', x(te) - x(0)).attr('height', 16).attr('fill', css('--accent')).attr('opacity', 0.18);
+    svg.append('rect').attr('x', x(te)).attr('y', 62).attr('width', x(attach) - x(te)).attr('height', 16).attr('fill', css('--ok')).attr('opacity', 0.18);
+    events.forEach((ev, i) => {
+      const up = i % 2 === 0;
+      svg.append('circle').attr('cx', x(ev.t)).attr('cy', 70).attr('r', 5).attr('fill', ev.c);
+      svg.append('line').attr('x1', x(ev.t)).attr('x2', x(ev.t)).attr('y1', 70).attr('y2', up ? 40 : 100).attr('stroke', ev.c);
+      svg.append('text').attr('x', x(ev.t)).attr('y', up ? 32 : 116).attr('text-anchor', i === 0 ? 'start' : i === events.length - 1 ? 'end' : 'middle').attr('font-size', 11).attr('fill', css('--fg')).text(ev.l);
+      svg.append('text').attr('x', x(ev.t)).attr('y', up ? 20 : 130).attr('text-anchor', i === 0 ? 'start' : i === events.length - 1 ? 'end' : 'middle').attr('font-size', 11).attr('class', 'mono').attr('fill', css('--muted')).text(ev.t + ' ms');
+    });
+    svg.append('text').attr('x', x.range()[1]).attr('y', 148).attr('text-anchor', 'end').attr('font-size', 11).attr('fill', css('--muted')).text('every other tree keeps streaming throughout');
+  }
+
+  // ---------- Parity ----------
+  function drawParity() {
+    const rho = +document.getElementById('rho-range').value / 100;
+    const E = Math.max(1, Math.ceil(Math.min(Math.max(2 * rho * K_SYM, 0.05 * K_SYM), 0.30 * K_SYM)));
+    document.getElementById('rho-out').textContent = (rho * 100).toFixed(1) + ' %';
+    document.getElementById('e-par').textContent = E;
+    document.getElementById('e-pct').textContent = (100 * E / K_SYM).toFixed(1) + ' %';
+    document.getElementById('e-omega').textContent = omega(E).toFixed(2);
+  }
+
+  // ---------- Buffer timeline ----------
+  function drawBuffer() {
+    const el = d3.select('#fig-buffer'); el.selectAll('*').remove();
+    const W = Math.min(el.node().clientWidth - 8, 860), H = 120;
+    const svg = el.append('svg').attr('viewBox', `0 0 ${W} ${H}`).attr('role', 'img').attr('aria-label', 'The 3.0 second buffer: a PULL zone of 1.5 seconds at the playout deadline and a PUSH zone from there to the live edge.');
+    const x = d3.scaleLinear().domain([0, 3.0]).range([10, W - 10]);
+    svg.append('rect').attr('x', x(0)).attr('y', 36).attr('width', x(1.5) - x(0)).attr('height', 34).attr('rx', 6).attr('fill', css('--t5')).attr('opacity', 0.35);
+    svg.append('rect').attr('x', x(1.5)).attr('y', 36).attr('width', x(3.0) - x(1.5)).attr('height', 34).attr('rx', 6).attr('fill', css('--t1')).attr('opacity', 0.35);
+    svg.append('text').attr('x', x(0.75)).attr('y', 57).attr('text-anchor', 'middle').attr('font-size', 12).attr('font-weight', 600).attr('fill', css('--fg')).text('PULL zone (mesh), W_pull = 1.5 s');
+    svg.append('text').attr('x', x(2.25)).attr('y', 57).attr('text-anchor', 'middle').attr('font-size', 12).attr('font-weight', 600).attr('fill', css('--fg')).text('PUSH zone (trees)');
+    svg.append('line').attr('x1', x(3.0)).attr('x2', x(3.0)).attr('y1', 26).attr('y2', 80).attr('stroke', css('--accent')).attr('stroke-width', 2.5);
+    svg.append('text').attr('x', x(3.0)).attr('y', 18).attr('text-anchor', 'end').attr('font-size', 11).attr('fill', css('--accent')).text('live edge, highest segment pushed');
+    svg.append('line').attr('x1', x(0)).attr('x2', x(0)).attr('y1', 26).attr('y2', 80).attr('stroke', css('--fg')).attr('stroke-width', 2);
+    svg.append('text').attr('x', x(0)).attr('y', 18).attr('text-anchor', 'start').attr('font-size', 11).attr('fill', css('--fg')).text('playout deadline: decoder assembly final');
+    [0, 0.5, 1, 1.5, 2, 2.5, 3].forEach(t => svg.append('text').attr('x', x(t)).attr('y', 96).attr('text-anchor', 'middle').attr('font-size', 10.5).attr('fill', css('--muted')).attr('class', 'mono').text(t.toFixed(1) + ' s'));
+    svg.append('text').attr('x', x(1.5)).attr('y', 114).attr('text-anchor', 'middle').attr('font-size', 11).attr('fill', css('--muted')).text('a missing block is requested by PULL_REQUEST from a neighbour in another branch once it enters the PULL zone');
+  }
+
+  // ---------- Capacity table ----------
+  const CAP = [
+    { M: 2, map: '3.0, 3.0', full: 7.67, one: 3.83, two: 1.92 },
+    { M: 3, map: '1.5, 1.5, 3.0', full: 11.5, one: 5.75, two: 1.92 },
+    { M: 4, map: '1.5 × 4', full: 7.67, one: 3.83, two: 1.92 },
+    { M: 5, map: '0.75 × 2, 1.5 × 3', full: 9.58, one: 4.79, two: 1.92 },
+    { M: 6, map: '0.75 × 4, 1.5 × 2', full: 11.5, one: 3.83, two: 1.92 },
+  ];
+  function drawCapacity() {
+    const u = +document.getElementById('cap-range').value;
+    document.getElementById('cap-out').textContent = u;
+    const tb = d3.select('#cap-table tbody'); tb.selectAll('*').remove();
+    CAP.forEach(r => {
+      const verdict = u >= r.full ? '<span class="pill ok">1080p sustainable</span>' : u >= r.one ? '<span class="pill warn">720p after folding L2</span>' : u >= r.two ? '<span class="pill warn">480p after folding L1</span>' : '<span class="pill bad">source reserve feeds the base layer</span>';
+      tb.append('tr').html(`<td>${r.M}</td><td>${r.map}</td><td class="num">${r.full.toFixed(2)}</td><td class="num">${r.one.toFixed(2)}</td><td class="num">${r.two.toFixed(2)}</td><td>${verdict}</td>`);
+    });
+  }
+
+  // ---------- Wiring ----------
+  function drawAll() { drawEgress(); drawBudget(); drawForest(); drawSlots(); drawScore(); drawRepair(); drawParity(); drawBuffer(); drawCapacity(); }
+  ['relay-count', 'draw-count'].forEach(id => document.getElementById(id).addEventListener('input', drawForest));
+  ['u-range', 'e-range'].forEach(id => document.getElementById(id).addEventListener('input', drawSlots));
+  ['s-k', 's-rtt', 's-h', 's-r'].forEach(id => document.getElementById(id).addEventListener('input', drawScore));
+  document.getElementById('rtt-select').addEventListener('change', drawRepair);
+  document.getElementById('rho-range').addEventListener('input', drawParity);
+  document.getElementById('cap-range').addEventListener('input', drawCapacity);
+  let resizeTimer; window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(drawAll, 150); });
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { drawAll(); });
+
+  // Section nav highlighting.
+  const links = [...document.querySelectorAll('nav.toc a')];
+  const obs = new IntersectionObserver(entries => {
+    entries.forEach(en => { if (en.isIntersecting) { links.forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + en.target.id)); } });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  document.querySelectorAll('main section').forEach(s => obs.observe(s));
+
+  window.addEventListener('DOMContentLoaded', () => {
+    drawAll();
+    if (window.renderMathInElement) renderMathInElement(document.body, { delimiters: [{ left: '$$', right: '$$', display: true }, { left: '\\(', right: '\\)', display: false }], throwOnError: false });
+    if (window.mermaid) { mermaid.initialize({ startOnLoad: false, theme: isDark() ? 'dark' : 'neutral', securityLevel: 'loose', fontFamily: 'IBM Plex Sans, sans-serif' }); mermaid.run({ querySelector: '.mermaid' }); }
+  });
+})();
+</script>
+</body>
+</html>
