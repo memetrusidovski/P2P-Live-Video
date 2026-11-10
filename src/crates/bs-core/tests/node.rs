@@ -966,3 +966,614 @@ fn emergent_relay_bridges_a_blocked_viewer() {
         "chunks keep playing through the bridge"
     );
 }
+
+/// Ch2 §2.3.3: a guardian refuses a lower-version Stream Record while the held
+/// record is fresh. The held record expires `tau_ttl` after its last write. A
+/// restarted publisher numbers its records from 1 again, so the guardian accepts
+/// the restarted publisher once the dead run's record expired.
+#[test]
+fn guardian_expires_stale_stream_record() {
+    use bs_core::publisher::Publisher;
+    use bs_core::{DiscoveryMode, Node, NodeConfig, Output, Params, Role};
+    use bs_crypto::Difficulty;
+    use bs_media::Ladder;
+    use bs_wire::StreamRecord;
+
+    let params = Params::for_simulation();
+    let p = addr(1);
+    let g = addr(2);
+    let publisher = identity_for(1, p, &params);
+    let mut guardian = Node::new(NodeConfig {
+        role: Role::Viewer { top_layer: 2 },
+        node_class: NodeClass::Relay,
+        upload_kbps: 10_000,
+        addr: g,
+        stream_id: bs_crypto::stream_id(&publisher.public_key()),
+        bootstrap: Vec::new(),
+        discovery: DiscoveryMode::Dht,
+        reachability: Some(bs_wire::Reachability::Public),
+        params: params.clone(),
+        seed: 7,
+    });
+    let mut now = Instant::ZERO;
+    guardian.handle(Input::Cmd(Command::Start), now);
+    while guardian.poll_output().is_some() {}
+    let d = Difficulty {
+        c1: params.c1,
+        c2_min: params.c2_min,
+    };
+    let nonce = publisher.solve_dynamic(p.ip(), d.dynamic_required(2, NodeClass::Relay, false));
+    let store = |guardian: &mut Node, rec: StreamRecord, now: Instant| -> bool {
+        let body = bs_wire::Encode::to_vec(&rec);
+        let vb = publisher.validation_block(FrameType::STORE_RECORD, nonce, now.as_micros(), &body);
+        guardian.handle(
+            Input::Frame {
+                from: p,
+                channel: Channel::Udp,
+                frame: Frame::StoreRecord(StoreRecord {
+                    validation: vb,
+                    record: Box::new(rec),
+                }),
+            },
+            now,
+        );
+        let mut accepted = None;
+        while let Some(o) = guardian.poll_output() {
+            if let Output::Send {
+                frame: Frame::StoreRecordAck(a),
+                ..
+            } = o
+            {
+                accepted = Some(a.accepted);
+            }
+        }
+        accepted.expect("guardian answers STORE_RECORD_ACK")
+    };
+
+    let mut run1 = Publisher::new(publisher.clone(), Ladder::reference(), 3).unwrap();
+    let mut v5 = run1.stream_record(1, 0, now);
+    for _ in 0..4 {
+        v5 = run1.stream_record(1, 0, now);
+    }
+    assert_eq!(v5.manifest_version, 5);
+    assert!(store(&mut guardian, v5, now), "first record accepted");
+
+    // The publisher restarts: a fresh Publisher numbers its records from 1 again.
+    let mut run2 = Publisher::new(publisher.clone(), Ladder::reference(), 3).unwrap();
+    let v1 = run2.stream_record(1, 0, now);
+    assert_eq!(v1.manifest_version, 1);
+    now += secs(1.0);
+    assert!(
+        !store(&mut guardian, v1.clone(), now),
+        "lower version refused while the held record is fresh"
+    );
+    now += params.tau_ttl;
+    assert!(
+        store(&mut guardian, v1, now),
+        "record accepted once the dead run's record expired"
+    );
+}
+
+/// Ch2 §2.1.3: when every DHT contact stops answering, the viewer evicts them
+/// and repeats the self-lookup against the seed with a growing delay. The seed
+/// is the publisher; the publisher goes silent after the viewer bootstrapped.
+#[test]
+fn viewer_rebootstraps_when_every_contact_dies() {
+    use bs_core::{DiscoveryMode, Node, NodeConfig, Output, Params, Role};
+    use bs_media::Ladder;
+
+    let params = Params::for_simulation();
+    let s = addr(1);
+    let v = addr(2);
+    let mut seed = Node::new(NodeConfig {
+        role: Role::Publisher {
+            ladder: Ladder::reference(),
+            forest_size: 3,
+        },
+        node_class: NodeClass::Relay,
+        upload_kbps: 100_000,
+        addr: s,
+        stream_id: bs_wire::StreamId::ZERO,
+        bootstrap: Vec::new(),
+        discovery: DiscoveryMode::Dht,
+        reachability: Some(bs_wire::Reachability::Public),
+        params: params.clone(),
+        seed: 1,
+    });
+    let mut viewer = Node::new(NodeConfig {
+        role: Role::Viewer { top_layer: 2 },
+        node_class: NodeClass::Relay,
+        upload_kbps: 10_000,
+        addr: v,
+        stream_id: seed.stream_id(),
+        bootstrap: vec![s],
+        discovery: DiscoveryMode::Dht,
+        reachability: Some(bs_wire::Reachability::Public),
+        params: params.clone(),
+        seed: 7,
+    });
+    let me = viewer.node_id();
+    let mut now = Instant::ZERO;
+    seed.handle(Input::Cmd(Command::Start), now);
+    viewer.handle(Input::Cmd(Command::Start), now);
+
+    // Self-lookup FIND_NODEs the viewer sent to the seed, by send time.
+    let mut self_lookups: Vec<Instant> = Vec::new();
+    let step = Duration::from_millis(10);
+    // One 10 ms step: tick both nodes and exchange their UDP frames. Returns
+    // whether the viewer sent a self-lookup FIND_NODE to the seed.
+    let pump = |seed: &mut Node, viewer: &mut Node, now: Instant, seed_alive: bool| -> bool {
+        seed.handle(Input::Tick, now);
+        viewer.handle(Input::Tick, now);
+        let mut to_seed = Vec::new();
+        let mut to_viewer = Vec::new();
+        let mut self_lookup = false;
+        while let Some(o) = viewer.poll_output() {
+            if let Output::Send {
+                to,
+                channel: Channel::Udp,
+                frame,
+                ..
+            } = o
+            {
+                if let Frame::FindNode(FindFrame::Request(r)) = &frame {
+                    if to == s && r.target == me {
+                        self_lookup = true;
+                    }
+                }
+                if to == s {
+                    to_seed.push(frame);
+                }
+            }
+        }
+        while let Some(o) = seed.poll_output() {
+            if let Output::Send {
+                to,
+                channel: Channel::Udp,
+                frame,
+                ..
+            } = o
+            {
+                if to == v {
+                    to_viewer.push(frame);
+                }
+            }
+        }
+        if seed_alive {
+            for frame in to_seed {
+                seed.handle(
+                    Input::Frame {
+                        from: v,
+                        channel: Channel::Udp,
+                        frame,
+                    },
+                    now,
+                );
+            }
+            for frame in to_viewer {
+                viewer.handle(
+                    Input::Frame {
+                        from: s,
+                        channel: Channel::Udp,
+                        frame,
+                    },
+                    now,
+                );
+            }
+        }
+        self_lookup
+    };
+
+    while now < Instant::ZERO + secs(2.0) {
+        now += step;
+        if pump(&mut seed, &mut viewer, now, true) {
+            self_lookups.push(now);
+        }
+    }
+    assert_eq!(viewer.dht_contacts(), 1, "the seed is the viewer's contact");
+    assert_eq!(self_lookups.len(), 1, "one self-lookup at start");
+
+    // The seed restarts elsewhere: nothing it is sent is answered any more.
+    let cut = now;
+    while now < cut + secs(20.0) {
+        now += step;
+        if pump(&mut seed, &mut viewer, now, false) {
+            self_lookups.push(now);
+        }
+    }
+    assert_eq!(viewer.dht_contacts(), 0, "the silent seed left the table");
+    let retries: Vec<Instant> = self_lookups.iter().copied().filter(|t| *t > cut).collect();
+    assert!(
+        retries.len() >= 3,
+        "self-lookup repeated against the seed: {retries:?}"
+    );
+    let gaps: Vec<Duration> = retries
+        .windows(2)
+        .map(|w| w[1].duration_since(w[0]))
+        .collect();
+    assert!(
+        gaps[0] >= secs(2.0) && gaps.windows(2).all(|g| g[1] >= g[0]),
+        "retry delay grows: {gaps:?}"
+    );
+}
+
+/// Ch2 §2.1.3 and A.1: a viewer behind a NAT pings the seed first and rebinds to
+/// the reflected address. Only then does the viewer send a FIND_NODE. The seed
+/// drops a FIND_NODE bound to the private address, so the order decides whether
+/// the viewer bootstraps at all. The pump below is the NAT: the seed sees the
+/// viewer's frames from a public address, and frames to that address reach the
+/// viewer.
+#[test]
+fn nated_viewer_pings_seed_before_first_find_node() {
+    use bs_core::{DiscoveryMode, Node, NodeConfig, Output, Params, Role};
+    use bs_media::Ladder;
+
+    let params = Params::for_simulation();
+    let s = addr(1);
+    let lan = addr(2);
+    let public: std::net::SocketAddr = "203.0.113.9:40000".parse().unwrap();
+    let mut seed = Node::new(NodeConfig {
+        role: Role::Publisher {
+            ladder: Ladder::reference(),
+            forest_size: 3,
+        },
+        node_class: NodeClass::Relay,
+        upload_kbps: 100_000,
+        addr: s,
+        stream_id: bs_wire::StreamId::ZERO,
+        bootstrap: Vec::new(),
+        discovery: DiscoveryMode::Dht,
+        reachability: Some(bs_wire::Reachability::Public),
+        params: params.clone(),
+        seed: 1,
+    });
+    let mut viewer = Node::new(NodeConfig {
+        role: Role::Viewer { top_layer: 2 },
+        node_class: NodeClass::Relay,
+        upload_kbps: 10_000,
+        addr: lan,
+        stream_id: seed.stream_id(),
+        bootstrap: vec![s],
+        discovery: DiscoveryMode::Dht,
+        reachability: None,
+        params: params.clone(),
+        seed: 7,
+    });
+    let mut now = Instant::ZERO;
+    seed.handle(Input::Cmd(Command::Start), now);
+    viewer.handle(Input::Cmd(Command::Start), now);
+
+    let mut first_find: Option<Instant> = None;
+    let mut first_pong: Option<Instant> = None;
+    let mut rebound: Option<(Instant, std::net::SocketAddr)> = None;
+    let step = Duration::from_millis(10);
+    while now < Instant::ZERO + secs(2.0) {
+        now += step;
+        seed.handle(Input::Tick, now);
+        viewer.handle(Input::Tick, now);
+        let mut to_seed = Vec::new();
+        let mut to_viewer = Vec::new();
+        while let Some(o) = viewer.poll_output() {
+            match o {
+                Output::Send {
+                    to,
+                    channel: Channel::Udp,
+                    frame,
+                    ..
+                } if to == s => {
+                    if frame.frame_type() == FrameType::FIND_NODE {
+                        first_find.get_or_insert(now);
+                    }
+                    to_seed.push(frame);
+                }
+                Output::Event(Event::AddressRebound { addr }) => {
+                    rebound.get_or_insert((now, addr));
+                }
+                _ => {}
+            }
+        }
+        while let Some(o) = seed.poll_output() {
+            if let Output::Send {
+                to,
+                channel: Channel::Udp,
+                frame,
+                ..
+            } = o
+            {
+                if to == public {
+                    to_viewer.push(frame);
+                }
+            }
+        }
+        for frame in to_seed {
+            seed.handle(
+                Input::Frame {
+                    from: public,
+                    channel: Channel::Udp,
+                    frame,
+                },
+                now,
+            );
+        }
+        for frame in to_viewer {
+            if frame.frame_type() == FrameType::PONG {
+                first_pong.get_or_insert(now);
+            }
+            viewer.handle(
+                Input::Frame {
+                    from: s,
+                    channel: Channel::Udp,
+                    frame,
+                },
+                now,
+            );
+        }
+    }
+
+    let (at, addr) = rebound.expect("the viewer rebound to the reflected address");
+    assert_eq!(addr, public);
+    let pong = first_pong.expect("the seed answered the viewer's PING");
+    let find = first_find.expect("the viewer sent a FIND_NODE");
+    assert!(
+        find >= pong && find >= at,
+        "FIND_NODE at {find:?} before the PONG at {pong:?} or the rebind at {at:?}"
+    );
+    assert!(
+        seed.dht_rpc_served() >= 1,
+        "the seed served the self-lookup"
+    );
+    assert_eq!(viewer.dht_contacts(), 1, "the seed is the viewer's contact");
+    assert_eq!(
+        viewer.reachability(),
+        bs_wire::Reachability::Cone,
+        "one reflection that differs from the own address does not decide PUBLIC"
+    );
+}
+
+/// Ch2 §2.1.3 with one responder: a public viewer whose only contact is the seed
+/// gets one reflection, equal to its own address. A swarm of two has no second
+/// responder. After `reflection_timeout` the viewer decides PUBLIC. Without the
+/// wait the viewer keeps the undecided CONE default for the whole session.
+#[test]
+fn lone_responder_reflecting_own_address_decides_public() {
+    use bs_core::{DiscoveryMode, Node, NodeConfig, Output, Params, Role};
+    use bs_media::Ladder;
+
+    let params = Params::for_simulation();
+    let s = addr(1);
+    let v = addr(2);
+    let mut seed = Node::new(NodeConfig {
+        role: Role::Publisher {
+            ladder: Ladder::reference(),
+            forest_size: 3,
+        },
+        node_class: NodeClass::Relay,
+        upload_kbps: 100_000,
+        addr: s,
+        stream_id: bs_wire::StreamId::ZERO,
+        bootstrap: Vec::new(),
+        discovery: DiscoveryMode::Dht,
+        reachability: Some(bs_wire::Reachability::Public),
+        params: params.clone(),
+        seed: 1,
+    });
+    let mut viewer = Node::new(NodeConfig {
+        role: Role::Viewer { top_layer: 2 },
+        node_class: NodeClass::Relay,
+        upload_kbps: 10_000,
+        addr: v,
+        stream_id: seed.stream_id(),
+        bootstrap: vec![s],
+        discovery: DiscoveryMode::Dht,
+        reachability: None,
+        params: params.clone(),
+        seed: 7,
+    });
+    let mut now = Instant::ZERO;
+    seed.handle(Input::Cmd(Command::Start), now);
+    viewer.handle(Input::Cmd(Command::Start), now);
+
+    let mut first_pong: Option<Instant> = None;
+    let mut detected: Option<(Instant, bs_wire::Reachability)> = None;
+    let step = Duration::from_millis(10);
+    while now < Instant::ZERO + params.reflection_timeout * 3 {
+        now += step;
+        seed.handle(Input::Tick, now);
+        viewer.handle(Input::Tick, now);
+        let mut to_seed = Vec::new();
+        let mut to_viewer = Vec::new();
+        while let Some(o) = viewer.poll_output() {
+            match o {
+                Output::Send {
+                    to,
+                    channel: Channel::Udp,
+                    frame,
+                    ..
+                } if to == s => to_seed.push(frame),
+                Output::Event(Event::ReachabilityDetected { reach }) => {
+                    detected.get_or_insert((now, reach));
+                }
+                Output::Event(Event::AddressRebound { .. }) => {
+                    panic!("a public viewer must not rebind");
+                }
+                _ => {}
+            }
+        }
+        while let Some(o) = seed.poll_output() {
+            if let Output::Send {
+                to,
+                channel: Channel::Udp,
+                frame,
+                ..
+            } = o
+            {
+                if to == v {
+                    to_viewer.push(frame);
+                }
+            }
+        }
+        for frame in to_seed {
+            seed.handle(
+                Input::Frame {
+                    from: v,
+                    channel: Channel::Udp,
+                    frame,
+                },
+                now,
+            );
+        }
+        for frame in to_viewer {
+            if frame.frame_type() == FrameType::PONG {
+                first_pong.get_or_insert(now);
+            }
+            viewer.handle(
+                Input::Frame {
+                    from: s,
+                    channel: Channel::Udp,
+                    frame,
+                },
+                now,
+            );
+        }
+    }
+
+    let pong = first_pong.expect("the seed answered the viewer's PING");
+    let (at, reach) = detected.expect("the viewer decided its reachability");
+    assert_eq!(reach, bs_wire::Reachability::Public);
+    assert!(
+        at >= pong + params.reflection_timeout,
+        "decided at {at:?}, before the wait for a second responder ended"
+    );
+    assert_eq!(viewer.reachability(), bs_wire::Reachability::Public);
+}
+
+/// Ch2 §2.1.3: a viewer that detects its reachability owes a self-lookup after the
+/// seed's PONG. A discovery answer fills the routing table first, and the first PONG
+/// is lost. The viewer PINGs the seed again and then sends the self-lookup.
+#[test]
+fn detecting_viewer_repeats_the_seed_ping_after_a_lost_pong() {
+    use bs_core::{DiscoveryMode, Node, NodeConfig, Output, Params, Role};
+    use bs_media::Ladder;
+
+    let params = Params::for_simulation();
+    let s = addr(1);
+    let v = addr(2);
+    let mut seed = Node::new(NodeConfig {
+        role: Role::Publisher {
+            ladder: Ladder::reference(),
+            forest_size: 3,
+        },
+        node_class: NodeClass::Relay,
+        upload_kbps: 100_000,
+        addr: s,
+        stream_id: bs_wire::StreamId::ZERO,
+        bootstrap: Vec::new(),
+        discovery: DiscoveryMode::Dht,
+        reachability: Some(bs_wire::Reachability::Public),
+        params: params.clone(),
+        seed: 1,
+    });
+    let mut viewer = Node::new(NodeConfig {
+        role: Role::Viewer { top_layer: 2 },
+        node_class: NodeClass::Relay,
+        upload_kbps: 10_000,
+        addr: v,
+        stream_id: seed.stream_id(),
+        bootstrap: vec![s],
+        discovery: DiscoveryMode::Dht,
+        reachability: None,
+        params: params.clone(),
+        seed: 7,
+    });
+    let me = viewer.node_id();
+    let mut now = Instant::ZERO;
+    seed.handle(Input::Cmd(Command::Start), now);
+    viewer.handle(Input::Cmd(Command::Start), now);
+
+    let mut pings = 0;
+    let mut pongs_dropped = 0;
+    let mut contacts_at_second_ping = None;
+    let mut self_lookup: Option<Instant> = None;
+    let step = Duration::from_millis(10);
+    while now < Instant::ZERO + secs(4.0) {
+        now += step;
+        seed.handle(Input::Tick, now);
+        viewer.handle(Input::Tick, now);
+        let mut to_seed = Vec::new();
+        let mut to_viewer = Vec::new();
+        while let Some(o) = viewer.poll_output() {
+            if let Output::Send {
+                to,
+                channel: Channel::Udp,
+                frame,
+                ..
+            } = o
+            {
+                if to != s {
+                    continue;
+                }
+                match &frame {
+                    Frame::Ping(_) => {
+                        pings += 1;
+                        if pings == 2 {
+                            contacts_at_second_ping = Some(viewer.dht_contacts());
+                        }
+                    }
+                    Frame::FindNode(FindFrame::Request(r)) if r.target == me => {
+                        self_lookup.get_or_insert(now);
+                    }
+                    _ => {}
+                }
+                to_seed.push(frame);
+            }
+        }
+        while let Some(o) = seed.poll_output() {
+            if let Output::Send {
+                to,
+                channel: Channel::Udp,
+                frame,
+                ..
+            } = o
+            {
+                if to == v {
+                    to_viewer.push(frame);
+                }
+            }
+        }
+        for frame in to_seed {
+            seed.handle(
+                Input::Frame {
+                    from: v,
+                    channel: Channel::Udp,
+                    frame,
+                },
+                now,
+            );
+        }
+        for frame in to_viewer {
+            if frame.frame_type() == FrameType::PONG && pongs_dropped == 0 {
+                pongs_dropped += 1;
+                continue;
+            }
+            viewer.handle(
+                Input::Frame {
+                    from: s,
+                    channel: Channel::Udp,
+                    frame,
+                },
+                now,
+            );
+        }
+    }
+
+    assert_eq!(pongs_dropped, 1, "the first PONG was lost");
+    assert_eq!(
+        contacts_at_second_ping,
+        Some(1),
+        "the discovery answer filled the table before the second PING"
+    );
+    assert!(
+        self_lookup.is_some(),
+        "the viewer sent its self-lookup after the second PING ({pings} PINGs)"
+    );
+}

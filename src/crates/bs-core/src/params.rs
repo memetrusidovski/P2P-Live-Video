@@ -146,6 +146,10 @@ pub struct Params {
     pub unfold_growth: f64,
     /// τ_nat: a CONE registrant PINGs its guardians this often (App D §D.4.14).
     pub tau_nat: Duration,
+    /// Wait for a second PONG reflection before one reflection equal to the own
+    /// address decides PUBLIC. Ch2 §2.1.3 asks for two reflections; App B lists no
+    /// wait.
+    pub reflection_timeout: Duration,
     /// How long a NAT mapping stays open after the last outbound packet (simulator).
     pub nat_mapping_ttl: Duration,
     /// Upload a node needs to be RELAY_CAPABLE, kbps (Ch6 §6.3.1).
@@ -261,6 +265,7 @@ impl Default for Params {
             s_fold: 0.05,
             unfold_growth: 1.5,
             tau_nat: Duration::from_secs(25),
+            reflection_timeout: Duration::from_secs(1),
             nat_mapping_ttl: Duration::from_secs(30),
             relay_capable_kbps: 20_000,
             relay_capable_uptime: Duration::from_secs(1800),

@@ -232,7 +232,7 @@ impl Node {
             pending_update: None,
             forest: resize::ForestControl::default(),
             starved_query_at: Vec::new(),
-            // RULE: Unknown reachability is treated as CONE until two reflections
+            // RULE: Unknown reachability is treated as CONE until the reflections
             //       decide it: punches are then asked for, never relied on.
             reach: cfg.reachability.unwrap_or(Reachability::Cone),
             nat: nat::NatState::default(),
@@ -367,6 +367,7 @@ impl Node {
         m(self.pull_next_timer());
         m(self.membership_next_timer());
         m(self.dht_next_timer());
+        m(self.nat_next_timer());
         m(self.incentive_next_timer());
         m(Some(self.next_migrate));
         for tree in &self.trees {
@@ -2134,13 +2135,16 @@ impl Node {
     }
 
     fn on_pong(&mut self, from: PeerAddr, p: Pong) {
-        self.dht_on_pong(from, &p);
         // A verified PONG binds the responder's key to its NodeID (receipt verification).
         let body = p.reflected.to_vec();
-        if self.verify_vb(&p.validation, FrameType::PONG, &body, from, NodeClass::Leaf) {
+        let verified = self.verify_vb(&p.validation, FrameType::PONG, &body, from, NodeClass::Leaf);
+        if verified {
             self.on_reflection(from, p.reflected);
             self.maybe_rebind(p.reflected);
         }
+        // RULE: Rebind before the DHT hook. The self-lookup it starts must carry a
+        //       block bound to the reflected address.
+        self.dht_on_pong(from, &p, verified);
         if let Some(s) = self.sessions.get_mut(&from) {
             if let Some(t0) = s.ping_sent_at.take() {
                 let sample = self.now.duration_since(t0);

@@ -1,6 +1,6 @@
 //! NAT traversal and emergent relays (Ch6).
 //!
-//! Reachability from two PONG reflections (Ch2 §2.1.3), hole punching through the
+//! Reachability from PONG reflections (Ch2 §2.1.3), hole punching through the
 //! referrer that named a CONE candidate (App D §D.4.14), the keep-alive a CONE
 //! registrant owes its guardians, and the RELAY_PROPOSAL / RELAY_BIND bridge that a
 //! peer without a reachable parent asks a RELAY_CAPABLE node for (Ch6 §6.3).
@@ -46,6 +46,9 @@ struct BridgeRequest {
 pub struct NatState {
     /// Reflected addresses by responder, until reachability is known.
     reflections: BTreeMap<PeerAddr, WireAddr>,
+    /// When a second responder stops being waited for; set by the first reflection,
+    /// cleared once reachability is decided.
+    reflection_deadline: Option<Instant>,
     /// Who named each record to us (guardian or gossip neighbour).
     referrers: BTreeMap<NodeId, PeerAddr>,
     /// Punches sent, by target, so one candidate is punched once per round.
@@ -381,8 +384,12 @@ impl Node {
         }
         self.nat.reflections.insert(from, reflected);
         if self.nat.reflections.len() < 2 {
+            if self.nat.reflection_deadline.is_none() {
+                self.nat.reflection_deadline = Some(self.now + self.params.reflection_timeout);
+            }
             return;
         }
+        self.nat.reflection_deadline = None;
         let mut seen: Vec<WireAddr> = self.nat.reflections.values().copied().collect();
         seen.sort_by_key(|a| (a.0.ip(), a.0.port()));
         seen.dedup();
@@ -396,6 +403,33 @@ impl Node {
         } else {
             Reachability::Symmetric
         };
+        self.set_reachability(decided);
+    }
+
+    /// One responder reflected our own address and no second one answered in time:
+    /// decide PUBLIC. The next distinct responder re-evaluates with both reflections.
+    fn reflection_timer(&mut self) {
+        let due = self
+            .nat
+            .reflection_deadline
+            .map(|t| self.now >= t)
+            .unwrap_or(false);
+        if !due {
+            return;
+        }
+        self.nat.reflection_deadline = None;
+        // WHY: A swarm of two has no second responder. Without a decision the viewer
+        //      stays CONE forever and is never RELAY_CAPABLE. A reflection that
+        //      differs from our address stays CONE: one mapping cannot tell a cone
+        //      from a symmetric NAT.
+        let own = self.nat.bound_addr.unwrap_or(self.cfg.addr);
+        if self.nat.reflections.values().all(|r| r.0 == own) {
+            self.set_reachability(Reachability::Public);
+        }
+    }
+
+    /// Apply a decided reachability and re-register if the class changed.
+    fn set_reachability(&mut self, decided: Reachability) {
         if decided != self.reach {
             self.reach = decided;
             self.emit(Event::ReachabilityDetected { reach: decided });
@@ -563,6 +597,7 @@ impl Node {
 
     /// CONE registrants keep their guardian mappings alive every τ_nat (App D §D.4.14).
     pub(super) fn nat_timers(&mut self) {
+        self.reflection_timer();
         // WHY: The uptime criterion flips RELAY_CAPABLE on after the first
         //      registration. The guardians must hold the new bit to name us.
         let capable = self.relay_capable();
@@ -972,5 +1007,10 @@ impl Node {
     /// Our reachability.
     pub fn reachability(&self) -> Reachability {
         self.reach
+    }
+
+    /// When the wait for a second reflection ends, if a wait is active.
+    pub(super) fn nat_next_timer(&self) -> Option<Instant> {
+        self.nat.reflection_deadline
     }
 }

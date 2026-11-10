@@ -111,7 +111,7 @@ pub struct RunConfig {
 
 impl RunConfig {
     /// A publisher with the `bsnode publish` defaults: UDP port `PUBLISH_PORT` on every
-    /// interface, public reachability, forest size 3, simulation PoW parameters.
+    /// interface, public reachability, forest size 3, specification PoW difficulty.
     ///
     /// `ladder` must match what `media` produces. The caller overrides fields after.
     pub fn publisher(media: Media, ladder: Ladder) -> Self {
@@ -129,7 +129,9 @@ impl RunConfig {
             upload_kbps: 100_000,
             ladder,
             media,
-            params: Params::for_simulation(),
+            // SECURITY: Spec difficulty on the real network. Simulation PoW mints an
+            //           identity in 16 hashes, so a Sybil attacker floods the swarm.
+            params: Params::default(),
             seed: 1,
             duration_s: None,
             start_delay_s: 3.0,
@@ -139,7 +141,7 @@ impl RunConfig {
     }
 
     /// A relay-class viewer with the `bsnode watch` defaults: any UDP port, reachability
-    /// decided from PONGs, every layer wanted, simulation PoW parameters, no output
+    /// decided from PONGs, every layer wanted, specification PoW difficulty, no output
     /// file. Set `player` to serve the web player.
     pub fn viewer(bootstrap: SocketAddr, stream_id: StreamId) -> Self {
         Self {
@@ -156,7 +158,9 @@ impl RunConfig {
                 path: None,
                 expect_hash: None,
             },
-            params: Params::for_simulation(),
+            // SECURITY: Must match the publisher. The TLS handshake rejects the
+            //           cheaper puzzle with `identity pow`.
+            params: Params::default(),
             seed: 2,
             duration_s: None,
             start_delay_s: 0.0,

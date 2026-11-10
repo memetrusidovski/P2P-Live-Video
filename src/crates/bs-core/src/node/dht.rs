@@ -26,6 +26,10 @@ use crate::time::{Duration, Instant};
 /// WHY: A contact behind a saturated uplink answers after the RPC timeout. A joiner
 ///      that discards those answers keeps re-asking the one contact it knows.
 const LATE_ANSWER_WINDOW: Duration = Duration::from_secs(5);
+/// First delay before the self-lookup is retried while the table is empty.
+const BOOTSTRAP_RETRY_MIN: Duration = Duration::from_secs(2);
+/// Longest delay between self-lookup retries while the table is empty.
+const BOOTSTRAP_RETRY_MAX: Duration = Duration::from_secs(30);
 
 /// How a node finds peers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -51,6 +55,8 @@ pub struct GuardianStore {
     regs: BTreeMap<NodeId, Reg>,
     /// Latest accepted Stream Record.
     pub record: Option<StreamRecord>,
+    /// When `record` was last written; the record expires `tau_ttl` later.
+    record_at: Option<Instant>,
     /// Distinct GET_PEERS senders in the last 10 s and their starved bits.
     queriers: BTreeMap<NodeId, (Instant, TreeSet)>,
     /// Queries served.
@@ -70,9 +76,22 @@ impl GuardianStore {
         );
     }
 
+    fn set_record(&mut self, record: StreamRecord, now: Instant) {
+        self.record = Some(record);
+        self.record_at = Some(now);
+    }
+
     fn expire(&mut self, now: Instant, ttl: Duration) {
         self.regs
             .retain(|_, r| now.duration_since(r.last_seen) < ttl);
+        // WHY: A live publisher rewrites the record every segment, so a record older
+        //      than the TTL belongs to a dead run. A restarted publisher numbers its
+        //      records from 1 again. Without expiry the stale record wins the version
+        //      check and is served until the process ends.
+        if self.record_at.is_some_and(|t| now.duration_since(t) >= ttl) {
+            self.record = None;
+            self.record_at = None;
+        }
         self.queriers
             .retain(|_, (t, _)| now.duration_since(*t) < Duration::from_secs(10));
     }
@@ -141,7 +160,13 @@ pub struct DhtState {
     /// Contacts pinged before insertion (Ch2 §2.3.2 rule 1).
     pending_pings: BTreeMap<PeerAddr, (Option<PeerRecord>, Instant)>,
     self_lookup_started: bool,
+    /// The self-lookup can go out: a seed reflected our address, or the node states
+    /// its reachability and waits for no reflection.
+    seeds_answered: bool,
     next_bootstrap: Option<Instant>,
+    /// Delay before the next self-lookup retry; doubles per retry up to
+    /// `BOOTSTRAP_RETRY_MAX`.
+    bootstrap_backoff: Duration,
     /// The guardians of `K_s` from the last full lookup (registration targets).
     pub guardians: Vec<PeerRecord>,
     guardians_at: Option<Instant>,
@@ -185,7 +210,9 @@ impl DhtState {
             next_lookup_id: 1,
             pending_pings: BTreeMap::new(),
             self_lookup_started: false,
+            seeds_answered: false,
             next_bootstrap: None,
+            bootstrap_backoff: BOOTSTRAP_RETRY_MIN,
             guardians: Vec::new(),
             guardians_at: None,
             guardians_lookup: None,
@@ -254,17 +281,37 @@ impl Node {
 
     // ------------------------------------------------------------------ bootstrap
 
-    /// Bootstrap (Ch2 §2.1.3): the self-lookup goes straight to the seeds; their
-    /// answers prove reachability and fill the first buckets.
+    /// Bootstrap (Ch2 §2.1.3, A.1): a node that detects its reachability PINGs the
+    /// seeds, and the first PONG starts the self-lookup. A node that states its
+    /// reachability starts the self-lookup at once. The answers fill the first buckets.
     pub(super) fn dht_start(&mut self) {
         if self.dht.mode != DiscoveryMode::Dht {
             return;
         }
         if !self.dht.self_lookup_started && !self.dht.bootstrap.is_empty() {
             self.dht.self_lookup_started = true;
-            let me = self.node_id().0;
-            self.start_lookup(me, LookupKind::Node, Purpose::SelfLookup, 0);
+            if self.cfg.reachability.is_some() {
+                // WHY: A stated reachability never rebinds, so no reflection changes
+                //      the block the self-lookup carries. The PING costs one round trip.
+                self.dht.seeds_answered = true;
+                let me = self.node_id().0;
+                self.start_lookup(me, LookupKind::Node, Purpose::SelfLookup, 0);
+            } else {
+                self.dht_ping_seeds();
+            }
             self.dht.next_bootstrap = Some(self.now + Duration::from_secs(1));
+        }
+    }
+
+    /// PING every seed. The PONG reflects our address and starts the self-lookup.
+    ///
+    /// WHY: A viewer behind a NAT binds its identity to the address it knows, not
+    ///      the one the seeds observe. A seed verifies FIND_NODE against the source
+    ///      address and drops a block bound to the wrong one. The PONG arrives
+    ///      before the first FIND_NODE, so `maybe_rebind` runs first.
+    fn dht_ping_seeds(&mut self) {
+        for a in self.dht.bootstrap.clone() {
+            self.send_ping(a);
         }
     }
 
@@ -319,8 +366,21 @@ impl Node {
         }
     }
 
-    /// PONG hook: complete a ping-before-insert and kick off bootstrap steps.
-    pub(super) fn dht_on_pong(&mut self, from: PeerAddr, p: &Pong) {
+    /// PONG hook: start the self-lookup on the first verified seed answer, and
+    /// complete a ping-before-insert. Runs after the reflection was applied to our
+    /// address.
+    pub(super) fn dht_on_pong(&mut self, from: PeerAddr, p: &Pong, verified: bool) {
+        // RULE: Accept the seed's PONG however late it arrives. A seed behind a
+        //       saturated uplink answers after the RPC timeout.
+        if verified
+            && self.dht.self_lookup_started
+            && !self.dht.seeds_answered
+            && self.dht.bootstrap.contains(&from)
+        {
+            self.dht.seeds_answered = true;
+            let me = self.node_id().0;
+            self.start_lookup(me, LookupKind::Node, Purpose::SelfLookup, 0);
+        }
         let Some((rec, _)) = self.dht.pending_pings.remove(&from) else {
             return;
         };
@@ -395,7 +455,14 @@ impl Node {
             }
         }
         for (rec, kind, target) in sends {
-            self.dht.find_asked.insert(rec.addr.0, (rec, now));
+            // RULE: Keep the first unanswered send time. A repeat ask must not restart
+            //       the eviction clock, or a contact asked every second never expires.
+            let since = self
+                .dht
+                .find_asked
+                .get(&rec.addr.0)
+                .map_or(now, |(_, t)| *t);
+            self.dht.find_asked.insert(rec.addr.0, (rec, since));
             self.send_find(rec.addr.0, kind, target);
         }
         let done: Vec<Lookup> = {
@@ -860,7 +927,7 @@ impl Node {
         };
         p.sample_log2 = want;
         let rec = p.stream_record(n, r, now);
-        self.dht.store.record = Some(rec.clone());
+        self.dht.store.set_record(rec.clone(), now);
         let exclude = BTreeSet::from([self.node_id()]);
         let ks = self.k_s();
         let targets: Vec<PeerAddr> = self
@@ -921,6 +988,7 @@ impl Node {
             return;
         }
         self.dht.rpc_served += 1;
+        self.dht.store.expire(self.now, self.params.tau_ttl);
         let result = if kind == LookupKind::Value
             && r.target.0 == self.k_s()
             && self.is_guardian_candidate()
@@ -1140,6 +1208,9 @@ impl Node {
             &rec.signature,
         )
         .is_ok();
+        let now = self.now;
+        // RULE: Expire before the version check, or a dead run's record blocks the new one.
+        self.dht.store.expire(now, self.params.tau_ttl);
         let newer = self
             .dht
             .store
@@ -1149,7 +1220,7 @@ impl Node {
             .unwrap_or(true);
         let accepted = key_ok && sig_ok && newer;
         if accepted {
-            self.dht.store.record = Some(rec);
+            self.dht.store.set_record(rec, now);
             // Viewers learn the matrix and live edge from the record they hold as guardians.
             if self.publisher.is_none() && self.matrix.is_none() {
                 if let Some(r) = self.dht.store.record.clone() {
@@ -1157,8 +1228,6 @@ impl Node {
                 }
             }
         }
-        let now = self.now;
-        self.dht.store.expire(now, self.params.tau_ttl);
         let (active, relay, per_tree) = self.dht.store.counts(now, self.params.registration_active);
         let (query_count, starved) = self.dht.store.query_counts();
         self.dht.rpc_served += 1;
@@ -1210,9 +1279,22 @@ impl Node {
         }
         let now = self.now;
         let to = self.params.dht_rpc_timeout;
+        // WHY: A contact that answers no FIND within the late-answer window is gone
+        //      (restarted on another address, or offline). Without eviction the table
+        //      keeps dead contacts forever and the seeds are never asked again.
+        let gone: Vec<NodeId> = self
+            .dht
+            .find_asked
+            .iter()
+            .filter(|(_, (_, t))| now.duration_since(*t) > LATE_ANSWER_WINDOW)
+            .map(|(_, (rec, _))| rec.node_id)
+            .collect();
         self.dht
             .find_asked
             .retain(|_, (_, t)| now.duration_since(*t) <= LATE_ANSWER_WINDOW);
+        for id in gone {
+            self.dht.table.remove(&id);
+        }
         self.dht
             .peers_asked
             .retain(|_, t| now.duration_since(*t) <= LATE_ANSWER_WINDOW);
@@ -1229,19 +1311,39 @@ impl Node {
                 self.dht.table.remove(&rec.node_id);
             }
         }
-        // Bootstrap retry while the table is empty (seed down or answer lost).
-        if let Some(t) = self.dht.next_bootstrap {
-            if now >= t {
-                if self.dht.table.is_empty() {
-                    if self.dht.lookups.is_empty() {
+        // Bootstrap retry while the table is empty (seed down, answer lost, or every
+        // contact evicted after the swarm moved) or no seed reflected our address yet.
+        // RULE: Retry the PING with a filled table too. A discovery answer can fill
+        //       the table before the PONG, and the self-lookup is still owed.
+        let waiting = self.dht.table.is_empty() || !self.dht.seeds_answered;
+        if waiting && self.dht.self_lookup_started && !self.dht.bootstrap.is_empty() {
+            match self.dht.next_bootstrap {
+                Some(t) if now >= t => {
+                    // RULE: Gate on a self-lookup in flight only. Discovery and guardian
+                    //       lookups run back to back while the table is empty.
+                    let in_flight = self
+                        .dht
+                        .lookups
+                        .iter()
+                        .any(|l| l.purpose == Purpose::SelfLookup);
+                    if !self.dht.seeds_answered {
+                        // PING or PONG lost.
+                        self.dht_ping_seeds();
+                    } else if !in_flight {
                         let me = self.node_id().0;
                         self.start_lookup(me, LookupKind::Node, Purpose::SelfLookup, 0);
                     }
-                    self.dht.next_bootstrap = Some(now + Duration::from_secs(2));
-                } else {
-                    self.dht.next_bootstrap = None;
+                    let b = self.dht.bootstrap_backoff;
+                    self.dht.next_bootstrap = Some(now + b);
+                    self.dht.bootstrap_backoff = (b * 2).min(BOOTSTRAP_RETRY_MAX);
                 }
+                Some(_) => {}
+                // RULE: Re-arm whenever the table empties, not only at start.
+                None => self.dht.next_bootstrap = Some(now + self.dht.bootstrap_backoff),
             }
+        } else {
+            self.dht.next_bootstrap = None;
+            self.dht.bootstrap_backoff = BOOTSTRAP_RETRY_MIN;
         }
         if !self.dht.lookups.is_empty() {
             self.dht_drive_lookups();

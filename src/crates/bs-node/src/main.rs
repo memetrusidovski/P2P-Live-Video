@@ -18,9 +18,10 @@ use clap::{Parser, Subcommand};
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
-    /// Use the specification's proof-of-work difficulty (default: cheap simulation values).
+    /// Use the cheap simulation proof-of-work difficulty. Every node in the swarm must
+    /// agree on the difficulty, so pass the flag to the publisher and to every viewer.
     #[arg(long, global = true)]
-    spec_pow: bool,
+    sim_pow: bool,
     /// RaptorQ parity symbols per 16 KB block on every link (1..=5). Adaptive per-link
     /// parity arrives with PROOF_OF_UPLOAD loss reports (M3); until then 1 suits clean
     /// links and 4-5 lossy ones.
@@ -228,11 +229,11 @@ fn ladder(spec: &str) -> anyhow::Result<Ladder> {
     anyhow::bail!("unknown ladder {spec}")
 }
 
-fn params(spec_pow: bool, parity: u16) -> Params {
-    let mut p = if spec_pow {
-        Params::default()
-    } else {
+fn params(sim_pow: bool, parity: u16) -> Params {
+    let mut p = if sim_pow {
         Params::for_simulation()
+    } else {
+        Params::default()
     };
     p.default_parity = parity.clamp(1, 5);
     p
@@ -240,8 +241,8 @@ fn params(spec_pow: bool, parity: u16) -> Params {
 
 /// The stream id of a publisher started with `seed` on `port` (identity derivation
 /// mirrors `bs_core::Node::new`).
-fn publisher_stream_id(seed: u64, port: u16, spec_pow: bool) -> StreamId {
-    let p = params(spec_pow, 1);
+fn publisher_stream_id(seed: u64, port: u16, sim_pow: bool) -> StreamId {
+    let p = params(sim_pow, 1);
     let mut s = [0u8; 32];
     s[..8].copy_from_slice(&seed.to_le_bytes());
     s[8..16].copy_from_slice(&port.to_le_bytes()[..].repeat(4)[..8]);
@@ -290,11 +291,11 @@ fn resolve_stream(
     stream: Option<&str>,
     seed: u64,
     port: u16,
-    spec_pow: bool,
+    sim_pow: bool,
 ) -> anyhow::Result<StreamId> {
     match stream {
         Some(h) => h.trim().parse::<StreamId>().context("--stream"),
-        None => Ok(publisher_stream_id(seed, port, spec_pow)),
+        None => Ok(publisher_stream_id(seed, port, sim_pow)),
     }
 }
 
@@ -497,10 +498,10 @@ async fn main() -> anyhow::Result<()> {
                 stream.as_deref(),
                 publisher_seed,
                 publisher_port,
-                cli.spec_pow,
+                cli.sim_pow,
             )?;
             let label = label.unwrap_or_else(hostname);
-            let params = params(cli.spec_pow, cli.parity);
+            let params = params(cli.sim_pow, cli.parity);
             let mut handles = Vec::with_capacity(count as usize);
             for i in 0..count {
                 let result = results
@@ -598,7 +599,7 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", bs_node::file_hash(&file, max_bytes)?);
         }
         Cmd::StreamId { seed, port } => {
-            println!("{}", publisher_stream_id(seed, port, cli.spec_pow))
+            println!("{}", publisher_stream_id(seed, port, cli.sim_pow))
         }
         Cmd::Publish {
             file,
@@ -662,7 +663,7 @@ async fn main() -> anyhow::Result<()> {
                 upload_kbps,
                 ladder: lad,
                 media,
-                params: params(cli.spec_pow, cli.parity),
+                params: params(cli.sim_pow, cli.parity),
                 seed,
                 duration_s,
                 start_delay_s,
@@ -704,7 +705,7 @@ async fn main() -> anyhow::Result<()> {
                 stream.as_deref(),
                 publisher_seed,
                 publisher_port,
-                cli.spec_pow,
+                cli.sim_pow,
             )?;
             let cfg = ViewerArgs {
                 bootstrap,
@@ -729,7 +730,7 @@ async fn main() -> anyhow::Result<()> {
                         expect_hash,
                     },
                 },
-                params: params(cli.spec_pow, cli.parity),
+                params: params(cli.sim_pow, cli.parity),
             }
             .into_config();
             let h = bs_node::start(cfg).await?;
@@ -749,4 +750,19 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pow_is_spec_unless_sim_pow() {
+        let spec = Params::default();
+        let sim = Params::for_simulation();
+        let p = params(false, 1);
+        assert_eq!((p.c1, p.c2_min), (spec.c1, spec.c2_min));
+        let p = params(true, 1);
+        assert_eq!((p.c1, p.c2_min), (sim.c1, sim.c2_min));
+    }
 }
