@@ -465,17 +465,18 @@ sequenceDiagram
   </figure>
   <h3>Loss is repaired on the link, not by asking again</h3>
   <p>Each block is one RaptorQ source block: 16 symbols of 1024 bytes plus \(E\) parity symbols sized per child link from the loss rate \(\rho\) the child reports in its receipt every second. The first 16 symbols are the raw bytes, so on a clean link a relay reconstructs the block by concatenation and never runs the decoder.</p>
-  $$E = \max\Big(1,\ \big\lceil \text{clamp}(2\rho K,\ 0.05K,\ 0.30K) \big\rceil\Big), \qquad K = 16$$
+  <p>\(E\) is the smallest parity count that leaves at most one block in a thousand per hop for the PULL path, between one symbol and the 30 % ceiling:</p>
+  $$E = \min\Big\{ e \in [1,\ \lceil 0.30K \rceil] \;:\; \Pr\big[\text{Bin}(K + e,\ \rho) > e\big] \le 10^{-3} \Big\}, \qquad K = 16$$
   <figure class="wide">
     <div class="panel">
       <div class="controls"><label><span>Loss on the child's link ρ</span> <output id="rho-out">2.0 %</output><input type="range" id="rho-range" min="0" max="25" value="2" step="0.5"></label></div>
       <div class="readout">
-        <div><b id="e-par">1</b><span>parity symbols per block</span></div>
-        <div><b id="e-pct">6.3 %</b><span>parity overhead</span></div>
-        <div><b id="e-omega">1.15</b><span>Ω at this parity</span></div>
+        <div><b id="e-par">3</b><span>parity symbols per block</span></div>
+        <div><b id="e-pct">18.8 %</b><span>parity overhead</span></div>
+        <div><b id="e-omega">1.29</b><span>Ω at this parity</span></div>
       </div>
     </div>
-    <figcaption>Per-link parity (Ch4 §4.2.2). A 15 % cellular link gets the 30 % ceiling, five symbols. Parity is charged to the relay's slot count, so a lossy link buys fewer children, never an oversubscribed uplink.</figcaption>
+    <figcaption>Per-link parity (Ch4 §4.2.2). Loss of 5 % or more gets the 30 % ceiling, five symbols; above that the remainder is pulled. Parity is charged to the relay's slot count, so a lossy link buys fewer children, never an oversubscribed uplink.</figcaption>
   </figure>
   <p>The verification boundary is the block, never the symbol. A relay does decode → verify → re-encode → push at 16 KB granularity. Receipts (section 11) attest verified blocks, one per segment per tree with a bitmap of the blocks verified.</p>
 </section>
@@ -834,7 +835,16 @@ sequenceDiagram
   // ---------- Parity ----------
   function drawParity() {
     const rho = +document.getElementById('rho-range').value / 100;
-    const E = Math.max(1, Math.ceil(Math.min(Math.max(2 * rho * K_SYM, 0.05 * K_SYM), 0.30 * K_SYM)));
+    const eMax = Math.ceil(0.30 * K_SYM);
+    // P(more than e of the K + e symbols are lost) from the binomial terms.
+    const fail = (e) => {
+      const n = K_SYM + e;
+      let term = Math.pow(1 - rho, n), within = term;
+      for (let i = 1; i <= e; i++) { term *= (n - i + 1) / i * rho / (1 - rho); within += term; }
+      return 1 - within;
+    };
+    let E = eMax;
+    for (let e = 1; e <= eMax; e++) { if (fail(e) <= 1e-3) { E = e; break; } }
     document.getElementById('rho-out').textContent = (rho * 100).toFixed(1) + ' %';
     document.getElementById('e-par').textContent = E;
     document.getElementById('e-pct').textContent = (100 * E / K_SYM).toFixed(1) + ' %';
