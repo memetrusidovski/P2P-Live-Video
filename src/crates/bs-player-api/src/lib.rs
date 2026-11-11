@@ -189,7 +189,7 @@ pub async fn serve(
         .route("/api/status", get(status))
         .route("/api/descriptor", get(descriptor))
         .route("/ws", get(ws_upgrade))
-        .layer(axum::middleware::from_fn(allow_any_origin))
+        .layer(axum::middleware::from_fn(same_origin_only))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
@@ -202,16 +202,75 @@ pub async fn serve(
     Ok((bound, task))
 }
 
-/// Add `Access-Control-Allow-Origin: *` so a page from another origin, such as a
-/// desktop shell, can read the API. The server binds loopback and serves nothing
-/// private, so every origin is allowed.
-async fn allow_any_origin(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
-    let mut res = next.run(req).await;
-    res.headers_mut().insert(
-        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        axum::http::HeaderValue::from_static("*"),
-    );
-    res
+/// Refuse a request that another web site made, or that came through a foreign name.
+///
+/// SECURITY: The API streams the media and the node's status to whoever asks. Any
+///           page open in the viewer's browser can reach a loopback port. A browser
+///           names the asking page in `Origin`, so a request whose `Origin` differs
+///           from its `Host` came from another site. A `Host` that is a public DNS
+///           name is refused too: a hostile site can point its own name at this
+///           address (DNS rebinding) and would then pass the first check.
+async fn same_origin_only(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let host = header_lower(&req, axum::http::header::HOST);
+    let origin = header_lower(&req, axum::http::header::ORIGIN);
+    if request_allowed(host.as_deref(), origin.as_deref()) {
+        next.run(req).await
+    } else {
+        tracing::warn!("player api: refused a request from origin {origin:?} for host {host:?}");
+        axum::http::StatusCode::FORBIDDEN.into_response()
+    }
+}
+
+fn header_lower(req: &axum::extract::Request, name: axum::http::HeaderName) -> Option<String> {
+    req.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_ascii_lowercase)
+}
+
+/// Whether a request with these lower-case `Host` and `Origin` headers is served.
+///
+/// A request with no `Origin` comes from a tool or a same-origin page load. With an
+/// `Origin`, the origin must name the same host and port as `Host`.
+fn request_allowed(host: Option<&str>, origin: Option<&str>) -> bool {
+    let Some(host) = host else {
+        // HTTP/1.1 requires `Host`; a request without one is not from a browser.
+        return origin.is_none();
+    };
+    if !local_host_name(host) {
+        return false;
+    }
+    match origin {
+        None => true,
+        Some(o) => o
+            .strip_prefix("http://")
+            .or_else(|| o.strip_prefix("https://"))
+            .is_some_and(|authority| authority == host),
+    }
+}
+
+/// Whether `host` (a `Host` header value) is an address or a name that only the
+/// local network resolves: an IP literal, `localhost`, a single label, or `.local`.
+fn local_host_name(host: &str) -> bool {
+    if host.parse::<SocketAddr>().is_ok() || host.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    if host.starts_with('[') {
+        // A bracketed IPv6 literal with no port.
+        return host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::Ipv6Addr>()
+            .is_ok();
+    }
+    let name = host.rsplit_once(':').map_or(host, |(n, port)| {
+        if port.chars().all(|c| c.is_ascii_digit()) {
+            n
+        } else {
+            host
+        }
+    });
+    name == "localhost" || !name.contains('.') || name.ends_with(".local")
 }
 
 async fn index() -> Html<&'static str> {
@@ -355,10 +414,70 @@ mod tests {
         .unwrap();
         assert!(body.contains("\"state\":\"Active\""), "{body}");
         assert!(body.contains("\"layers\":2"));
-        assert!(
-            body.to_ascii_lowercase()
-                .contains("access-control-allow-origin: *"),
-            "{body}"
-        );
+    }
+
+    #[test]
+    fn only_the_page_itself_and_tools_are_served() {
+        // Tools and same-origin page loads send no Origin.
+        assert!(request_allowed(Some("127.0.0.1:8080"), None));
+        assert!(request_allowed(Some("10.0.1.212:8079"), None));
+        // The player page, over loopback, a LAN address, a LAN name or IPv6.
+        assert!(request_allowed(
+            Some("127.0.0.1:8080"),
+            Some("http://127.0.0.1:8080")
+        ));
+        assert!(request_allowed(
+            Some("localhost:8080"),
+            Some("http://localhost:8080")
+        ));
+        assert!(request_allowed(
+            Some("desk.local:8080"),
+            Some("http://desk.local:8080")
+        ));
+        assert!(request_allowed(
+            Some("[::1]:8080"),
+            Some("http://[::1]:8080")
+        ));
+        // Another site open in the viewer's browser.
+        assert!(!request_allowed(
+            Some("127.0.0.1:8080"),
+            Some("https://evil.example")
+        ));
+        assert!(!request_allowed(
+            Some("127.0.0.1:8080"),
+            Some("http://127.0.0.1:9999")
+        ));
+        assert!(!request_allowed(Some("127.0.0.1:8080"), Some("null")));
+        // DNS rebinding: the hostile site's own name points at this address.
+        assert!(!request_allowed(
+            Some("evil.example:8080"),
+            Some("http://evil.example:8080")
+        ));
+        assert!(!request_allowed(Some("evil.example:8080"), None));
+    }
+
+    #[tokio::test]
+    async fn a_foreign_origin_gets_403() {
+        let (state, _dtx, _stx, _xtx) = PlayerState::new();
+        let (addr, _task) = serve("127.0.0.1:0".parse().unwrap(), state).await.unwrap();
+        let get = move |origin: Option<String>| {
+            tokio::task::spawn_blocking(move || {
+                use std::io::{Read, Write};
+                let mut s = std::net::TcpStream::connect(addr).unwrap();
+                let origin = origin.map_or(String::new(), |o| format!("Origin: {o}\r\n"));
+                write!(
+                    s,
+                    "GET /api/status HTTP/1.1\r\nHost: {addr}\r\n{origin}Connection: close\r\n\r\n"
+                )
+                .unwrap();
+                let mut out = String::new();
+                s.read_to_string(&mut out).unwrap();
+                out
+            })
+        };
+        let own = get(Some(format!("http://{addr}"))).await.unwrap();
+        assert!(own.starts_with("HTTP/1.1 200"), "{own}");
+        let foreign = get(Some("https://evil.example".into())).await.unwrap();
+        assert!(foreign.starts_with("HTTP/1.1 403"), "{foreign}");
     }
 }

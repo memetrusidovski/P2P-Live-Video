@@ -196,13 +196,10 @@ impl FfmpegSource {
                     "-movflags",
                     "frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset",
                 ])
-                .args([
-                    "-frag_duration",
-                    "250000",
-                    "-min_frag_duration",
-                    "250000",
-                    "pipe:1",
-                ])
+                // RULE: No `-min_frag_duration`. With it ffmpeg does not cut at a
+                //       keyframe, the keyframe lands in the middle of a fragment, and
+                //       a player can never switch renditions at a fragment start.
+                .args(["-frag_duration", "250000", "pipe:1"])
                 .stdout(Stdio::piped())
                 .stdin(Stdio::null())
                 .kill_on_drop(true);

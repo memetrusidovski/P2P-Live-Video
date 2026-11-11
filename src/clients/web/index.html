@@ -61,7 +61,90 @@
   let appending = false;
   let pendingBatch = null;        // {segment, chunk, media: Map(layer -> bytes)}
 
-  $('cap').addEventListener('change', e => { cap = parseInt(e.target.value, 10); currentLayer = -1; });
+  let chunksSinceTrim = 0;
+  let lastReset = 0;
+
+  $('cap').addEventListener('change', e => { cap = parseInt(e.target.value, 10); });
+
+  // ---- fMP4 box reading (keyframe detection) ----
+  const u32 = (b, o) => (b[o] << 24 | b[o+1] << 16 | b[o+2] << 8 | b[o+3]) >>> 0;
+  const boxType = (b, o) => String.fromCharCode(b[o+4], b[o+5], b[o+6], b[o+7]);
+  // Calls f(type, payloadStart, boxEnd) for each box in b[start, end). Stops when f returns true.
+  function eachBox(b, start, end, f) {
+    let o = start;
+    while (o + 8 <= end) {
+      const size = u32(b, o);
+      if (size < 8 || o + size > end) return;
+      if (f(boxType(b, o), o + 8, o + size)) return;
+      o += size;
+    }
+  }
+
+  // Track id of the video track in an init segment, or 0 if none is found.
+  function videoTrackId(init) {
+    let id = 0;
+    eachBox(init, 0, init.length, (t, s, e) => {
+      if (t !== 'moov') return false;
+      eachBox(init, s, e, (t2, s2, e2) => {
+        if (t2 !== 'trak') return false;
+        let tid = 0, video = false;
+        eachBox(init, s2, e2, (t3, s3, e3) => {
+          if (t3 === 'tkhd') tid = u32(init, s3 + (init[s3] === 1 ? 20 : 12));
+          if (t3 === 'mdia') eachBox(init, s3, e3, (t4, s4) => {
+            if (t4 === 'hdlr') video = boxType(init, s4 + 4) === 'vide';
+            return false;
+          });
+          return false;
+        });
+        if (video) { id = tid; return true; }
+        return false;
+      });
+      return true;
+    });
+    return id;
+  }
+
+  // Whether the first video sample of a fragment is a sync sample. A fragment the
+  // reader cannot parse counts as a keyframe, so playback never waits forever.
+  function startsWithKeyframe(frag, trackId) {
+    let result = null;
+    eachBox(frag, 0, frag.length, (t, s, e) => {
+      if (t !== 'moof') return false;
+      eachBox(frag, s, e, (t2, s2, e2) => {
+        if (t2 !== 'traf') return false;
+        let tid = 0, defFlags = null, first = null;
+        eachBox(frag, s2, e2, (t3, s3) => {
+          if (t3 === 'tfhd') {
+            const fl = u32(frag, s3) & 0xffffff;
+            tid = u32(frag, s3 + 4);
+            let o = s3 + 8;
+            if (fl & 0x01) o += 8;
+            if (fl & 0x02) o += 4;
+            if (fl & 0x08) o += 4;
+            if (fl & 0x10) o += 4;
+            if (fl & 0x20) defFlags = u32(frag, o);
+          } else if (t3 === 'trun' && first === null) {
+            const fl = u32(frag, s3) & 0xffffff;
+            let o = s3 + 8;
+            if (fl & 0x01) o += 4;
+            if (fl & 0x04) first = u32(frag, o);
+            else if (fl & 0x400) {
+              if (fl & 0x100) o += 4;
+              if (fl & 0x200) o += 4;
+              first = u32(frag, o);
+            }
+          }
+          return false;
+        });
+        if (trackId && tid !== trackId) return false;
+        const flags = first !== null ? first : defFlags;
+        if (flags !== null) result = (flags & 0x10000) === 0;
+        return true;
+      });
+      return true;
+    });
+    return result === null ? true : result;
+  }
 
   function avc1FromInit(init) {
     for (let i = 0; i + 8 <= init.length; i++) {
@@ -108,26 +191,75 @@
       sb = ms.addSourceBuffer(type);
       sb.mode = 'segments';
       sb.addEventListener('updateend', () => { appending = false; pump(); });
-      sb.addEventListener('error', e => log('sourcebuffer error'));
+      sb.addEventListener('error', () => resetPlayer('sourcebuffer error'));
       pump();
     });
     return true;
   }
 
-  function trimBuffer() {
+  // Drop the MediaSource and start again at the next keyframe chunk. The init
+  // segments are kept: the node sends them once.
+  function resetPlayer(why) {
+    log('player reset: ' + why);
+    lastReset = Date.now();
+    queue.length = 0;
+    appending = false;
+    currentLayer = -1;
+    sb = null;
+    if (ms) {
+      ms = null;
+      const url = video.src;
+      video.removeAttribute('src');
+      video.load();
+      if (url) URL.revokeObjectURL(url);
+    }
+  }
+  video.addEventListener('error', () => {
+    // A reset inside one second of the last one means the stream itself is not playable.
+    if (ms && Date.now() - lastReset > 1000) resetPlayer('media error ' + (video.error ? video.error.code : ''));
+  });
+
+  // Cross a hole in the buffer: playback stops at the end of a range when a chunk
+  // starved, although later media is already buffered.
+  function crossHole() {
+    if (!sb || video.seeking) return;
+    let r;
+    try { r = sb.buffered; } catch (e) { return; }
+    const t = video.currentTime;
+    for (let i = 0; i < r.length; i++) {
+      if (t >= r.start(i) && t < r.end(i) - 0.1) return;      // inside a range with media ahead
+      if (r.start(i) > t) {                                    // the next range after the hole
+        log(`jump over a ${(r.start(i) - t).toFixed(2)} s hole`);
+        video.currentTime = r.start(i) + 0.05;
+        if (video.paused) video.play().catch(() => {});
+        return;
+      }
+    }
+  }
+  video.addEventListener('waiting', crossHole);
+  setInterval(crossHole, 250);
+
+  // Remove media more than `keep` seconds behind the playhead. Returns whether a
+  // removal started; the SourceBuffer reports its end with `updateend`.
+  function trimBuffer(keep) {
     try {
       const b = sb.buffered;
-      if (b.length && video.currentTime - b.start(0) > 20) {
+      if (b.length && video.currentTime - b.start(0) > keep + 10) {
         appending = true;
-        sb.remove(b.start(0), video.currentTime - 10);
+        sb.remove(b.start(0), video.currentTime - keep);
         return true;
       }
-    } catch (e) {}
+    } catch (e) { appending = false; }
     return false;
   }
 
   function pump() {
     if (!sb || appending || sb.updating) return;
+    // Keep 30 s behind the playhead, so the buffer does not grow for the whole session.
+    if (chunksSinceTrim >= 16) {
+      chunksSinceTrim = 0;
+      if (trimBuffer(30)) return;
+    }
     const item = queue.shift();
     if (!item) return;
     try {
@@ -138,9 +270,9 @@
       if (e.name === 'QuotaExceededError') {
         log('quota exceeded; trimming');
         queue.unshift(item);
-        if (!trimBuffer()) queue.shift();
+        if (!trimBuffer(10)) queue.shift();
       } else {
-        log('append failed: ' + e.message);
+        resetPlayer('append failed: ' + e.message);
       }
     }
   }
@@ -151,8 +283,18 @@
     let best = -1;
     for (const l of b.media.keys()) if (l <= cap && l > best) best = l;
     if (best < 0) return;
-    const init = inits.get(best);
+    let init = inits.get(best);
     if (!init) return;                     // cannot start this layer yet
+    if (best !== currentLayer) {
+      // A decoder can start a rendition at a keyframe only. Until the wanted
+      // rendition has one, keep the current rendition, or wait if nothing plays yet.
+      const key = startsWithKeyframe(b.media.get(best), videoTrackId(init));
+      if (!key) {
+        if (currentLayer < 0 || !b.media.has(currentLayer)) return;
+        best = currentLayer;
+        init = inits.get(best);
+      }
+    }
     if (!ensureSource(init)) return;
     if (best !== currentLayer) {
       queue.push(init);
@@ -161,6 +303,7 @@
       log(`switch to layer ${best}`);
     }
     queue.push(b.media.get(best));
+    chunksSinceTrim++;
     pump();
     // Stay near the live edge.
     try {
@@ -220,7 +363,7 @@
     ws.onerror = () => {};
     ws.onmessage = ev => {
       if (typeof ev.data === 'string') {
-        try { const m = JSON.parse(ev.data); if (m.type === 'hello') { layers = m.layers; onStatus({ layers }); } else if (m.type === 'descriptor') { onDescriptor(m.descriptor); } else onStatus(m); } catch (e) {}
+        try { const m = JSON.parse(ev.data); if (m.type === 'hello') { resetPlayer('new session'); inits.clear(); pendingBatch = null; layers = m.layers; onStatus({ layers }); } else if (m.type === 'descriptor') { onDescriptor(m.descriptor); } else onStatus(m); } catch (e) {}
       } else onBinary(ev.data);
     };
   }

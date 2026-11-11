@@ -22,8 +22,8 @@ timer, default and defence assumes a LAN.
 | NAT traversal | All mechanisms exist in `bs-core` and are wired through the driver | The rebind is once per process and has never run through a real NAT; a NATed publisher has nobody to register with; no relay exists for 30 minutes |
 | Transport and security | Mutual TLS over QUIC bound to the node identity, BBR, one demuxed socket | No per-source rate limit on plain frames, so a 20 Mbps spoofed PING flood takes any node down; no replay window; DHT answers reflect 5 to 6× toward a spoofed address |
 | Forest and repair | Join, shed, PULL zone, parity plumbing; PSR 0.01 % on a LAN at 3 % loss | The eviction deadline is seeded once from the probe and never follows the path; repair has no Deputy fast path |
-| Media and players | File ingest with two renditions and AAC, signed descriptor, MSE page, desktop shell | No live source (camera, screen, RTMP); rendition switches are not keyframe aligned; a phone has nothing to connect to |
-| Operations | Clean start and stop, three surfaced errors | A dead publisher is never reported; a crashed encoder reads as end of stream; nothing persists; the player API streams to anyone who can reach the port |
+| Media and players | File ingest with two renditions and AAC, signed descriptor, MSE page, desktop shell | No live source (camera, screen, RTMP); a phone has nothing to connect to |
+| Operations | Clean start and stop, three surfaced errors | A dead publisher is never reported; a crashed encoder reads as end of stream; nothing persists but the publisher key; the player API streams to anyone on the LAN who can reach the port |
 
 The six notes list 55 bugs with file and line, and the missing pieces with a size in
 days. The counts below come from them.
@@ -72,12 +72,12 @@ window, because it is a full probe round plus a 1.5 RTT handshake.
 - Reachability self-check and uplink probe at publish time, the public address in the share link, a health view of the encoder and the swarm on the publisher page. 5 days.
 - Persistence and logs: a state directory, settings, a log file with rotation, periodic result snapshots. 2 days.
 
-### 5. A viewer who is not a developer (about 30 days)
+### 5. A viewer who is not a developer (about 28 days)
 
-- A usable player: keyframe-aligned rendition switching (1 fragment in 4 starts with a sync sample today, so every switch damages the picture), hole jumping, error recovery, buffer trim, controls, a latency readout. 3 days.
+- Player controls and a latency readout. Round 4 did switching, hole jumping, error recovery and buffer trim. 1 day.
 - Per-rendition subscription so a viewer downloads the rendition it watches, not every layer and two audio tracks; a 240p or audio-only floor in the default ladder. 5 days.
 - A viewer health model: connecting, playing, degraded, stalled, ended, failed, with a reason, rendered by the page and the desktop app. The publisher dying is invisible today. 3 days.
-- Player API access control: loopback by default, an Origin check, a token for any other bind. 1 day.
+- A token for a player API bound to a non-loopback address: anyone on the LAN can still open the page (the Origin check of round 4 stops other web sites only). 1 day.
 - Mobile viewer: `bs-node` built for iOS and Android inside a thin shell, or `bs-core` in WebAssembly as a WebTransport leaf behind public relays. A phone browser cannot view at all today, because the page is a loopback client of a local node. This is the largest single item and the one most users will judge the product by. 20 days.
 
 ### 6. Close the specification (about 15 days)
@@ -98,7 +98,7 @@ change, through [`FIXER-AGENT.md`](FIXER-AGENT.md).
 | 7 to 10 | Block 4, the player half of block 5 | A broadcaster streams a camera from behind a NAT to ten viewers on three networks without editing a command line; rendition switches are clean |
 | 11 to 16 | Mobile viewer, block 6 | A phone on cellular watches the stream; the open tickets are closed or accepted with a recorded reason |
 
-About 98 engineer-days in all. One person reaches the first gate in a month and the
+About 96 engineer-days in all. One person reaches the first gate in a month and the
 last in about six; three people reach the last in two to three months, because blocks
 2, 3 and 5 are independent of each other.
 
@@ -164,4 +164,18 @@ Findings from the round:
 |---|---|
 | Parent round-trip estimate | The driver hands the core the QUIC round trip of every open connection once a second. The eviction deadline now follows a path that changed after the join. Test `transport_rtt_samples_move_the_parent_estimator` |
 | Identity | A publisher keeps a random key in `~/.bitstream/publisher.key` and so keeps its stream id across restarts. A viewer gets a new random key at every start. `--seed` still derives a fixed key for tests and fleets. A viewer must now pass `--stream` or `--publisher-seed` |
+
+## Round 4 (2026-11-11)
+
+The four player fixes that round 1 did not run, tested in Chrome against an ffmpeg
+publisher with two renditions.
+
+| Bug | Result |
+|---|---|
+| Rendition switch is not keyframe aligned | The cause was in the ingest: `-min_frag_duration` stopped ffmpeg from cutting at keyframes, so every keyframe sat in the middle of a fragment. Without the flag a keyframe starts every fourth fragment. The page reads the fragment's sample flags and switches there. Test `every_fourth_fragment_starts_with_a_keyframe` runs the real ingest |
+| The page does not cross a buffer hole | The page seeks to the next buffered range when playback reaches the end of one |
+| A media error is fatal | The page drops the MediaSource and rebuilds it at the next keyframe chunk. A node restart under an open page plays again without a reload |
+| Player API has no Origin check | A request whose `Origin` differs from its `Host` gets 403, and so does a `Host` that is a public DNS name (DNS rebinding). The allow-all CORS header is gone |
+
+The page also trims media more than 30 s behind the playhead.
 

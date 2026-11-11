@@ -143,6 +143,88 @@ pub fn avc1_codec_string(init: &[u8]) -> Option<String> {
     ))
 }
 
+/// Child boxes of `data[start..end]` as `(type, payload start, box end)`.
+fn child_boxes(data: &[u8], start: usize, end: usize) -> Vec<([u8; 4], usize, usize)> {
+    let mut out = Vec::new();
+    let mut o = start;
+    while o + 8 <= end {
+        let size = be32(data, o) as usize;
+        if size < 8 || o + size > end {
+            break;
+        }
+        out.push((
+            [data[o + 4], data[o + 5], data[o + 6], data[o + 7]],
+            o + 8,
+            o + size,
+        ));
+        o += size;
+    }
+    out
+}
+
+fn be32(data: &[u8], o: usize) -> u32 {
+    data.get(o..o + 4)
+        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        .unwrap_or(0)
+}
+
+/// Whether the first sample of track `track_id` in a media fragment (`moof` +
+/// `mdat`) is a sync sample.
+///
+/// A decoder can start at a sync sample only, so a player switches renditions on
+/// a fragment for which the result is `Some(true)`.
+///
+/// Returns `None` if the fragment holds no sample flags for the track.
+pub fn starts_with_keyframe(fragment: &[u8], track_id: u32) -> Option<bool> {
+    const NON_SYNC: u32 = 0x0001_0000;
+    for (kind, s, e) in child_boxes(fragment, 0, fragment.len()) {
+        if &kind != b"moof" {
+            continue;
+        }
+        for (kind, s, e) in child_boxes(fragment, s, e) {
+            if &kind != b"traf" {
+                continue;
+            }
+            let (mut tid, mut default_flags, mut first) = (0, None, None);
+            for (kind, s, _) in child_boxes(fragment, s, e) {
+                if &kind == b"tfhd" {
+                    let flags = be32(fragment, s) & 0x00ff_ffff;
+                    tid = be32(fragment, s + 4);
+                    let mut o = s + 8;
+                    for (bit, len) in [(0x01, 8), (0x02, 4), (0x08, 4), (0x10, 4)] {
+                        if flags & bit != 0 {
+                            o += len;
+                        }
+                    }
+                    if flags & 0x20 != 0 {
+                        default_flags = Some(be32(fragment, o));
+                    }
+                } else if &kind == b"trun" && first.is_none() {
+                    let flags = be32(fragment, s) & 0x00ff_ffff;
+                    let mut o = s + 8;
+                    if flags & 0x01 != 0 {
+                        o += 4;
+                    }
+                    if flags & 0x04 != 0 {
+                        first = Some(be32(fragment, o));
+                    } else if flags & 0x400 != 0 {
+                        for bit in [0x100, 0x200] {
+                            if flags & bit != 0 {
+                                o += 4;
+                            }
+                        }
+                        first = Some(be32(fragment, o));
+                    }
+                }
+            }
+            if tid == track_id {
+                return first.or(default_flags).map(|f| f & NON_SYNC == 0);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
