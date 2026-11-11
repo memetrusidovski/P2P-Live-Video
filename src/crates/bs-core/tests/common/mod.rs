@@ -152,6 +152,9 @@ pub struct Harness {
     pub poison: Option<(SegmentSeq, BlockIndex)>,
     /// Corrupt source symbol 0 of every block sent by this node (a poisoning relay).
     pub poison_all_from: Option<SocketAddr>,
+    /// The NodeID the node at an address presents in a session handshake, when it
+    /// differs from the node's own.
+    pub impersonate: HashMap<SocketAddr, NodeId>,
     source: Option<SyntheticSource>,
     pub published: Vec<LayeredChunk>,
     publisher: Option<SocketAddr>,
@@ -183,6 +186,7 @@ impl Harness {
             drop_symbols_of: HashSet::new(),
             poison: None,
             poison_all_from: None,
+            impersonate: HashMap::new(),
             source: None,
             published: Vec::new(),
             publisher: None,
@@ -508,8 +512,14 @@ impl Harness {
                         ),
                         Pending::SessionOpen { a, b } => {
                             if self.nodes.contains_key(&a) && self.nodes.contains_key(&b) {
-                                let ida = self.node(a).node_id();
-                                let idb = self.node(b).node_id();
+                                let shown = |h: &Self, x: SocketAddr| {
+                                    h.impersonate
+                                        .get(&x)
+                                        .copied()
+                                        .unwrap_or_else(|| h.node(x).node_id())
+                                };
+                                let ida = shown(self, a);
+                                let idb = shown(self, b);
                                 self.feed(
                                     b,
                                     Input::SessionOpened {

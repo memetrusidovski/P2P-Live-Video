@@ -1620,3 +1620,38 @@ fn transport_rtt_samples_move_the_parent_estimator() {
     );
     assert_eq!(srtt(&h), after);
 }
+
+/// Ch2 §2.2: a session proves a NodeID. A joiner whose session with a candidate
+/// proved another NodeID than the candidate's record does not send NEIGHBOR to it.
+#[test]
+fn session_with_another_identity_is_not_asked_to_be_a_parent() {
+    let mut h = Harness::new();
+    let p = addr(1);
+    let v = addr(2);
+    h.add_publisher(p, 100_000, 1);
+    h.add_viewer(v, NodeClass::Relay, 2, 10_000, 7);
+    // The node at the publisher's address completes every handshake as another node.
+    h.impersonate.insert(p, NodeId([0xEE; 32]));
+    h.start(p);
+    h.start_publishing();
+    h.run_for(secs(0.5));
+    h.start(v);
+    h.run_for(secs(3.0));
+    assert!(
+        sends_of(&h, v, FrameType::NEIGHBOR).iter().all(
+            |(_, to, f, _)| *to != p || !matches!(f, Frame::Neighbor(n) if n.tree_id.is_tree())
+        ),
+        "no tree NEIGHBOR over a session with another identity"
+    );
+    assert!(
+        h.count_events(v, |e| matches!(
+            e,
+            Event::ValidationRejected { from, .. } if *from == p
+        )) >= 1,
+        "the mismatch is reported"
+    );
+    assert!(
+        h.node(v).trees().iter().all(|t| t.parent.is_none()),
+        "the impostor is nobody's parent"
+    );
+}

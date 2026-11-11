@@ -1069,6 +1069,14 @@ impl Node {
         let (rec, _score, hop, rtt_ms) = queue.remove(0);
         let addr = rec.addr.0;
         let open = self.sessions.get(&addr).map(|s| s.open).unwrap_or(false);
+        // SECURITY: An open session proved a NodeID. A record that names another
+        //           NodeID at that address is not asked to be a parent.
+        let proved = self.sessions.get(&addr).and_then(|s| s.node_id);
+        if open && proved.is_some_and(|id| id != rec.node_id) {
+            self.reject_impostor(addr);
+            self.request_next(tree, queue, saturated);
+            return;
+        }
         if !open {
             self.open_session(addr);
         }
@@ -2008,10 +2016,12 @@ impl Node {
             self.send_ping(peer);
         }
         let ids: Vec<TreeId> = self.trees.iter().map(|t| t.id).collect();
+        let mut impostor: Vec<TreeId> = Vec::new();
         for id in ids {
             let floor = self.params.probe_timeout;
             if let JoinState::Requesting {
                 current,
+                current_id,
                 awaiting_session,
                 current_rtt_ms,
                 deadline,
@@ -2019,6 +2029,13 @@ impl Node {
             } = &mut self.trees[id.index()].join
             {
                 if *current == peer && *awaiting_session {
+                    // SECURITY: The session proves a NodeID. A record that names one
+                    //           node at another node's address must not make that
+                    //           other node our parent under the first node's name.
+                    if *current_id != node_id {
+                        impostor.push(id);
+                        continue;
+                    }
                     *awaiting_session = false;
                     // RULE: The NEIGHBOR answer gets two round trips from the moment
                     //       the session opens, however long the handshake took.
@@ -2028,11 +2045,29 @@ impl Node {
                 }
             }
         }
+        for id in impostor {
+            self.reject_impostor(peer);
+            if let JoinState::Requesting {
+                queue, saturated, ..
+            } = std::mem::replace(&mut self.trees[id.index()].join, JoinState::Idle)
+            {
+                self.request_next(id, queue, saturated);
+            }
+        }
         self.membership_session_opened(peer);
         if self.membership.pending_neighbor.remove(&peer) {
             self.membership_send_neighbor(peer);
         }
         self.nat_session_opened(peer);
+    }
+
+    /// Count and report a session whose NodeID differs from the record dialed.
+    fn reject_impostor(&mut self, peer: PeerAddr) {
+        self.vb_rejected += 1;
+        self.emit(Event::ValidationRejected {
+            from: peer,
+            error: "the session's NodeID is not the one the record named".into(),
+        });
     }
 
     fn on_session_closed(&mut self, peer: PeerAddr, reason: &str) {

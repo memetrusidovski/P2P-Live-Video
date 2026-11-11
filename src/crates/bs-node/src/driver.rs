@@ -316,6 +316,8 @@ enum Ev {
     /// The ffmpeg ingest did not start.
     IngestFailed(String),
     Connected {
+        /// Whether this node dialed.
+        outbound: bool,
         peer: SocketAddr,
         node_id: NodeId,
         conn: quinn::Connection,
@@ -335,6 +337,8 @@ enum Ev {
     },
     Closed {
         peer: SocketAddr,
+        /// `quinn::Connection::stable_id` of the connection that closed.
+        id: usize,
     },
 }
 
@@ -342,6 +346,8 @@ struct Conn {
     conn: quinn::Connection,
     #[allow(dead_code)]
     node_id: NodeId,
+    /// Whether this node dialed the connection.
+    outbound: bool,
     writers: HashMap<u8, mpsc::UnboundedSender<Bytes>>,
 }
 
@@ -715,14 +721,30 @@ impl Driver {
         let ep = self.endpoint.clone();
         let tx = self.ev_tx.clone();
         let c1 = self.cfg.params.c1;
+        let handshakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         tokio::spawn(async move {
             while let Some(incoming) = ep.accept().await {
+                use std::sync::atomic::Ordering;
+                // SECURITY: An Initial needs no valid source address. Under load a
+                //           Retry makes the sender prove the address before the
+                //           node spends a certificate check on the handshake.
+                if !incoming.remote_address_validated()
+                    && handshakes.load(Ordering::Relaxed) >= tls::RETRY_ABOVE
+                {
+                    let _ = incoming.retry();
+                    continue;
+                }
                 let tx = tx.clone();
+                let handshakes = Arc::clone(&handshakes);
+                handshakes.fetch_add(1, Ordering::Relaxed);
                 tokio::spawn(async move {
-                    match incoming.await {
+                    let r = incoming.await;
+                    handshakes.fetch_sub(1, Ordering::Relaxed);
+                    match r {
                         Ok(conn) => match tls::connection_peer(&conn, c1) {
                             Ok(pid) => {
                                 let _ = tx.send(Ev::Connected {
+                                    outbound: false,
                                     peer: conn.remote_address(),
                                     node_id: pid.node_id,
                                     conn,
@@ -1162,10 +1184,22 @@ impl Driver {
                 self.publish_status();
             }
             Ev::Connected {
+                outbound,
                 peer,
                 node_id,
                 conn,
             } => {
+                // RULE: Two peers that dial each other at once keep one connection:
+                //       the one that the lower NodeID dialed. Both ends apply the
+                //       rule, so both keep the same connection.
+                if let Some(old) = self.conns.get(&peer) {
+                    let lower_dialed = |out: bool| out == (self.node.node_id() < node_id);
+                    if old.outbound != outbound && lower_dialed(old.outbound) {
+                        conn.close(0u32.into(), b"duplicate");
+                        return;
+                    }
+                    old.conn.close(0u32.into(), b"duplicate");
+                }
                 self.sessions += 1;
                 self.note_bootstrap_answered(peer);
                 // Gossip HMAC key (Ch3 §3.2.2) from the TLS exporter: identical on both ends.
@@ -1182,6 +1216,7 @@ impl Driver {
                     Conn {
                         conn,
                         node_id,
+                        outbound,
                         writers: HashMap::new(),
                     },
                 );
@@ -1216,7 +1251,12 @@ impl Driver {
                 channel: Channel::Datagram,
                 frame,
             }),
-            Ev::Closed { peer } => {
+            Ev::Closed { peer, id } => {
+                // RULE: Only the live connection ends the session. A duplicate that
+                //       lost the simultaneous open closes while the session is open.
+                if self.conns.get(&peer).map(|c| c.conn.stable_id()) != Some(id) {
+                    return;
+                }
                 self.conns.remove(&peer);
                 self.sync_peer_budget();
                 self.feed(Input::SessionClosed { peer });
@@ -1289,8 +1329,9 @@ impl Driver {
         // Close.
         let tx = self.ev_tx.clone();
         tokio::spawn(async move {
+            let id = conn.stable_id();
             let _ = conn.closed().await;
-            let _ = tx.send(Ev::Closed { peer });
+            let _ = tx.send(Ev::Closed { peer, id });
         });
     }
 
@@ -1365,6 +1406,7 @@ impl Driver {
                         Ok(conn) => match tls::connection_peer(&conn, c1) {
                             Ok(pid) => {
                                 let _ = tx.send(Ev::Connected {
+                                    outbound: true,
                                     peer,
                                     node_id: pid.node_id,
                                     conn,

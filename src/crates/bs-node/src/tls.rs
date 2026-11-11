@@ -23,6 +23,11 @@ use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 pub const ALPN: &[u8] = b"bitstream/1";
 /// The server name clients present (unused for verification).
 pub const SERVER_NAME: &str = "bitstream";
+/// Inbound handshakes in progress at once; more are refused.
+pub const MAX_INCOMING: usize = 256;
+/// Inbound handshakes in progress above which a new one must prove its source
+/// address with a QUIC Retry. Below it a handshake saves that round trip.
+pub const RETRY_ABOVE: usize = 32;
 
 /// Build the node's certificate and key from its identity.
 pub fn identity_cert(
@@ -228,10 +233,13 @@ pub fn quic_configs(
     server.alpn_protocols = vec![ALPN.to_vec()];
 
     let mut transport = quinn::TransportConfig::default();
+    // WHY: Liveness is the core's RTT-scaled eviction (Ch3 §3.3), not this timer. A
+    //      short idle timeout closes every session when a phone changes networks,
+    //      and the repair then pays full handshakes.
     transport.max_idle_timeout(Some(
-        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(4)).unwrap(),
+        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(15)).unwrap(),
     ));
-    transport.keep_alive_interval(Some(std::time::Duration::from_millis(1500)));
+    transport.keep_alive_interval(Some(std::time::Duration::from_secs(3)));
     transport.datagram_receive_buffer_size(Some(8 << 20));
     transport.datagram_send_buffer_size(8 << 20);
     transport.max_concurrent_bidi_streams(64u32.into());
@@ -252,6 +260,9 @@ pub fn quic_configs(
         quinn::crypto::rustls::QuicServerConfig::try_from(server).context("quic server config")?;
     let mut server_cfg = quinn::ServerConfig::with_crypto(Arc::new(qs));
     server_cfg.transport_config(transport);
+    // SECURITY: Bound the handshakes in progress. Each one holds state and costs a
+    //           certificate check, and an Initial needs no valid source address.
+    server_cfg.max_incoming(MAX_INCOMING);
     Ok((client_cfg, server_cfg))
 }
 

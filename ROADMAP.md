@@ -43,14 +43,14 @@ The first Internet test cannot start until these land.
 - Several bootstrap contacts in the config, the CLI and the share link, tried in parallel with backoff. 2 days.
 - The bridge trigger scaled to the round trip, and a floor for the eviction timer of one chunk period plus jitter (a spec question, tick walk S4). 1 day.
 
-### 2. Survive the open Internet: transport defences (about 12 days)
+### 2. Survive the open Internet: transport defences (about 10 days)
 
 Without these the first public stream is a denial-of-service target.
 
-- The same budgets for QUIC handshakes, with QUIC Retry under load, and a cache of verified static puzzles so a repeated PING costs no proof-of-work check. Plain frames have the budgets and a bounded queue since round 5. 2 days.
+- Per-source budgets for QUIC handshakes, and a cache of verified static puzzles so a repeated PING costs no proof-of-work check. Round 6 capped handshakes in progress and added QUIC Retry under load. 1 day.
 - Freshness and replay for pre-session frames: a UTC timestamp in the validation block with a ±60 s window and a per-NodeID LRU. Today the timestamp is process uptime. Spec change. 2 days.
 - Reflection defence for DHT RPCs: a cookie round or a response cap on first contact, so the home publisher does not amplify toward spoofed addresses. Spec change. 2 days.
-- Bans delivered to the transport, with prefix-keyed escalation; a session's verified NodeID compared with the record dialed; a punch forward that a third party cannot aim. 3 days.
+- Bans delivered to the transport, with prefix-keyed escalation; a punch forward that a third party cannot aim. Round 6 added the check of a session's NodeID against the record dialed. 2 days.
 - A hostile-network harness for `bs-node`: spoofed flood, replay, Retry, simultaneous open, uplink throttle. Nothing exercises `tls.rs`, `transport.rs` or the driver against an attacker today. 3 days.
 
 ### 3. Repair at Internet RTTs (about 11 days)
@@ -98,7 +98,7 @@ change, through [`FIXER-AGENT.md`](FIXER-AGENT.md).
 | 7 to 10 | Block 4, the player half of block 5 | A broadcaster streams a camera from behind a NAT to ten viewers on three networks without editing a command line; rendition switches are clean |
 | 11 to 16 | Mobile viewer, block 6 | A phone on cellular watches the stream; the open tickets are closed or accepted with a recorded reason |
 
-About 94 engineer-days in all. One person reaches the first gate in a month and the
+About 92 engineer-days in all. One person reaches the first gate in a month and the
 last in about six; three people reach the last in two to three months, because blocks
 2, 3 and 5 are independent of each other.
 
@@ -188,4 +188,18 @@ The page also trims media more than 30 s behind the playhead.
 
 A ten-viewer swarm from one LAN address saw no datagram refused and joined in 1.9 s.
 Loopback sources are exempt, so a one-host test swarm is never limited.
+
+## Round 6 (2026-11-11)
+
+Four transport bugs from the investigation, all in `bs-node` or the core's join path.
+
+| Bug | Result |
+|---|---|
+| A simultaneous open overwrites the live session | Two peers that dial each other keep the connection the lower NodeID dialed. A closed duplicate no longer ends the session |
+| A 4 s idle timeout drops every session on a network change | Idle timeout 15 s, keep-alive 3 s. Liveness stays with the core's eviction timer |
+| QUIC accept has no cap and no address validation | At most 256 handshakes in progress. Above 32 a new one must pass a QUIC Retry |
+| A session's NodeID is never compared with the record dialed | A candidate whose session proved another NodeID is not asked to be a parent. Test `session_with_another_identity_is_not_asked_to_be_a_parent` |
+
+The simultaneous-open rule and the Retry path have no test: nothing in the repository
+drives two real nodes into either case yet.
 
