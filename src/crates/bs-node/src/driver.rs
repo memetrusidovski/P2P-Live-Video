@@ -242,6 +242,12 @@ pub struct RunReport {
     /// Held plain datagrams dropped when the hold queue overflowed.
     #[serde(default)]
     pub plain_sends_dropped: u64,
+    /// Plain datagrams refused by the per-source budgets.
+    #[serde(default)]
+    pub plain_rate_limited: u64,
+    /// Plain datagrams dropped because the driver's queue was full.
+    #[serde(default)]
+    pub plain_queue_dropped: u64,
     /// Plain frames received, per frame type.
     #[serde(default)]
     pub received_plain: std::collections::BTreeMap<String, u64>,
@@ -533,7 +539,7 @@ struct Driver {
     node: Node,
     sock: Arc<DemuxSocket>,
     endpoint: quinn::Endpoint,
-    plain_rx: mpsc::UnboundedReceiver<PlainDatagram>,
+    plain_rx: mpsc::Receiver<PlainDatagram>,
     ev_tx: mpsc::UnboundedSender<Ev>,
     ev_rx: mpsc::UnboundedReceiver<Ev>,
     conns: HashMap<SocketAddr, Conn>,
@@ -591,7 +597,7 @@ impl Driver {
         identity: bs_crypto::Identity,
         sock: Arc<DemuxSocket>,
         endpoint: quinn::Endpoint,
-        plain_rx: mpsc::UnboundedReceiver<PlainDatagram>,
+        plain_rx: mpsc::Receiver<PlainDatagram>,
         local_addr: SocketAddr,
         stop_rx: tokio::sync::watch::Receiver<bool>,
         status_tx: tokio::sync::watch::Sender<Status>,
@@ -770,6 +776,7 @@ impl Driver {
                 _ = housekeeping.tick() => {
                     self.check_bootstrap_silence();
                     self.feed_rtt_samples();
+                    self.sync_peer_budget();
                 }
                 _ = publish.tick(), if is_pub && !self.ended && !live => {
                     if tokio::time::Instant::now() >= start_media_at {
@@ -1073,6 +1080,13 @@ impl Driver {
     /// Discovery runs over plain UDP, so a bootstrap that is down or behind a
     /// firewall fails without an error. Silence past `BOOTSTRAP_SILENCE` is the
     /// signal, and the first frame from the contact clears the report.
+    /// Tell the socket which source addresses have an open session. Their plain
+    /// frames draw on the peer budget, all others on the first-contact budget.
+    fn sync_peer_budget(&self) {
+        self.sock
+            .set_peers(self.conns.keys().map(|peer| peer.ip()).collect());
+    }
+
     /// Hand the core the QUIC round trip of every open connection.
     ///
     /// WHY: The core seeds a parent's estimator from one PROBE answer and updates
@@ -1171,6 +1185,7 @@ impl Driver {
                         writers: HashMap::new(),
                     },
                 );
+                self.sync_peer_budget();
                 self.feed(Input::SessionOpened {
                     peer,
                     node_id,
@@ -1203,6 +1218,7 @@ impl Driver {
             }),
             Ev::Closed { peer } => {
                 self.conns.remove(&peer);
+                self.sync_peer_budget();
                 self.feed(Input::SessionClosed { peer });
             }
         }
@@ -1690,6 +1706,14 @@ impl Driver {
             plain_sends_dropped: self
                 .sock
                 .plain_dropped
+                .load(std::sync::atomic::Ordering::Relaxed),
+            plain_rate_limited: self
+                .sock
+                .plain_rate_limited
+                .load(std::sync::atomic::Ordering::Relaxed),
+            plain_queue_dropped: self
+                .sock
+                .plain_queue_dropped
                 .load(std::sync::atomic::Ordering::Relaxed),
             received_plain: self
                 .received_plain

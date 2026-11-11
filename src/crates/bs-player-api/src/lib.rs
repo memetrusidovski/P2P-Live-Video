@@ -208,8 +208,8 @@ pub async fn serve(
 ///           page open in the viewer's browser can reach a loopback port. A browser
 ///           names the asking page in `Origin`, so a request whose `Origin` differs
 ///           from its `Host` came from another site. A `Host` that is a public DNS
-///           name is refused too: a hostile site can point its own name at this
-///           address (DNS rebinding) and would then pass the first check.
+///           name is refused too. A hostile site can point its own name at this
+///           address (DNS rebinding), and its requests then pass the first check.
 async fn same_origin_only(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let host = header_lower(&req, axum::http::header::HOST);
     let origin = header_lower(&req, axum::http::header::ORIGIN);
@@ -249,8 +249,8 @@ fn request_allowed(host: Option<&str>, origin: Option<&str>) -> bool {
     }
 }
 
-/// Whether `host` (a `Host` header value) is an address or a name that only the
-/// local network resolves: an IP literal, `localhost`, a single label, or `.local`.
+/// Whether a `Host` header value is an address or a name that only the local
+/// network resolves. Such a name is `localhost`, a single label, or ends in `.local`.
 fn local_host_name(host: &str) -> bool {
     if host.parse::<SocketAddr>().is_ok() || host.parse::<std::net::IpAddr>().is_ok() {
         return true;

@@ -22,6 +22,11 @@ use tokio::sync::{mpsc, Notify};
 /// Plain datagrams held while the socket is not writable. Low-rate control
 /// traffic never needs more; the oldest is dropped past the bound.
 const PLAIN_BACKLOG: usize = 8192;
+/// Plain datagrams waiting for the driver. A full queue drops the newest.
+///
+/// WHY: The driver decodes one datagram per loop turn. An unbounded queue grows by
+///      the excess of a flood until the process runs out of memory.
+const PLAIN_QUEUE: usize = 4096;
 /// Kernel socket buffers. The default (a few hundred KB) overflows at the
 /// symbol rate of a loaded relay; the kernel caps the request where needed.
 const SOCKET_BUFFER_BYTES: usize = 8 << 20;
@@ -39,7 +44,9 @@ pub struct PlainDatagram {
 #[derive(Debug)]
 pub struct DemuxSocket {
     inner: Arc<dyn AsyncUdpSocket>,
-    plain_tx: mpsc::UnboundedSender<PlainDatagram>,
+    plain_tx: mpsc::Sender<PlainDatagram>,
+    /// Per-source budgets for plain datagrams.
+    limiter: Mutex<crate::ratelimit::PlainLimiter>,
     /// Plain datagrams that met a full socket buffer, oldest first.
     backlog: Mutex<VecDeque<(SocketAddr, Bytes)>>,
     /// Wakes the flush task when the backlog gains an entry.
@@ -50,29 +57,36 @@ pub struct DemuxSocket {
     pub plain_held: AtomicU64,
     /// Plain datagrams dropped from a full backlog.
     pub plain_dropped: AtomicU64,
+    /// Plain datagrams refused by the per-source budgets.
+    pub plain_rate_limited: AtomicU64,
+    /// Plain datagrams dropped because the driver's queue was full.
+    pub plain_queue_dropped: AtomicU64,
 }
 
 impl DemuxSocket {
     /// Wrap a bound std socket for the tokio runtime. Must be called on a runtime:
     /// the flush task for held plain datagrams is spawned here.
-    pub fn bind(
-        addr: SocketAddr,
-    ) -> io::Result<(Arc<Self>, mpsc::UnboundedReceiver<PlainDatagram>)> {
+    pub fn bind(addr: SocketAddr) -> io::Result<(Arc<Self>, mpsc::Receiver<PlainDatagram>)> {
         let std_sock = std::net::UdpSocket::bind(addr)?;
         std_sock.set_nonblocking(true)?;
         let sock2 = socket2::SockRef::from(&std_sock);
         let _ = sock2.set_send_buffer_size(SOCKET_BUFFER_BYTES);
         let _ = sock2.set_recv_buffer_size(SOCKET_BUFFER_BYTES);
         let inner = quinn::Runtime::wrap_udp_socket(&quinn::TokioRuntime, std_sock)?;
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(PLAIN_QUEUE);
         let sock = Arc::new(Self {
             inner,
             plain_tx: tx,
+            limiter: Mutex::new(crate::ratelimit::PlainLimiter::new(
+                std::time::Instant::now(),
+            )),
             backlog: Mutex::new(VecDeque::new()),
             flush: Notify::new(),
             plain_in: AtomicU64::new(0),
             plain_held: AtomicU64::new(0),
             plain_dropped: AtomicU64::new(0),
+            plain_rate_limited: AtomicU64::new(0),
+            plain_queue_dropped: AtomicU64::new(0),
         });
         tokio::spawn(Arc::clone(&sock).flush_backlog());
         Ok((sock, rx))
@@ -141,6 +155,33 @@ impl DemuxSocket {
         }
     }
 
+    /// Replace the set of source addresses that have an open session. Their plain
+    /// datagrams draw on the peer budget.
+    pub fn set_peers(&self, peers: std::collections::HashSet<std::net::IpAddr>) {
+        self.limiter.lock().expect("limiter lock").set_peers(peers);
+    }
+
+    /// Hand one received plain datagram to the driver, within the source's budget
+    /// and the queue's bound.
+    fn queue_plain(&self, from: SocketAddr, data: &[u8]) {
+        let admitted = self
+            .limiter
+            .lock()
+            .expect("limiter lock")
+            .admit(from.ip(), std::time::Instant::now());
+        if !admitted {
+            self.plain_rate_limited.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let d = PlainDatagram {
+            from,
+            data: Bytes::copy_from_slice(data),
+        };
+        if self.plain_tx.try_send(d).is_err() {
+            self.plain_queue_dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Whether a datagram is a QUIC packet (fixed bit set).
     #[inline]
     pub fn is_quic(first: u8) -> bool {
@@ -173,10 +214,7 @@ impl AsyncUdpSocket for DemuxSocket {
                     let d = &data[off..end];
                     if !d.is_empty() && !Self::is_quic(d[0]) {
                         self.plain_in.fetch_add(1, Ordering::Relaxed);
-                        let _ = self.plain_tx.send(PlainDatagram {
-                            from: m.addr,
-                            data: Bytes::copy_from_slice(d),
-                        });
+                        self.queue_plain(m.addr, d);
                     }
                     off = end;
                 }

@@ -20,7 +20,7 @@ timer, default and defence assumes a LAN.
 |---|---|---|
 | Identity and bootstrap | One publisher that never restarts, viewers who know its address | A restart renumbers segments and viewers reject the stream forever; one home IP is the only contact |
 | NAT traversal | All mechanisms exist in `bs-core` and are wired through the driver | The rebind is once per process and has never run through a real NAT; a NATed publisher has nobody to register with; no relay exists for 30 minutes |
-| Transport and security | Mutual TLS over QUIC bound to the node identity, BBR, one demuxed socket | No per-source rate limit on plain frames, so a 20 Mbps spoofed PING flood takes any node down; no replay window; DHT answers reflect 5 to 6× toward a spoofed address |
+| Transport and security | Mutual TLS over QUIC bound to the node identity, BBR, one demuxed socket | No rate limit on QUIC handshakes; no replay window; DHT answers reflect 5 to 6× toward a spoofed address |
 | Forest and repair | Join, shed, PULL zone, parity plumbing; PSR 0.01 % on a LAN at 3 % loss | The eviction deadline is seeded once from the probe and never follows the path; repair has no Deputy fast path |
 | Media and players | File ingest with two renditions and AAC, signed descriptor, MSE page, desktop shell | No live source (camera, screen, RTMP); a phone has nothing to connect to |
 | Operations | Clean start and stop, three surfaced errors | A dead publisher is never reported; a crashed encoder reads as end of stream; nothing persists but the publisher key; the player API streams to anyone on the LAN who can reach the port |
@@ -43,11 +43,11 @@ The first Internet test cannot start until these land.
 - Several bootstrap contacts in the config, the CLI and the share link, tried in parallel with backoff. 2 days.
 - The bridge trigger scaled to the round trip, and a floor for the eviction timer of one chunk period plus jitter (a spec question, tick walk S4). 1 day.
 
-### 2. Survive the open Internet: transport defences (about 14 days)
+### 2. Survive the open Internet: transport defences (about 12 days)
 
 Without these the first public stream is a denial-of-service target.
 
-- User-space rate limiting in the driver: the spec's two-tier token buckets (per source and global) for plain frames and QUIC handshakes, with an allowlist from open sessions; a bounded plain-datagram queue; QUIC Retry under load. 4 days.
+- The same budgets for QUIC handshakes, with QUIC Retry under load, and a cache of verified static puzzles so a repeated PING costs no proof-of-work check. Plain frames have the budgets and a bounded queue since round 5. 2 days.
 - Freshness and replay for pre-session frames: a UTC timestamp in the validation block with a ±60 s window and a per-NodeID LRU. Today the timestamp is process uptime. Spec change. 2 days.
 - Reflection defence for DHT RPCs: a cookie round or a response cap on first contact, so the home publisher does not amplify toward spoofed addresses. Spec change. 2 days.
 - Bans delivered to the transport, with prefix-keyed escalation; a session's verified NodeID compared with the record dialed; a punch forward that a third party cannot aim. 3 days.
@@ -98,7 +98,7 @@ change, through [`FIXER-AGENT.md`](FIXER-AGENT.md).
 | 7 to 10 | Block 4, the player half of block 5 | A broadcaster streams a camera from behind a NAT to ten viewers on three networks without editing a command line; rendition switches are clean |
 | 11 to 16 | Mobile viewer, block 6 | A phone on cellular watches the stream; the open tickets are closed or accepted with a recorded reason |
 
-About 96 engineer-days in all. One person reaches the first gate in a month and the
+About 94 engineer-days in all. One person reaches the first gate in a month and the
 last in about six; three people reach the last in two to three months, because blocks
 2, 3 and 5 are independent of each other.
 
@@ -178,4 +178,14 @@ publisher with two renditions.
 | Player API has no Origin check | A request whose `Origin` differs from its `Host` gets 403, and so does a `Host` that is a public DNS name (DNS rebinding). The allow-all CORS header is gone |
 
 The page also trims media more than 30 s behind the playhead.
+
+## Round 5 (2026-11-11)
+
+| Work | Result |
+|---|---|
+| Rate limit on plain frames | The socket applies the spec's two-tier token buckets (App B §B.1.4) before a datagram reaches the driver: 2000 packets per second for a source with an open session, 50 for any other source, 5000 for all other sources together. A flood of 300,000 junk datagrams in 3.4 s had 299,729 refused, and the publisher kept running |
+| Plain-datagram queue | Bounded at 4096. The result file counts refused and dropped datagrams |
+
+A ten-viewer swarm from one LAN address saw no datagram refused and joined in 1.9 s.
+Loopback sources are exempt, so a one-host test swarm is never limited.
 
