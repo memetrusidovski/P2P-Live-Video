@@ -33,14 +33,14 @@ days. The counts below come from them.
 Sizes are engineer-days for one person who knows the code. Blocks 1 to 3 are needed
 before the first honest Internet test; 4 to 6 make it a product.
 
-### 1. Connect at all: bootstrap, identity, timers (about 12 days)
+### 1. Connect at all: bootstrap, identity, timers (about 11 days)
 
 The first Internet test cannot start until these land.
 
 - Re-rebind on IP change for mobile viewers, with a driver-side interface watcher. A test of the PING-first bootstrap through a real NAT. 3 days.
 - The cost of the spec proof of work measured on a phone, and the publisher key in the OS keychain for the desktop app (it is a file in the home directory since round 3). 1 day.
 - Publisher restart: persisted segment and manifest counters or a monotonic stream clock, viewer re-anchor. Needs a spec decision first (the cold-start walk, finding F5). 4 days.
-- Several bootstrap contacts in the config, the CLI and the share link, tried in parallel with backoff. 2 days.
+- Several bootstrap contacts in the share link and the desktop app. The CLI and the driver take them since round 8. 1 day.
 - The bridge trigger scaled to the round trip, and a floor for the eviction timer of one chunk period plus jitter (a spec question, tick walk S4). 1 day.
 
 ### 2. Survive the open Internet: transport defences (about 10 days)
@@ -98,7 +98,7 @@ change, through [`FIXER-AGENT.md`](FIXER-AGENT.md).
 | 7 to 10 | Block 4, the player half of block 5 | A broadcaster streams a camera from behind a NAT to ten viewers on three networks without editing a command line; rendition switches are clean |
 | 11 to 16 | Mobile viewer, block 6 | A phone on cellular watches the stream; the open tickets are closed or accepted with a recorded reason |
 
-About 91 engineer-days in all. One person reaches the first gate in a month and the
+About 90 engineer-days in all. One person reaches the first gate in a month and the
 last in about six; three people reach the last in two to three months, because blocks
 2, 3 and 5 are independent of each other.
 
@@ -213,4 +213,11 @@ drives two real nodes into either case yet.
 | Linux relays get a 20th of the intended socket buffer | The node warns once with the size it got and the sysctl to raise |
 
 The runbook's symptom table has a row for each.
+
+## Round 8 (2026-11-11)
+
+| Work | Result |
+|---|---|
+| Several bootstrap contacts | `--bootstrap` takes a list. The node asks every contact, and a viewer given one dead and one live contact joins. The share link of the desktop app still names one |
+| Relay balance across trees | Filed as ISSUE-089 with measurements over eight seeds |
 

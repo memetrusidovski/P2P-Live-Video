@@ -85,8 +85,12 @@ pub struct RunConfig {
     pub listen: SocketAddr,
     /// External IP to advertise / bind PoW to (`None` = detect).
     pub advertise_ip: Option<std::net::IpAddr>,
-    /// Bootstrap guardian (viewers).
+    /// First DHT bootstrap contact (viewers). The advertised address is detected
+    /// from the route to it.
     pub bootstrap: Option<SocketAddr>,
+    /// Further bootstrap contacts. The node asks every contact, so one that is
+    /// gone does not keep the node out.
+    pub more_bootstrap: Vec<SocketAddr>,
     /// Stream to join (viewers). Publishers derive it.
     pub stream_id: Option<StreamId>,
     /// Upload capacity.
@@ -128,6 +132,7 @@ impl RunConfig {
             listen: SocketAddr::from(([0, 0, 0, 0], PUBLISH_PORT)),
             advertise_ip: None,
             bootstrap: None,
+            more_bootstrap: Vec::new(),
             stream_id: None,
             upload_kbps: 100_000,
             ladder,
@@ -155,6 +160,7 @@ impl RunConfig {
             listen: SocketAddr::from(([0, 0, 0, 0], 0)),
             advertise_ip: None,
             bootstrap: Some(bootstrap),
+            more_bootstrap: Vec::new(),
             stream_id: Some(stream_id),
             upload_kbps: 20_000,
             ladder: Ladder::reference(),
@@ -418,7 +424,11 @@ pub async fn start(cfg: RunConfig) -> anyhow::Result<Handle> {
             upload_kbps: cfg.upload_kbps,
             addr,
             stream_id,
-            bootstrap: cfg.bootstrap.into_iter().collect(),
+            bootstrap: cfg
+                .bootstrap
+                .into_iter()
+                .chain(cfg.more_bootstrap.iter().copied())
+                .collect(),
             discovery: bs_core::DiscoveryMode::Dht,
             reachability: cfg.reachability,
             params: cfg.params.clone(),
@@ -1160,10 +1170,16 @@ impl Driver {
         if self.bootstrap_answered || self.epoch.elapsed() < BOOTSTRAP_SILENCE {
             return;
         }
-        let msg = format!(
-            "bootstrap {bootstrap}: no answer in {} s",
-            self.epoch.elapsed().as_secs()
-        );
+        let msg = match self.cfg.more_bootstrap.len() {
+            0 => format!(
+                "bootstrap {bootstrap}: no answer in {} s",
+                self.epoch.elapsed().as_secs()
+            ),
+            n => format!(
+                "bootstrap {bootstrap} and {n} more: no answer in {} s",
+                self.epoch.elapsed().as_secs()
+            ),
+        };
         if self.last_error.as_deref() != Some(&msg) {
             self.last_error = Some(msg);
             self.publish_status();
@@ -1193,7 +1209,8 @@ impl Driver {
     }
 
     fn note_bootstrap_answered(&mut self, from: SocketAddr) {
-        if self.bootstrap_answered || self.cfg.bootstrap != Some(from) {
+        let contact = self.cfg.bootstrap == Some(from) || self.cfg.more_bootstrap.contains(&from);
+        if self.bootstrap_answered || !contact {
             return;
         }
         self.bootstrap_answered = true;

@@ -96,9 +96,10 @@ enum Cmd {
     },
     /// Join a stream through a DHT bootstrap seed and write the reassembled bytes.
     Watch {
-        /// DHT bootstrap seed address, normally the publisher (host:port).
-        #[arg(long)]
-        bootstrap: String,
+        /// DHT bootstrap contacts (host:port), normally the publisher. Repeat the
+        /// flag or separate contacts with commas; the node asks every contact.
+        #[arg(long, required = true, value_delimiter = ',')]
+        bootstrap: Vec<String>,
         /// UDP bind address.
         #[arg(long, default_value = "0.0.0.0:0")]
         listen: SocketAddr,
@@ -151,9 +152,10 @@ enum Cmd {
     },
     /// Run many viewers in one process: one machine's share of a multi-machine swarm.
     Swarm {
-        /// DHT bootstrap seed address, normally the publisher (host:port).
-        #[arg(long)]
-        bootstrap: String,
+        /// DHT bootstrap contacts (host:port), normally the publisher. Repeat the
+        /// flag or separate contacts with commas; the node asks every contact.
+        #[arg(long, required = true, value_delimiter = ',')]
+        bootstrap: Vec<String>,
         /// Viewers to run.
         #[arg(long, default_value_t = 10)]
         count: u16,
@@ -276,15 +278,38 @@ fn reachability(nat: &str) -> Option<bs_wire::Reachability> {
     }
 }
 
-/// The first address `host:port` resolves to.
+/// The addresses of the bootstrap contacts: the first address each `host:port`
+/// resolves to, without duplicates.
 ///
 /// A loopback bootstrap gets a warning. The viewer then binds its identity to
 /// 127.0.0.1, and a publisher that advertises a LAN address rejects that.
+async fn resolve_bootstraps(specs: &[String]) -> anyhow::Result<Vec<SocketAddr>> {
+    let mut out = Vec::new();
+    for spec in specs {
+        let addr = resolve_bootstrap(spec.trim()).await?;
+        if !out.contains(&addr) {
+            out.push(addr);
+        }
+    }
+    anyhow::ensure!(!out.is_empty(), "--bootstrap needs at least one host:port");
+    Ok(out)
+}
+
+/// Contacts as `a, b, c` for a log line.
+fn contact_list(contacts: &[SocketAddr]) -> String {
+    contacts
+        .iter()
+        .map(SocketAddr::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 async fn resolve_bootstrap(spec: &str) -> anyhow::Result<SocketAddr> {
     let addr = tokio::net::lookup_host(spec)
-        .await?
+        .await
+        .with_context(|| format!("resolving {spec}"))?
         .next()
-        .with_context(|| format!("resolving {spec}"))?;
+        .with_context(|| format!("{spec} resolves to no address"))?;
     if addr.ip().is_loopback() {
         eprintln!(
             "bootstrap {addr} is loopback: that works only when the publisher listens on \
@@ -335,7 +360,8 @@ fn node_identity(
 
 /// What `watch` and `swarm` share when they build a viewer.
 struct ViewerArgs {
-    bootstrap: SocketAddr,
+    /// Bootstrap contacts, at least one.
+    bootstrap: Vec<SocketAddr>,
     stream_id: StreamId,
     listen: SocketAddr,
     advertise_ip: Option<IpAddr>,
@@ -365,7 +391,8 @@ impl ViewerArgs {
             reachability: reachability(&self.nat),
             listen: self.listen,
             advertise_ip: self.advertise_ip,
-            bootstrap: Some(self.bootstrap),
+            bootstrap: self.bootstrap.first().copied(),
+            more_bootstrap: self.bootstrap.iter().skip(1).copied().collect(),
             stream_id: Some(self.stream_id),
             upload_kbps: self.upload_kbps,
             ladder: Ladder::reference(),
@@ -529,7 +556,7 @@ async fn main() -> anyhow::Result<()> {
             label,
             stagger_ms,
         } => {
-            let bootstrap = resolve_bootstrap(&bootstrap).await?;
+            let bootstrap = resolve_bootstraps(&bootstrap).await?;
             let stream_id = resolve_stream(
                 stream.as_deref(),
                 publisher_seed,
@@ -556,7 +583,7 @@ async fn main() -> anyhow::Result<()> {
                 };
                 let (identity, rng_seed) = node_identity(seed.map(|s| s + u64::from(i)), None)?;
                 let cfg = ViewerArgs {
-                    bootstrap,
+                    bootstrap: bootstrap.clone(),
                     stream_id,
                     listen: SocketAddr::new(listen_ip, 0),
                     advertise_ip,
@@ -586,7 +613,8 @@ async fn main() -> anyhow::Result<()> {
                 handles.push(h);
                 tokio::time::sleep(Duration::from_millis(stagger_ms)).await;
             }
-            eprintln!("{label}: {count} viewers on stream {stream_id} via {bootstrap}");
+            let via = contact_list(&bootstrap);
+            eprintln!("{label}: {count} viewers on stream {stream_id} via {via}");
             stop_on_signal(handles.iter().map(|h| h.stop.clone()).collect());
             let statuses: Vec<_> = handles.iter().map(|h| h.status.clone()).collect();
             let progress = tokio::spawn(async move {
@@ -707,6 +735,7 @@ async fn main() -> anyhow::Result<()> {
                 listen,
                 advertise_ip,
                 bootstrap: None,
+                more_bootstrap: Vec::new(),
                 stream_id: None,
                 upload_kbps,
                 ladder: lad,
@@ -759,7 +788,8 @@ async fn main() -> anyhow::Result<()> {
             player,
         } => {
             let (identity, seed) = node_identity(seed, identity.as_deref())?;
-            let bootstrap = resolve_bootstrap(&bootstrap).await?;
+            let bootstrap = resolve_bootstraps(&bootstrap).await?;
+            let via = contact_list(&bootstrap);
             let stream_id = resolve_stream(
                 stream.as_deref(),
                 publisher_seed,
@@ -797,7 +827,7 @@ async fn main() -> anyhow::Result<()> {
             eprintln!(
                 "watching stream {} via {} on {} (node {})",
                 h.stream_id,
-                bootstrap,
+                via,
                 h.local_addr,
                 h.node_id.short()
             );

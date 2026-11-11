@@ -53,6 +53,11 @@ bsnode swarm --bootstrap 10.0.1.212:4000 --stream 25f3d0be... --count 10 \
 Or one viewer with a page you can watch: the `watch` line the publisher printed, then
 open `http://localhost:8080/`.
 
+`--bootstrap` takes several contacts, separated by commas. Any node of the swarm that
+accepts incoming UDP is a contact, so add a long-running viewer next to the publisher:
+`--bootstrap 10.0.1.212:4000,10.0.1.77:4000`. The viewer asks every contact and joins
+through the ones that answer.
+
 Use the printed address everywhere, including on the publisher's own machine. A viewer
 that bootstraps via 127.0.0.1 binds its identity to 127.0.0.1. A publisher that
 advertises a LAN address then rejects every block from it: its `vb_rejected` counter
