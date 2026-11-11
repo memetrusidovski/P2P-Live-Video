@@ -730,6 +730,14 @@ async fn main() -> anyhow::Result<()> {
             stop_on_signal(vec![h.stop.clone()]);
             let report = h.done.await??;
             println!("{}", serde_json::to_string_pretty(&report)?);
+            if let Some(err) = report
+                .last_error
+                .as_deref()
+                .filter(|e| e.starts_with("ingest"))
+            {
+                eprintln!("publisher ended on an error: {err}");
+                std::process::exit(4);
+            }
         }
         Cmd::Watch {
             bootstrap,

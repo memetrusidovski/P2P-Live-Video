@@ -23,7 +23,7 @@ timer, default and defence assumes a LAN.
 | Transport and security | Mutual TLS over QUIC bound to the node identity, BBR, one demuxed socket | No rate limit on QUIC handshakes; no replay window; DHT answers reflect 5 to 6× toward a spoofed address |
 | Forest and repair | Join, shed, PULL zone, parity plumbing; PSR 0.01 % on a LAN at 3 % loss | The eviction deadline is seeded once from the probe and never follows the path; repair has no Deputy fast path |
 | Media and players | File ingest with two renditions and AAC, signed descriptor, MSE page, desktop shell | No live source (camera, screen, RTMP); a phone has nothing to connect to |
-| Operations | Clean start and stop, three surfaced errors | A dead publisher is never reported; a crashed encoder reads as end of stream; nothing persists but the publisher key; the player API streams to anyone on the LAN who can reach the port |
+| Operations | Clean start and stop; a dead publisher, a crashed encoder and a silent bootstrap are reported | Nothing persists but the publisher key; tables keyed by peer grow for the life of the process; the player API streams to anyone on the LAN who can reach the port |
 
 The six notes list 55 bugs with file and line, and the missing pieces with a size in
 days. The counts below come from them.
@@ -72,11 +72,11 @@ window, because it is a full probe round plus a 1.5 RTT handshake.
 - Reachability self-check and uplink probe at publish time, the public address in the share link, a health view of the encoder and the swarm on the publisher page. 5 days.
 - Persistence and logs: a state directory, settings, a log file with rotation, periodic result snapshots. 2 days.
 
-### 5. A viewer who is not a developer (about 28 days)
+### 5. A viewer who is not a developer (about 27 days)
 
 - Player controls and a latency readout. Round 4 did switching, hole jumping, error recovery and buffer trim. 1 day.
 - Per-rendition subscription so a viewer downloads the rendition it watches, not every layer and two audio tracks; a 240p or audio-only floor in the default ladder. 5 days.
-- A viewer health model: connecting, playing, degraded, stalled, ended, failed, with a reason, rendered by the page and the desktop app. The publisher dying is invisible today. 3 days.
+- A viewer health model: connecting, playing, degraded, stalled, ended, failed, with a reason, rendered by the page and the desktop app. Since round 7 a dead publisher sets an error in the status. 2 days.
 - A token for a player API bound to a non-loopback address: anyone on the LAN can still open the page (the Origin check of round 4 stops other web sites only). 1 day.
 - Mobile viewer: `bs-node` built for iOS and Android inside a thin shell, or `bs-core` in WebAssembly as a WebTransport leaf behind public relays. A phone browser cannot view at all today, because the page is a loopback client of a local node. This is the largest single item and the one most users will judge the product by. 20 days.
 
@@ -98,7 +98,7 @@ change, through [`FIXER-AGENT.md`](FIXER-AGENT.md).
 | 7 to 10 | Block 4, the player half of block 5 | A broadcaster streams a camera from behind a NAT to ten viewers on three networks without editing a command line; rendition switches are clean |
 | 11 to 16 | Mobile viewer, block 6 | A phone on cellular watches the stream; the open tickets are closed or accepted with a recorded reason |
 
-About 92 engineer-days in all. One person reaches the first gate in a month and the
+About 91 engineer-days in all. One person reaches the first gate in a month and the
 last in about six; three people reach the last in two to three months, because blocks
 2, 3 and 5 are independent of each other.
 
@@ -202,4 +202,15 @@ Four transport bugs from the investigation, all in `bs-node` or the core's join 
 
 The simultaneous-open rule and the Retry path have no test: nothing in the repository
 drives two real nodes into either case yet.
+
+## Round 7 (2026-11-11)
+
+| Bug | Result |
+|---|---|
+| A viewer with a dead publisher reports no error | A viewer that played and then gets no media for 10 s sets `no media for over 10 s: the publisher is gone or unreachable`. The next chunk clears it. Checked live with a killed publisher |
+| ffmpeg failure is reported as a normal end of stream | The ingest reads each ffmpeg exit status. A failure sets `ingest: ffmpeg for <rendition> ended with <status>`, the result file carries it, and `bsnode publish` exits with code 4 |
+| The player HTTP server is never shut down | The server stops when its node does |
+| Linux relays get a 20th of the intended socket buffer | The node warns once with the size it got and the sysctl to raise |
+
+The runbook's symptom table has a row for each.
 

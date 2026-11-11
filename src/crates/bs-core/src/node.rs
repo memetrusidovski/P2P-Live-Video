@@ -2029,9 +2029,9 @@ impl Node {
             } = &mut self.trees[id.index()].join
             {
                 if *current == peer && *awaiting_session {
-                    // SECURITY: The session proves a NodeID. A record that names one
-                    //           node at another node's address must not make that
-                    //           other node our parent under the first node's name.
+                    // SECURITY: The session proves a NodeID. A record can name one
+                    //           node at the address of another node. That other
+                    //           node must not become our parent under a false name.
                     if *current_id != node_id {
                         impostor.push(id);
                         continue;

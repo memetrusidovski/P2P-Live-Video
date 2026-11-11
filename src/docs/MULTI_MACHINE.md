@@ -132,3 +132,8 @@ simulator, not yet through a real NAT.
 | `Connecting` with no depth, publisher `vb_rejected` rising | Mixed loopback and LAN addresses, or a NAT between the viewer and the publisher |
 | Plays, then `parent lost` and starvation on one machine | That machine's firewall drops incoming UDP from other viewers; allow `bsnode` or run it as `--class leaf` so it never relays |
 | Everything starves at once | The publisher's machine is saturated; move viewers off it |
+| `no media for over 10 s: the publisher is gone or unreachable` | The publisher stopped without ending the stream, or its network changed. The viewer plays again if media returns |
+| Publisher exits with code 4 and `ingest: ffmpeg for ... ended with ...` | The encoder crashed. Viewers got a STREAM_END |
+| `--stream` is missing | A viewer needs the stream id the publisher printed |
+| `UDP receive buffer is N KiB of the 8192 KiB asked for` | The kernel caps socket buffers. On Linux raise `net.core.rmem_max` and `net.core.wmem_max` to 8388608 |
+| `plain_rate_limited` above zero in a result file | A source sent more plain datagrams than its budget: 50 per second with no open session |

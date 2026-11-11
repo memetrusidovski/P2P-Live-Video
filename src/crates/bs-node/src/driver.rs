@@ -191,6 +191,9 @@ pub struct RunReport {
     pub listen: String,
     /// Final lifecycle state.
     pub state: String,
+    /// The last error the node reported, if it still stood at the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
     /// Seconds run.
     pub seconds: f64,
     /// Chunks published (publisher).
@@ -476,17 +479,27 @@ pub async fn start(cfg: RunConfig) -> anyhow::Result<Handle> {
     });
     let mut player = None;
     let mut player_bound = None;
+    let mut player_task = None;
     if let Some(addr) = player_addr {
         let (state, dtx, xtx) = bs_player_api::PlayerState::with_status(status_rx.clone());
-        let (bound, _task) = bs_player_api::serve(addr, state).await?;
+        let (bound, task) = bs_player_api::serve(addr, state).await?;
         info!("player: open http://{bound}/");
         player = Some((dtx, xtx));
         player_bound = Some(bound);
+        player_task = Some(task);
     }
     let driver = Driver::new(
         cfg, node, identity, sock, endpoint, plain_rx, local_addr, stop_rx, status_tx, player,
     )?;
-    let done = tokio::spawn(driver.run());
+    let done = tokio::spawn(async move {
+        let report = driver.run().await;
+        // WHY: A dropped JoinHandle detaches the server. An application that starts
+        //      and stops nodes then keeps one listening socket per node it ran.
+        if let Some(task) = player_task {
+            task.abort();
+        }
+        report
+    });
     Ok(Handle {
         local_addr,
         advertise_addr: addr,
@@ -585,6 +598,8 @@ struct Driver {
     status_tx: tokio::sync::watch::Sender<Status>,
     /// See `Status::last_error`.
     last_error: Option<String>,
+    /// When the last chunk with media reached the sink (viewers).
+    last_media_at: Option<tokio::time::Instant>,
     /// Whether any frame ever arrived from the bootstrap contact.
     bootstrap_answered: bool,
     layers_complete_last: u8,
@@ -594,6 +609,10 @@ struct Driver {
 /// problem. Longer than one DHT round trip plus a retry, short enough to read as
 /// an answer to "is the link right?".
 const BOOTSTRAP_SILENCE: std::time::Duration = std::time::Duration::from_secs(5);
+/// A viewer that played and then gets no media for this long reports the stream dead.
+const STREAM_SILENCE: std::time::Duration = std::time::Duration::from_secs(10);
+/// First words of the error a silent stream sets; a new chunk clears that error.
+const STREAM_SILENCE_ERROR: &str = "no media";
 
 impl Driver {
     #[allow(clippy::too_many_arguments)]
@@ -707,6 +726,7 @@ impl Driver {
             player,
             status_tx,
             last_error: None,
+            last_media_at: None,
             bootstrap_answered: false,
             layers_complete_last: 0,
         })
@@ -797,6 +817,7 @@ impl Driver {
                 _ = timer => self.feed(Input::Tick),
                 _ = housekeeping.tick() => {
                     self.check_bootstrap_silence();
+                    self.check_stream_silence();
                     self.feed_rtt_samples();
                     self.sync_peer_budget();
                 }
@@ -865,6 +886,12 @@ impl Driver {
                         if tx.send(c).await.is_err() {
                             return;
                         }
+                    }
+                    // WHY: An encoder that crashed and an input that ended both stop
+                    //      the chunks. Only the exit status tells them apart.
+                    if let Some(err) = src.failure().await {
+                        warn!("ffmpeg ingest failed: {err}");
+                        let _ = ev_tx.send(Ev::IngestFailed(err));
                     }
                 });
                 self.live_rx = Some(rx);
@@ -1138,6 +1165,28 @@ impl Driver {
             self.epoch.elapsed().as_secs()
         );
         if self.last_error.as_deref() != Some(&msg) {
+            self.last_error = Some(msg);
+            self.publish_status();
+        }
+    }
+
+    /// Report a stream that stopped without a STREAM_END.
+    ///
+    /// WHY: A publisher that crashed or lost its network sends no STREAM_END. The
+    ///      viewer stays Active with a frozen picture and no reason on screen.
+    fn check_stream_silence(&mut self) {
+        let Some(last) = self.last_media_at else {
+            return;
+        };
+        if self.node.state() == Lifecycle::Terminated || last.elapsed() < STREAM_SILENCE {
+            return;
+        }
+        let msg = format!(
+            "{STREAM_SILENCE_ERROR} for over {} s: the publisher is gone or unreachable",
+            STREAM_SILENCE.as_secs()
+        );
+        if self.last_error.as_deref() != Some(&msg) {
+            warn!("{msg}");
             self.last_error = Some(msg);
             self.publish_status();
         }
@@ -1496,6 +1545,14 @@ impl Driver {
     fn deliver(&mut self, chunk: LayeredChunk, layers_complete: u8, layers_subscribed: u8) {
         self.layers_complete_last = layers_complete;
         if layers_complete >= 1 {
+            self.last_media_at = Some(tokio::time::Instant::now());
+            if self
+                .last_error
+                .as_deref()
+                .is_some_and(|e| e.starts_with(STREAM_SILENCE_ERROR))
+            {
+                self.last_error = None;
+            }
             let complete: Vec<Bytes> = chunk
                 .layers
                 .iter()
@@ -1695,6 +1752,7 @@ impl Driver {
             stream_id: self.node.stream_id().to_string(),
             listen: self.local_addr.to_string(),
             state: format!("{:?}", self.node.state()),
+            last_error: self.last_error.clone(),
             seconds: self.epoch.elapsed().as_secs_f64(),
             chunks_published: self.chunks_published,
             chunks_played: self.played,

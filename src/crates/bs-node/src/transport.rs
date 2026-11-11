@@ -72,6 +72,22 @@ impl DemuxSocket {
         let sock2 = socket2::SockRef::from(&std_sock);
         let _ = sock2.set_send_buffer_size(SOCKET_BUFFER_BYTES);
         let _ = sock2.set_recv_buffer_size(SOCKET_BUFFER_BYTES);
+        // WHY: The kernel caps the request without an error. A stock Linux kernel
+        //      grants about a 20th of it, and a loaded relay then drops symbols.
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        if let Ok(got) = sock2.recv_buffer_size() {
+            if got < SOCKET_BUFFER_BYTES / 2 {
+                WARNED.call_once(|| {
+                    tracing::warn!(
+                        "UDP receive buffer is {} KiB of the {} KiB asked for; on Linux raise \
+                         net.core.rmem_max and net.core.wmem_max to {}",
+                        got / 1024,
+                        SOCKET_BUFFER_BYTES / 1024,
+                        SOCKET_BUFFER_BYTES
+                    );
+                });
+            }
+        }
         let inner = quinn::Runtime::wrap_udp_socket(&quinn::TokioRuntime, std_sock)?;
         let (tx, rx) = mpsc::channel(PLAIN_QUEUE);
         let sock = Arc::new(Self {

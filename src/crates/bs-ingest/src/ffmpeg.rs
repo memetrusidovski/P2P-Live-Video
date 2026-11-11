@@ -97,7 +97,7 @@ pub struct FfmpegSource {
     rx: mpsc::Receiver<Ev>,
     rend: Vec<Rendition>,
     k: u64,
-    _children: Vec<Child>,
+    children: Vec<Child>,
     /// Fragments emitted per rendition.
     pub emitted: Vec<u64>,
     /// Frame rate used for every rendition.
@@ -247,9 +247,29 @@ impl FfmpegSource {
                 })
                 .collect(),
             k: 0,
-            _children: children,
+            children,
             emitted: vec![0; n],
         })
+    }
+
+    /// Why the ingest ended, if an ffmpeg process failed. Call it after
+    /// `next_chunk` returned `None`.
+    ///
+    /// Returns `None` if every ffmpeg process exited with success: the input ended.
+    pub async fn failure(&mut self) -> Option<String> {
+        let mut failed = Vec::new();
+        for (child, spec) in self.children.iter_mut().zip(&self.specs) {
+            match child.wait().await {
+                Ok(status) if status.success() => {}
+                Ok(status) => failed.push(format!("ffmpeg for {} ended with {status}", spec.label)),
+                Err(e) => failed.push(format!("ffmpeg for {}: {e}", spec.label)),
+            }
+        }
+        if failed.is_empty() {
+            None
+        } else {
+            Some(failed.join("; "))
+        }
     }
 
     /// The ladder.
