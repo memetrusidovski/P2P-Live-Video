@@ -82,8 +82,8 @@ window, because it is a full probe round plus a 1.5 RTT handshake.
 
 ### 6. Close the specification (about 15 days)
 
-Thirteen tickets from the tick-walk audit are open (ISSUE-073 to 085 without 078, and
-087). Four change behaviour a real audience will hit: the startup target (082),
+Fourteen tickets are open (ISSUE-073 to 085 without 078, 087 and 089). Five change
+behaviour a real audience will hit: relay balance across trees (089), the startup target (082),
 the per-hop latency budget (077), the M = 2 wire encoding (073, interoperability only)
 and the XDP allowlist key (087). Fifty-nine Medium and Low candidates from the same
 audit are unverified. Each ticket is a design decision plus a spec edit plus a core
@@ -151,7 +151,7 @@ Open points from the round:
 Findings from the round:
 
 - The repair KPIs of a gate rest on about ten repairs, so they move with the seed. `baseline_100` passed two of six seeds before the round and passes two of three after. Judge a timer change over several seeds, never on one.
-- A 60-viewer swarm starves one tree when few relays hash to it. Seeds 25 and 27 put 9 of 45 relays in tree 1 and a third of the joins took over 15 s at any latency. This is a forest-balance problem, not a latency one, and it has no ticket yet.
+- A 60-viewer swarm starves one tree when few relays hash to it. Seeds 25 and 27 put 9 of 45 relays in tree 1 and a third of the joins took over 15 s at any latency. This is a forest-balance problem, not a latency one. It is filed as ISSUE-089.
 - A deadline built on the median or a high percentile of the round trips made short-path swarms worse. Slow answers there come from overloaded peers, and the fixed 200 ms cut filters those peers out.
 - `internet_rtt_step` passed before any fix: a route change alone does not evict parents in the simulator.
 - Real loss with the old parity rule was worse than the constant report: 2.4 % starvation at 2 % loss. The measurement and the rule had to change together.
