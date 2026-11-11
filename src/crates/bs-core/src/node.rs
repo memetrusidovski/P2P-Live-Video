@@ -94,6 +94,14 @@ struct Session {
     session_key: Option<[u8; 32]>,
 }
 
+/// A round trip longer than this value is not a sample: the answer was to an
+/// older request, or the peer was stalled.
+const RTT_SAMPLE_MAX: Duration = Duration::from_secs(2);
+/// Round-trip samples the deadline estimate looks at.
+const RTT_WINDOW: usize = 16;
+/// Unanswered PING or PROBE send times kept at once.
+const PING_SENT_MAX: usize = 512;
+
 /// A peer.
 pub struct Node {
     cfg: NodeConfig,
@@ -143,6 +151,12 @@ pub struct Node {
     forest: resize::ForestControl,
     /// Last starvation re-query per tree (GET_PEERS with the starved bit).
     starved_query_at: Vec<Option<Instant>>,
+    /// The last `RTT_WINDOW` round trips measured to any peer.
+    rtt_window: VecDeque<Duration>,
+    /// When the last unanswered PING to a peer went out.
+    ping_sent: BTreeMap<PeerAddr, Instant>,
+    /// When the last unanswered PROBE to a peer went out.
+    probe_sent: BTreeMap<PeerAddr, Instant>,
     /// Our reachability, configured or decided from reflections (Ch6 §6.1).
     reach: Reachability,
     /// NAT traversal and bridge state (Ch6).
@@ -232,6 +246,9 @@ impl Node {
             pending_update: None,
             forest: resize::ForestControl::default(),
             starved_query_at: Vec::new(),
+            rtt_window: VecDeque::new(),
+            ping_sent: BTreeMap::new(),
+            probe_sent: BTreeMap::new(),
             // RULE: Unknown reachability is treated as CONE until the reflections
             //       decide it: punches are then asked for, never relied on.
             reach: cfg.reachability.unwrap_or(Reachability::Cone),
@@ -745,6 +762,55 @@ impl Node {
         v
     }
 
+    /// Record one round trip to any peer.
+    fn note_rtt(&mut self, sample: Duration) {
+        if self.rtt_window.len() == RTT_WINDOW {
+            self.rtt_window.pop_front();
+        }
+        self.rtt_window.push_back(sample);
+    }
+
+    /// The lower quartile of the recent round trips, or zero with no sample.
+    ///
+    /// WHY: The lower quartile follows path distance. Higher percentiles follow
+    ///      answers that waited in a queue at an overloaded peer.
+    fn rtt_floor(&self) -> Duration {
+        let mut v: Vec<Duration> = self.rtt_window.iter().copied().collect();
+        if v.is_empty() {
+            return Duration::ZERO;
+        }
+        v.sort();
+        v[v.len() / 4]
+    }
+
+    /// The longest a probe round waits when no usable candidate answered.
+    ///
+    /// 1.5 times the lower quartile of the recent round trips, and never less than
+    /// `probe_timeout`.
+    fn probe_wait_max(&self) -> Duration {
+        // WHY: A candidate beyond `probe_timeout` can never answer in time. On a
+        //      long path every candidate is beyond it and no round ever succeeds.
+        let floor = self.rtt_floor();
+        let scaled = Duration(floor.0 + floor.0 / 2);
+        scaled.max(self.params.probe_timeout)
+    }
+
+    /// Whether a probe answer names a parent the round can ask.
+    fn usable_answer(&self, tree: TreeId, r: &ProbeResult) -> bool {
+        r.tree_state == bs_wire::TreeState::Serving
+            && r.hop < self.params.d_max
+            && (r.k_avail > 0 || self.trees[tree.index()].assigned)
+    }
+
+    /// How long a NEIGHBOR request to a candidate at `rtt_ms` can take.
+    ///
+    /// Covers the session handshake (1.5 round trips), the NEIGHBOR round trip and
+    /// one round trip of slack. Never shorter than three probe timeouts.
+    fn request_deadline(&self, rtt_ms: f64) -> Duration {
+        let scaled = Duration::from_secs_f64(rtt_ms.max(0.0) * 3.5 / 1000.0);
+        scaled.max(self.params.probe_timeout * 3)
+    }
+
     fn begin_probing(&mut self, tree: TreeId) {
         if self.is_source() {
             return;
@@ -759,6 +825,7 @@ impl Node {
             }
         }
         let deadline = self.now + self.params.probe_timeout;
+        let hard = self.now + self.probe_wait_max();
         let mut candidates = Vec::with_capacity(cands.len());
         for r in cands {
             self.punch_if_needed(&r);
@@ -774,6 +841,8 @@ impl Node {
         self.trees[tree.index()].join = JoinState::Probing {
             candidates,
             deadline,
+            hard,
+            extended: false,
         };
     }
 
@@ -783,6 +852,14 @@ impl Node {
         body.extend_from_slice(sid.as_bytes());
         body.push(tree.0);
         let vb = self.validation_block(FrameType::PROBE, &body);
+        let now = self.now;
+        if self.probe_sent.len() >= PING_SENT_MAX {
+            self.probe_sent
+                .retain(|_, t| now.duration_since(*t) < RTT_SAMPLE_MAX);
+        }
+        if self.probe_sent.len() < PING_SENT_MAX {
+            self.probe_sent.insert(to, now);
+        }
         self.send(
             to,
             Channel::Udp,
@@ -812,16 +889,30 @@ impl Node {
                 }
             }
         }
-        let Some(tree) = matched else { return };
+        let sent = self.probe_sent.remove(&from);
+        let Some(tree) = matched else {
+            // WHY: An answer after its round ended still measures the path. Without
+            //      the sample a node on long paths never learns to wait longer.
+            if let Some(t0) = sent {
+                let rtt = self.now.duration_since(t0);
+                if rtt < RTT_SAMPLE_MAX {
+                    self.note_rtt(rtt);
+                }
+            }
+            return;
+        };
         let params = self.params.clone();
         let now = self.now;
         let mut all_answered = false;
+        let mut sample = None;
         if let JoinState::Probing { candidates, .. } = &mut self.trees[tree.index()].join {
             if let Some(c) = candidates
                 .iter_mut()
                 .find(|c| c.record.node_id == pr.sender && c.response.is_none())
             {
-                let rtt_ms = now.duration_since(c.probed_at).as_millis_f64();
+                let rtt = now.duration_since(c.probed_at);
+                let rtt_ms = rtt.as_millis_f64();
+                sample = Some(rtt);
                 let score = params.score(pr.k_avail, pr.reliability_f32(), rtt_ms, pr.hop_count);
                 c.response = Some(ProbeResult {
                     k_avail: pr.k_avail,
@@ -840,8 +931,27 @@ impl Node {
             }
             all_answered = candidates.iter().all(|c| c.response.is_some());
         }
-        if all_answered {
+        if let Some(rtt) = sample {
+            self.note_rtt(rtt);
+        }
+        // RULE: Past the first deadline the round waits for one usable answer only.
+        let late_usable = matches!(
+            &self.trees[tree.index()].join,
+            JoinState::Probing { extended: true, .. }
+        ) && self.probe_round_usable(tree);
+        if all_answered || late_usable {
             self.finish_probing(tree);
+        }
+    }
+
+    /// Whether a candidate of the tree's probe round gave a usable answer.
+    fn probe_round_usable(&self, tree: TreeId) -> bool {
+        match &self.trees[tree.index()].join {
+            JoinState::Probing { candidates, .. } => candidates
+                .iter()
+                .filter_map(|c| c.response.as_ref())
+                .any(|r| self.usable_answer(tree, r)),
+            _ => false,
         }
     }
 
@@ -952,7 +1062,7 @@ impl Node {
             current_hop: hop,
             current_rtt_ms: rtt_ms,
             awaiting_session: !open,
-            deadline: self.now + self.params.probe_timeout * 3,
+            deadline: self.now + self.request_deadline(rtt_ms),
             saturated,
         };
         if open {
@@ -1882,14 +1992,21 @@ impl Node {
         }
         let ids: Vec<TreeId> = self.trees.iter().map(|t| t.id).collect();
         for id in ids {
+            let floor = self.params.probe_timeout;
             if let JoinState::Requesting {
                 current,
                 awaiting_session,
+                current_rtt_ms,
+                deadline,
                 ..
             } = &mut self.trees[id.index()].join
             {
                 if *current == peer && *awaiting_session {
                     *awaiting_session = false;
+                    // RULE: The NEIGHBOR answer gets two round trips from the moment
+                    //       the session opens, however long the handshake took.
+                    let answer = Duration::from_secs_f64(current_rtt_ms.max(0.0) * 2.0 / 1000.0);
+                    *deadline = (*deadline).max(self.now + answer.max(floor));
                     self.send_neighbor(id, peer);
                 }
             }
@@ -2139,6 +2256,12 @@ impl Node {
         let body = p.reflected.to_vec();
         let verified = self.verify_vb(&p.validation, FrameType::PONG, &body, from, NodeClass::Leaf);
         if verified {
+            if let Some(t0) = self.ping_sent.remove(&from) {
+                let rtt = self.now.duration_since(t0);
+                if rtt < RTT_SAMPLE_MAX {
+                    self.note_rtt(rtt);
+                }
+            }
             self.on_reflection(from, p.reflected);
             self.maybe_rebind(p.reflected);
         }
@@ -2826,7 +2949,18 @@ impl Node {
         for id in ids {
             let idx = id.index();
             match self.trees[idx].join.clone() {
-                JoinState::Probing { deadline, .. } if now >= deadline => self.finish_probing(id),
+                JoinState::Probing { deadline, hard, .. } if now >= deadline => {
+                    if now >= hard || self.probe_round_usable(id) {
+                        self.finish_probing(id);
+                    } else if let JoinState::Probing {
+                        deadline, extended, ..
+                    } = &mut self.trees[idx].join
+                    {
+                        // No usable answer yet: a far candidate needs more time.
+                        *deadline = hard;
+                        *extended = true;
+                    }
+                }
                 JoinState::Requesting {
                     deadline,
                     queue,
@@ -2995,6 +3129,14 @@ impl Node {
     fn send_ping(&mut self, addr: PeerAddr) {
         let sid = self.stream_id();
         let vb = self.validation_block(FrameType::PING, sid.as_bytes());
+        let now = self.now;
+        if self.ping_sent.len() >= PING_SENT_MAX {
+            self.ping_sent
+                .retain(|_, t| now.duration_since(*t) < RTT_SAMPLE_MAX);
+        }
+        if self.ping_sent.len() < PING_SENT_MAX {
+            self.ping_sent.entry(addr).or_insert(now);
+        }
         if let Some(s) = self.sessions.get_mut(&addr) {
             s.ping_sent_at = Some(self.now);
         }

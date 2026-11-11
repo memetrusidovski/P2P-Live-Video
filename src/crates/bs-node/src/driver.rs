@@ -598,7 +598,7 @@ impl Driver {
             match &cfg.media {
                 Media::File {
                     path,
-                    repeat: _,
+                    repeat,
                     max_bytes,
                 } if is_pub => {
                     let mut data = std::fs::read(path)
@@ -607,8 +607,13 @@ impl Driver {
                         data.truncate(*n);
                     }
                     let fs = FileSource::new(cfg.ladder.clone(), Bytes::from(data));
-                    let h = fs.file_hash();
-                    (Some(Box::new(fs)), Some(h))
+                    if *repeat {
+                        // A looped stream has no end, so no viewer can check a file hash.
+                        (Some(Box::new(fs.looped())), None)
+                    } else {
+                        let h = fs.file_hash();
+                        (Some(Box::new(fs)), Some(h))
+                    }
                 }
                 Media::Synthetic { seed } if is_pub => (
                     Some(Box::new(SyntheticSource::new(

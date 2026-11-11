@@ -47,8 +47,13 @@ pub enum JoinState {
     Probing {
         /// Candidates.
         candidates: Vec<Candidate>,
-        /// Round deadline.
+        /// When the round ends if a usable candidate answered.
         deadline: Instant,
+        /// When the round ends whoever answered.
+        hard: Instant,
+        /// The round passed `deadline` with no usable answer and now waits until
+        /// `hard` for the first one.
+        extended: bool,
     },
     /// Trying scored candidates in order.
     Requesting {

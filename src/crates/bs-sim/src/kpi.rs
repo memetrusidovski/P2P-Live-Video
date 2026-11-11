@@ -105,6 +105,10 @@ pub struct NodeStats {
     pub relay_reassignments: u64,
     /// PUNCH_REQUESTs sent to referrers.
     pub punches_sent: u64,
+    /// Identity rebinds to a reflected address.
+    pub rebinds: u64,
+    /// The reachability the node detected last, if it detected one.
+    pub reach_detected: Option<bs_wire::Reachability>,
     /// RELAY_PROPOSALs sent.
     pub bridges_proposed: u64,
     /// Bridges bound for this node.
@@ -363,6 +367,8 @@ impl Kpis {
             Event::ForestSwitched { .. } => s.forest_switches += 1,
             Event::RelayReassigned { .. } => s.relay_reassignments += 1,
             Event::PunchSent { .. } => s.punches_sent += 1,
+            Event::AddressRebound { .. } => s.rebinds += 1,
+            Event::ReachabilityDetected { reach } => s.reach_detected = Some(*reach),
             Event::BridgeProposed { .. } => s.bridges_proposed += 1,
             Event::BridgeBound { .. } => s.bridges_bound += 1,
             Event::BridgeRejected { .. } => s.bridges_rejected += 1,

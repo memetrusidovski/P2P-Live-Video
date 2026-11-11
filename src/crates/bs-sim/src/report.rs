@@ -349,6 +349,25 @@ pub fn verdict(sim: &mut Sim, scenario_path: &Path, out: &Path) -> Verdict {
             "punches_sent".into(),
             serde_json::json!(sum(|n| n.punches_sent)),
         );
+        facts.insert("rebinds".into(), serde_json::json!(sum(|n| n.rebinds)));
+        facts.insert(
+            "reach_detected:public".into(),
+            serde_json::json!(sum(|n| {
+                (n.reach_detected == Some(bs_wire::Reachability::Public)) as u64
+            })),
+        );
+        facts.insert(
+            "reach_detected:cone".into(),
+            serde_json::json!(sum(
+                |n| (n.reach_detected == Some(bs_wire::Reachability::Cone)) as u64
+            )),
+        );
+        facts.insert(
+            "reach_detected:symmetric".into(),
+            serde_json::json!(sum(|n| {
+                (n.reach_detected == Some(bs_wire::Reachability::Symmetric)) as u64
+            })),
+        );
         facts.insert(
             "bridges_proposed".into(),
             serde_json::json!(sum(|n| n.bridges_proposed)),

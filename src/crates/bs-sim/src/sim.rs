@@ -33,6 +33,9 @@ enum Kind {
     Kill(NodeIdx),
     Deliver {
         to: NodeIdx,
+        /// The sender.
+        src: NodeIdx,
+        /// The sender's address as the receiver observes it.
         from: SocketAddr,
         channel: Channel,
         frame: Frame,
@@ -40,6 +43,8 @@ enum Kind {
     SessionOpen {
         a: NodeIdx,
         b: NodeIdx,
+        /// The address `a` dialed for `b`.
+        dialed: SocketAddr,
     },
     SessionOpenFailed {
         a: NodeIdx,
@@ -143,6 +148,9 @@ pub struct SimNode {
     pub behaviour: Behaviour,
     /// Start time.
     pub started_at: Option<Instant>,
+    /// Whether peers observe a different source port per destination (a symmetric
+    /// NAT in front of a node that detects its reachability).
+    port_per_peer: bool,
 }
 
 /// The simulation.
@@ -152,6 +160,7 @@ pub struct Sim {
     /// Nodes (index 0 is the publisher).
     pub nodes: Vec<SimNode>,
     addr_index: HashMap<SocketAddr, NodeIdx>,
+    ip_index: HashMap<IpAddr, NodeIdx>,
     /// Network.
     pub network: Network,
     /// Oracle.
@@ -190,6 +199,24 @@ fn addr_for(i: usize) -> SocketAddr {
         4000 + (i % 1000) as u16,
     )
 }
+
+/// The address a detecting viewer behind a NAT starts with.
+fn private_addr_for(i: usize) -> SocketAddr {
+    let i = i as u32 + 1;
+    SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::new(
+            192,
+            168,
+            ((i >> 8) & 0xFF) as u8,
+            (i & 0xFF) as u8,
+        )),
+        5000,
+    )
+}
+
+/// First source port a symmetric NAT maps; the port for a destination adds the
+/// destination's node index.
+const MAPPED_PORT_BASE: u16 = 20_000;
 
 impl Sim {
     /// Build from a scenario. `base` resolves relative file paths.
@@ -243,6 +270,7 @@ impl Sim {
             scripted_done: vec![false; scenario.events.len()],
             nodes: Vec::new(),
             addr_index: HashMap::new(),
+            ip_index: HashMap::new(),
             scenario,
         };
         // Publisher.
@@ -298,6 +326,7 @@ impl Sim {
                 | ScriptedEvent::KillCount { at_s, .. }
                 | ScriptedEvent::JoinBurst { at_s, .. }
                 | ScriptedEvent::SetLoss { at_s, .. }
+                | ScriptedEvent::SetRtt { at_s, .. }
                 | ScriptedEvent::Poison { at_s, .. } => *at_s,
             };
             sim.schedule(
@@ -322,6 +351,7 @@ impl Sim {
     fn push_node(&mut self, node: Node, addr: SocketAddr, label: String) -> NodeIdx {
         let idx = self.nodes.len();
         self.addr_index.insert(addr, idx);
+        self.ip_index.insert(addr.ip(), idx);
         self.nodes.push(SimNode {
             node,
             addr,
@@ -331,8 +361,38 @@ impl Sim {
             poison: false,
             behaviour: Behaviour::Honest,
             started_at: None,
+            port_per_peer: false,
         });
         idx
+    }
+
+    /// The address node `j` observes for node `i`.
+    fn observed(&self, i: NodeIdx, j: NodeIdx) -> SocketAddr {
+        let a = self.nodes[i].addr;
+        if self.nodes[i].port_per_peer {
+            SocketAddr::new(a.ip(), MAPPED_PORT_BASE + j as u16)
+        } else {
+            a
+        }
+    }
+
+    /// The node that a packet from node `i` to `to` reaches, if the address routes.
+    ///
+    /// A symmetric NAT maps one port per destination. Only that destination reaches
+    /// the node through that port, and the public address of the NAT itself routes
+    /// nowhere.
+    fn route(&mut self, i: NodeIdx, to: SocketAddr) -> Option<NodeIdx> {
+        if let Some(&j) = self.addr_index.get(&to) {
+            if !self.nodes[j].port_per_peer {
+                return Some(j);
+            }
+        }
+        let j = *self.ip_index.get(&to.ip())?;
+        if self.nodes[j].port_per_peer && to == self.observed(j, i) {
+            return Some(j);
+        }
+        self.network.nat_drops += 1;
+        None
     }
 
     fn add_group(
@@ -362,13 +422,20 @@ impl Sim {
                 "symmetric" => Reachability::Symmetric,
                 _ => Reachability::Public,
             };
+            // A detecting viewer behind a NAT knows its private address only. The
+            // simulator routes by `addr`, which is what its peers observe.
+            let own_addr = if g.detect && reach != Reachability::Public {
+                private_addr_for(idx)
+            } else {
+                addr
+            };
             let node = Node::new(NodeConfig {
                 role: Role::Viewer {
                     top_layer: g.top_layer,
                 },
                 node_class: class,
                 upload_kbps: upload,
-                addr,
+                addr: own_addr,
                 stream_id,
                 bootstrap: if self.bootstrap_addr() == addr {
                     Vec::new()
@@ -376,7 +443,7 @@ impl Sim {
                     vec![self.bootstrap_addr()]
                 },
                 discovery: self.scenario.discovery,
-                reachability: Some(reach),
+                reachability: if g.detect { None } else { Some(reach) },
                 params: params.clone(),
                 seed: self
                     .scenario
@@ -387,6 +454,7 @@ impl Sim {
             self.network.add(addr, region, upload, reach);
             let i = self.push_node(node, addr, g.label.clone());
             self.nodes[i].behaviour = Behaviour::parse(&g.behaviour);
+            self.nodes[i].port_per_peer = g.detect && reach == Reachability::Symmetric;
             let join = offset_s + rng.random_range(g.join_s.min..=g.join_s.max);
             if self.nodes[i].behaviour == Behaviour::Collude {
                 // Colluders pair up within the group: each forges receipts for the next
@@ -430,13 +498,16 @@ impl Sim {
                 Kind::Collude(i) => self.collude_tick(i),
                 Kind::Deliver {
                     to,
+                    src,
                     from,
                     channel,
                     frame,
                 } => {
                     // A connection closed while data was in flight discards it (QUIC).
                     let to_addr = self.nodes[to].addr;
-                    if !matches!(channel, Channel::Udp) && !self.network.has_session(from, to_addr)
+                    let src_addr = self.nodes[src].addr;
+                    if !matches!(channel, Channel::Udp)
+                        && !self.network.has_session(src_addr, to_addr)
                     {
                         self.kpis.no_session_drops += 1;
                         *self
@@ -457,7 +528,7 @@ impl Sim {
                         );
                     }
                 }
-                Kind::SessionOpen { a, b } => {
+                Kind::SessionOpen { a, b, dialed } => {
                     if self.nodes[a].alive && self.nodes[b].alive {
                         let (aa, ab) = (self.nodes[a].addr, self.nodes[b].addr);
                         self.network.open_session(aa, ab);
@@ -465,10 +536,11 @@ impl Sim {
                         let ida = self.nodes[a].node.node_id();
                         let idb = self.nodes[b].node.node_id();
                         let key = session_key(self.scenario.seed, aa, ab);
+                        let a_seen = self.observed(a, b);
                         self.feed(
                             b,
                             Input::SessionOpened {
-                                peer: aa,
+                                peer: a_seen,
                                 node_id: ida,
                                 session_key: key,
                             },
@@ -476,14 +548,13 @@ impl Sim {
                         self.feed(
                             a,
                             Input::SessionOpened {
-                                peer: ab,
+                                peer: dialed,
                                 node_id: idb,
                                 session_key: key,
                             },
                         );
                     } else if self.nodes[a].alive {
-                        let ab = self.nodes[b].addr;
-                        self.feed(a, Input::SessionClosed { peer: ab });
+                        self.feed(a, Input::SessionClosed { peer: dialed });
                     }
                 }
                 Kind::SessionOpenFailed { a, peer } => {
@@ -548,7 +619,8 @@ impl Sim {
         let idle = self.network.idle_timeout();
         for p in peers {
             if let Some(&j) = self.addr_index.get(&p) {
-                self.schedule(self.now + idle, Kind::SessionClosed { to: j, peer: addr });
+                let peer = self.observed(i, j);
+                self.schedule(self.now + idle, Kind::SessionClosed { to: j, peer });
             }
         }
         self.log.note(self.now, i, &format!("killed: {why}"));
@@ -636,6 +708,11 @@ impl Sim {
                 self.network.loss = loss;
                 self.log
                     .note(self.now, 0, &format!("scripted: loss = {loss}"));
+            }
+            ScriptedEvent::SetRtt { scale, .. } => {
+                self.network.rtt_scale = scale;
+                self.log
+                    .note(self.now, 0, &format!("scripted: RTT x {scale}"));
             }
             ScriptedEvent::Poison { fraction, .. } => {
                 let mut cands = self.alive_viewers("relay");
@@ -739,9 +816,10 @@ impl Sim {
                 frame,
                 not_before,
             } => {
-                let Some(&j) = self.addr_index.get(&to) else {
+                let Some(j) = self.route(i, to) else {
                     return;
                 };
+                let to = self.nodes[j].addr;
                 let at = not_before.unwrap_or(self.now).max(self.now);
                 // Invariants on what leaves a node.
                 self.invariants.on_send(
@@ -793,42 +871,55 @@ impl Sim {
                     .network
                     .send(&mut self.rng, at, from, to, channel, size, is_media)
                 {
-                    Delivery::At(t) => self.schedule(
-                        t,
-                        Kind::Deliver {
-                            to: j,
-                            from,
-                            channel,
-                            frame,
-                        },
-                    ),
+                    Delivery::At(t) => {
+                        let from = self.observed(i, j);
+                        self.schedule(
+                            t,
+                            Kind::Deliver {
+                                to: j,
+                                src: i,
+                                from,
+                                channel,
+                                frame,
+                            },
+                        )
+                    }
                     Delivery::Dropped => {}
                 }
             }
-            Output::OpenSession(peer) => {
-                let Some(&j) = self.addr_index.get(&peer) else {
+            Output::OpenSession(dialed) => {
+                let Some(j) = self.route(i, dialed) else {
+                    // A port that a NAT does not map for us: the handshake times out.
+                    if self.ip_index.contains_key(&dialed.ip()) {
+                        let d = self.network.idle_timeout();
+                        self.schedule(self.now + d, Kind::SessionOpenFailed { a: i, peer: dialed });
+                    }
                     return;
                 };
+                let peer = self.nodes[j].addr;
                 // The handshake is outbound from `from`: it passes the peer's NAT only
                 // through an open mapping, and it opens our own toward the peer.
                 let reachable = self.network.can_reach(self.now, from, peer);
                 self.network.note_outbound(self.now, from, peer);
                 if self.network.alive(&peer) && reachable {
                     let d = self.network.session_open_delay(&from, &peer);
-                    self.schedule(self.now + d, Kind::SessionOpen { a: i, b: j });
+                    self.schedule(self.now + d, Kind::SessionOpen { a: i, b: j, dialed });
                 } else {
+                    let peer = dialed;
                     let d = self.network.idle_timeout();
                     self.schedule(self.now + d, Kind::SessionOpenFailed { a: i, peer });
                 }
             }
             Output::CloseSession(peer) => {
-                let pj = self.addr_index.get(&peer).copied();
+                let pj = self.route(i, peer);
                 self.log
                     .note(self.now, i, &format!("close session to node {:?}", pj));
-                if self.network.close_session(from, peer) {
-                    if let Some(&j) = self.addr_index.get(&peer) {
+                if let Some(j) = pj {
+                    let peer = self.nodes[j].addr;
+                    if self.network.close_session(from, peer) {
                         let d = self.network.one_way_latency(&from, &peer);
-                        self.schedule(self.now + d, Kind::SessionClosed { to: j, peer: from });
+                        let seen = self.observed(i, j);
+                        self.schedule(self.now + d, Kind::SessionClosed { to: j, peer: seen });
                     }
                 }
             }

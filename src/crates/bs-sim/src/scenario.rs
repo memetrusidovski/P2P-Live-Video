@@ -193,6 +193,9 @@ pub struct ViewerGroup {
     pub behaviour: String,
     /// NAT class: `public` (default), `cone` or `symmetric` (Ch6 §6.1).
     pub nat: String,
+    /// The viewer detects its reachability from PONG reflections (Ch2 §2.1.3). Behind
+    /// a NAT it starts with a private address and the network translates the address.
+    pub detect: bool,
 }
 impl Default for ViewerGroup {
     fn default() -> Self {
@@ -210,6 +213,7 @@ impl Default for ViewerGroup {
             region: None,
             behaviour: "honest".into(),
             nat: "public".into(),
+            detect: false,
         }
     }
 }
@@ -312,6 +316,13 @@ pub enum ScriptedEvent {
         at_s: f64,
         /// New loss.
         loss: f64,
+    },
+    /// Multiply the base latency of every pair (a route change).
+    SetRtt {
+        /// When.
+        at_s: f64,
+        /// Factor on the scenario's RTT ranges.
+        scale: f64,
     },
     /// Make a fraction of relays poison blocks from now on (adversarial).
     Poison {

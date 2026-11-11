@@ -21,7 +21,7 @@ timer, default and defence assumes a LAN.
 | Identity and bootstrap | One publisher that never restarts, viewers who know its address | Every default publisher shares one key and stream id; a restart renumbers segments and viewers reject the stream forever; one home IP is the only contact |
 | NAT traversal | All mechanisms exist in `bs-core` and are wired through the driver | The rebind is once per process and has never run through a real NAT; a NATed publisher has nobody to register with; no relay exists for 30 minutes |
 | Transport and security | Mutual TLS over QUIC bound to the node identity, BBR, one demuxed socket | No per-source rate limit on plain frames, so a 20 Mbps spoofed PING flood takes any node down; no replay window; DHT answers reflect 5 to 6× toward a spoofed address |
-| Forest and repair | Join, shed, PULL zone, parity plumbing; PSR 0.01 % on a LAN at 3 % loss | Probe, NEIGHBOR and eviction deadlines are LAN constants; candidates over 200 ms RTT are unusable; the receipt loss byte is a constant, so parity never follows loss; repair has no Deputy fast path |
+| Forest and repair | Join, shed, PULL zone, parity plumbing; PSR 0.01 % on a LAN at 3 % loss | The eviction deadline is seeded once from the probe and never follows the path; the receipt loss byte is a constant, so parity never follows loss; repair has no Deputy fast path |
 | Media and players | File ingest with two renditions and AAC, signed descriptor, MSE page, desktop shell | No live source (camera, screen, RTMP); rendition switches are not keyframe aligned; a phone has nothing to connect to |
 | Operations | Clean start and stop, three surfaced errors | A dead publisher is never reported; a crashed encoder reads as end of stream; nothing persists; the player API streams to anyone who can reach the port |
 
@@ -33,7 +33,7 @@ days. The counts below come from them.
 Sizes are engineer-days for one person who knows the code. Blocks 1 to 3 are needed
 before the first honest Internet test; 4 to 6 make it a product.
 
-### 1. Connect at all: bootstrap, identity, timers (about 18 days)
+### 1. Connect at all: bootstrap, identity, timers (about 17 days)
 
 The first Internet test cannot start until these land.
 
@@ -41,7 +41,7 @@ The first Internet test cannot start until these land.
 - Random identity by default and a persisted keypair (a data directory for `bsnode`, the keychain for the desktop app), so a broadcaster keeps one stream id across restarts and the secret key of the default publisher stops being public. The cost of the spec proof of work measured on a phone. 3 days.
 - Publisher restart: persisted segment and manifest counters or a monotonic stream clock, viewer re-anchor. Needs a spec decision first (the cold-start walk, finding F5). 4 days.
 - Several bootstrap contacts in the config, the CLI and the share link, tried in parallel with backoff. 2 days.
-- RTT-scaled timers fed from the QUIC estimator: probe, NEIGHBOR, eviction and the bridge trigger from one `rtt_budget(peer)` helper instead of 200 ms, 600 ms and a once-seeded SRTT. 2 days.
+- The eviction timer and the parent round-trip estimate fed from the QUIC estimator, and the bridge trigger scaled the same way. The probe and NEIGHBOR deadlines scale since round 2. 1 day.
 - Loss measurement the parent can act on: the child counts symbols past decode and knows the parity it was sent, so the receipt loss byte drives parity (ISSUE-078 sizes it). 3 days.
 
 ### 2. Survive the open Internet: transport defences (about 14 days)
@@ -54,14 +54,14 @@ Without these the first public stream is a denial-of-service target.
 - Bans delivered to the transport, with prefix-keyed escalation; a session's verified NodeID compared with the record dialed; a punch forward that a third party cannot aim. 3 days.
 - A hostile-network harness for `bs-node`: spoofed flood, replay, Retry, simultaneous open, uplink throttle. Nothing exercises `tls.rs`, `transport.rs` or the driver against an attacker today. 3 days.
 
-### 3. Repair at Internet RTTs (about 14 days)
+### 3. Repair at Internet RTTs (about 11 days)
 
 With timers scaled, repair still costs 1.8 s median at 250 ms RTT against a 2.0 s PULL
 window, because it is a full probe round plus a 1.5 RTT handshake.
 
 - ROSTER and Deputy election (Ch1 §1.2.3): the subtree re-attaches as a unit instead of a thundering herd, with the timer scaled per ISSUE-074. 6 days.
 - QUIC resumption tickets kept per NodeID so re-attach is 1 RTT (the spec's repair timeline assumes it; `rustls` keys tickets by server name today). 2 days.
-- An Internet network model in `bs-sim`: RTT above 160 ms, jitter, loss at parity 1, mid-run RTT steps and address translation, with gates. None of the failures above is visible to the simulator today. 4 days.
+- A mobile profile in the simulator's Internet model: an address change mid-run and jitter bursts. Round 2 added the rest. 1 day.
 - The simulator's PSR made to match Ch8 §8.2, and the same definition in `fleet/report.py`. 1 day.
 - Keepalive and punch robustness: retransmit the punch forward and the punch PING once, keep mappings toward non-guardian referrers. 1 day.
 
@@ -99,7 +99,7 @@ change, through [`FIXER-AGENT.md`](FIXER-AGENT.md).
 | 7 to 10 | Block 4, the player half of block 5 | A broadcaster streams a camera from behind a NAT to ten viewers on three networks without editing a command line; rendition switches are clean |
 | 11 to 16 | Mobile viewer, block 6 | A phone on cellular watches the stream; the open tickets are closed or accepted with a recorded reason |
 
-About 110 engineer-days in all. One person reaches the first gate in a month and the
+About 105 engineer-days in all. One person reaches the first gate in a month and the
 last in about six; three people reach the last in two to three months, because blocks
 2, 3 and 5 are independent of each other.
 
@@ -138,3 +138,20 @@ Open points from the round:
 - A NATed join still sends one discovery FIND_VALUE bound to the old address. The seed rejects it and the 1 s retry succeeds.
 - The test `detecting_viewer_repeats_the_seed_ping_after_a_lost_pong` passes without the PING retry, so it does not yet prove the retry.
 - The PING-first path has not run through a real NAT, and no simulator scenario uses detected reachability.
+
+## Round 2 (2026-11-11)
+
+| Work | Result |
+|---|---|
+| Live LAN swarm on the spec proof of work | Ten of ten viewers play, join median 2.0 s |
+| Internet model in the simulator | Viewers can detect their reachability on a network that translates addresses, including one source port per peer behind a symmetric NAT. A scripted event changes every path's latency mid-run. Five `internet_*` gates run in the check script |
+| Probe and NEIGHBOR deadlines | A probe round still ends at `probe_timeout` when a usable parent answered. With none, it waits up to 1.5 times the lower quartile of the recent round trips. The NEIGHBOR deadline covers 3.5 round trips. With every pair 200 to 300 ms apart, active viewers went from 16 % to 100 % |
+| `bsnode publish --repeat` | The flag was ignored and the stream ended with the file. It now loops |
+
+Findings from the round:
+
+- The repair KPIs of a gate rest on about ten repairs, so they move with the seed. `baseline_100` passed two of six seeds before the round and passes two of three after. Judge a timer change over several seeds, never on one.
+- A 60-viewer swarm starves one tree when few relays hash to it. Seeds 25 and 27 put 9 of 45 relays in tree 1 and a third of the joins took over 15 s at any latency. This is a forest-balance problem, not a latency one, and it has no ticket yet.
+- A deadline built on the median or a high percentile of the round trips made short-path swarms worse. Slow answers there come from overloaded peers, and the fixed 200 ms cut filters those peers out.
+- `internet_rtt_step` and `internet_lossy_parity1` pass without any fix. Parity reaches 2 on every link through the constant loss byte, so the lossy gate does not yet prove that parity follows loss.
+

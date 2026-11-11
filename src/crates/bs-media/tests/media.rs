@@ -270,3 +270,39 @@ impl<S: Source> CollectChunks for S {
         v
     }
 }
+
+/// A looped file never ends. Segment numbers and timestamps continue across the
+/// loop, and the bytes start again from the head of the file.
+#[test]
+fn looped_file_source_continues_numbering() {
+    let ladder = Ladder::reference();
+    let mut once = FileSource::new(ladder.clone(), Bytes::from(vec![7u8; 600_000]));
+    let n = once.total_chunks() as usize;
+    let first = once.next_chunk().expect("a first chunk");
+
+    let mut src = FileSource::new(ladder.clone(), Bytes::from(vec![7u8; 600_000])).looped();
+    let chunks: Vec<_> = (0..n + 2).map(|_| src.next_chunk()).collect();
+    assert!(chunks.iter().all(|c| c.is_some()), "the looped file ended");
+    let chunks: Vec<_> = chunks.into_iter().flatten().collect();
+    for w in chunks.windows(2) {
+        assert_eq!(
+            w[1].timestamp_us - w[0].timestamp_us,
+            CHUNK_MS as u64 * 1000,
+            "timestamps continue across the loop"
+        );
+        let a = w[0].segment.0 as u64 * 4 + w[0].chunk_index as u64;
+        let b = w[1].segment.0 as u64 * 4 + w[1].chunk_index as u64;
+        assert_eq!(b, a + 1, "chunk numbering continues across the loop");
+    }
+    assert_eq!(
+        chunks[n].layers, first.layers,
+        "the loop restarts at the head of the file"
+    );
+    assert!(
+        FileSource::new(ladder, Bytes::new())
+            .looped()
+            .next_chunk()
+            .is_none(),
+        "an empty file yields no chunk"
+    );
+}

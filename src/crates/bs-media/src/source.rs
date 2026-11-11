@@ -165,6 +165,8 @@ pub struct FileSource {
     hashers: Vec<blake3::Hasher>,
     /// Blake3 of the whole file, for the simplest end-to-end check.
     file_hash: bs_wire::Hash,
+    /// Whether the file starts again when it ends.
+    looped: bool,
 }
 
 impl FileSource {
@@ -181,7 +183,14 @@ impl FileSource {
             cursor: Cursor::new(0),
             hashers: (0..n).map(|_| blake3::Hasher::new()).collect(),
             file_hash,
+            looped: false,
         }
+    }
+    /// Stream the file in a loop. Segment numbers and timestamps continue across
+    /// loops, so the stream never ends. An empty file still yields no chunk.
+    pub fn looped(mut self) -> Self {
+        self.looped = true;
+        self
     }
     /// Blake3 of the source file.
     pub fn file_hash(&self) -> bs_wire::Hash {
@@ -208,7 +217,10 @@ impl Source for FileSource {
     }
     fn next_chunk(&mut self) -> Option<LayeredChunk> {
         if self.pos >= self.data.len() {
-            return None;
+            if !self.looped || self.data.is_empty() {
+                return None;
+            }
+            self.pos = 0;
         }
         let (segment, chunk_index, timestamp_us) = self.cursor.advance();
         let mut layers = Vec::with_capacity(self.per_chunk.len());

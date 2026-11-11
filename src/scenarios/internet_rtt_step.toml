@@ -1,0 +1,43 @@
+# A route change: at t = 40 s every path becomes three times longer. Timers seeded
+# from the first RTT sample must follow, or parents are evicted as dead.
+seed = 21
+duration_s = 90.0
+forest_size = 3
+
+[publisher]
+upload_kbps = 50000
+
+[[viewers]]
+label = "relays"
+count = 45
+class = "relay"
+upload_kbps = { min = 8000.0, max = 20000.0 }
+top_layer = 2
+join_s = { min = 1.0, max = 15.0 }
+
+[[viewers]]
+label = "leaves"
+count = 15
+class = "leaf"
+upload_kbps = { min = 1000.0, max = 3000.0 }
+top_layer = 1
+join_s = { min = 5.0, max = 18.0 }
+
+[[events]]
+kind = "set_rtt"
+at_s = 40.0
+scale = 3.0
+
+[network]
+regions = 3
+intra_region_rtt_ms = { min = 20.0, max = 40.0 }
+inter_region_rtt_ms = { min = 60.0, max = 100.0 }
+jitter_ms = 5.0
+
+[kpis]
+psr_max = 0.02
+sjl_mean_max_s = 5.0
+sjl_p95_max_s = 9.0
+active_fraction_min = 0.95
+repair_median_max_s = 2.0
+repair_p95_max_s = 5.0

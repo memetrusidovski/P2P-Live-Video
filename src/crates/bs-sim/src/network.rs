@@ -50,6 +50,8 @@ pub struct Network {
     pair_seed: u64,
     /// Current datagram loss (scriptable).
     pub loss: f64,
+    /// Factor on the base latency of every pair (scriptable).
+    pub rtt_scale: f64,
 }
 
 /// Outcome of scheduling a send.
@@ -66,6 +68,7 @@ impl Network {
     pub fn new(spec: NetworkSpec, seed: u64) -> Self {
         Self {
             loss: spec.loss,
+            rtt_scale: 1.0,
             spec,
             endpoints: HashMap::new(),
             stream_tail: HashMap::new(),
@@ -218,7 +221,7 @@ impl Network {
             d.as_bytes()[3],
         ]) as f64
             / u32::MAX as f64;
-        let rtt_ms = r.min + (r.max - r.min) * u;
+        let rtt_ms = (r.min + (r.max - r.min) * u) * self.rtt_scale;
         Duration::from_secs_f64(rtt_ms / 2000.0)
     }
     /// RTT for a pair.

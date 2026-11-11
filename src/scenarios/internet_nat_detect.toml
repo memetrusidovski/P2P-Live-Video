@@ -1,0 +1,59 @@
+# Ch2 §2.1.3 and Ch6 §6.1 on a translated network. Every viewer detects its
+# reachability from PONG reflections. A viewer behind a NAT starts with a private
+# address, so it must rebind its identity to the reflected address before any peer
+# accepts its frames.
+seed = 11
+duration_s = 90.0
+forest_size = 3
+
+[publisher]
+upload_kbps = 30000
+
+[[viewers]]
+label = "public"
+count = 16
+class = "relay"
+upload_kbps = { min = 10000.0, max = 20000.0 }
+top_layer = 2
+join_s = { min = 1.0, max = 20.0 }
+detect = true
+
+[[viewers]]
+label = "cone"
+count = 16
+class = "relay"
+upload_kbps = { min = 10000.0, max = 20000.0 }
+top_layer = 2
+join_s = { min = 1.0, max = 20.0 }
+nat = "cone"
+detect = true
+
+[[viewers]]
+label = "symmetric"
+count = 8
+class = "leaf"
+upload_kbps = { min = 2000.0, max = 5000.0 }
+top_layer = 2
+join_s = { min = 5.0, max = 20.0 }
+nat = "symmetric"
+detect = true
+
+[network]
+regions = 2
+
+[kpis]
+psr_max = 0.02
+sjl_mean_max_s = 5.0
+sjl_p95_max_s = 9.0
+active_fraction_min = 0.95
+repair_median_max_s = 3.0
+repair_p95_max_s = 6.0
+
+# A cone viewer starts as CONE and stays CONE, so no detection event fires for it.
+[kpis.facts_min]
+rebinds = 24
+"reach_detected:public" = 16
+"reach_detected:symmetric" = 8
+"active_fraction:public" = 0.95
+"active_fraction:cone" = 0.95
+"active_fraction:symmetric" = 0.95

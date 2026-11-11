@@ -53,3 +53,32 @@ hash_match = true                # every viewer's output hash equals the source 
 
 Planned gate files (owned by the parent build): `baseline_100`, `flash_crowd`,
 `churn_storm`, `lossy_links`, `poisoned_blocks`, `cold_start_n2`.
+
+## Internet scenarios
+
+The `internet_*.toml` gates model paths the LAN gates never see.
+
+| Gate | What it models |
+|---|---|
+| `internet_nat_detect` | Viewers that detect their reachability on a network that translates addresses |
+| `internet_high_rtt` | Three regions, 150 to 300 ms between regions, a relay kill at 40 s |
+| `internet_far_swarm` | Every pair 200 to 300 ms apart, a relay kill at 40 s |
+| `internet_rtt_step` | Every path three times longer from 40 s |
+| `internet_lossy_parity1` | 2 % loss at 80 ms with parity 1 |
+
+They use two keys the other gates do not:
+
+```toml
+[[viewers]]
+nat = "cone"        # "public" | "cone" | "symmetric"
+detect = true       # the viewer starts with a private address and reads its
+                    # reachability from PONG reflections
+
+[[events]]
+kind = "set_rtt"    # multiply every path's base latency from at_s on
+at_s = 40.0
+scale = 3.0
+```
+
+A `symmetric` viewer with `detect = true` shows each peer a different source port.
+Only that peer reaches the viewer through that port.
