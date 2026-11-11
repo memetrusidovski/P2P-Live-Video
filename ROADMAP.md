@@ -18,7 +18,7 @@ timer, default and defence assumes a LAN.
 
 | Area | Works today | Breaks on the Internet |
 |---|---|---|
-| Identity and bootstrap | One publisher that never restarts, viewers who know its address | Every default publisher shares one key and stream id; a restart renumbers segments and viewers reject the stream forever; one home IP is the only contact |
+| Identity and bootstrap | One publisher that never restarts, viewers who know its address | A restart renumbers segments and viewers reject the stream forever; one home IP is the only contact |
 | NAT traversal | All mechanisms exist in `bs-core` and are wired through the driver | The rebind is once per process and has never run through a real NAT; a NATed publisher has nobody to register with; no relay exists for 30 minutes |
 | Transport and security | Mutual TLS over QUIC bound to the node identity, BBR, one demuxed socket | No per-source rate limit on plain frames, so a 20 Mbps spoofed PING flood takes any node down; no replay window; DHT answers reflect 5 to 6× toward a spoofed address |
 | Forest and repair | Join, shed, PULL zone, parity plumbing; PSR 0.01 % on a LAN at 3 % loss | The eviction deadline is seeded once from the probe and never follows the path; repair has no Deputy fast path |
@@ -33,15 +33,15 @@ days. The counts below come from them.
 Sizes are engineer-days for one person who knows the code. Blocks 1 to 3 are needed
 before the first honest Internet test; 4 to 6 make it a product.
 
-### 1. Connect at all: bootstrap, identity, timers (about 14 days)
+### 1. Connect at all: bootstrap, identity, timers (about 12 days)
 
 The first Internet test cannot start until these land.
 
 - Re-rebind on IP change for mobile viewers, with a driver-side interface watcher. A test of the PING-first bootstrap through a real NAT. 3 days.
-- Random identity by default and a persisted keypair (a data directory for `bsnode`, the keychain for the desktop app), so a broadcaster keeps one stream id across restarts and the secret key of the default publisher stops being public. The cost of the spec proof of work measured on a phone. 3 days.
+- The cost of the spec proof of work measured on a phone, and the publisher key in the OS keychain for the desktop app (it is a file in the home directory since round 3). 1 day.
 - Publisher restart: persisted segment and manifest counters or a monotonic stream clock, viewer re-anchor. Needs a spec decision first (the cold-start walk, finding F5). 4 days.
 - Several bootstrap contacts in the config, the CLI and the share link, tried in parallel with backoff. 2 days.
-- The eviction timer and the parent round-trip estimate fed from the QUIC estimator, and the bridge trigger scaled the same way. The probe and NEIGHBOR deadlines scale since round 2. 1 day.
+- The bridge trigger scaled to the round trip, and a floor for the eviction timer of one chunk period plus jitter (a spec question, tick walk S4). 1 day.
 
 ### 2. Survive the open Internet: transport defences (about 14 days)
 
@@ -98,7 +98,7 @@ change, through [`FIXER-AGENT.md`](FIXER-AGENT.md).
 | 7 to 10 | Block 4, the player half of block 5 | A broadcaster streams a camera from behind a NAT to ten viewers on three networks without editing a command line; rendition switches are clean |
 | 11 to 16 | Mobile viewer, block 6 | A phone on cellular watches the stream; the open tickets are closed or accepted with a recorded reason |
 
-About 100 engineer-days in all. One person reaches the first gate in a month and the
+About 98 engineer-days in all. One person reaches the first gate in a month and the
 last in about six; three people reach the last in two to three months, because blocks
 2, 3 and 5 are independent of each other.
 
@@ -157,4 +157,11 @@ Findings from the round:
 - Real loss with the old parity rule was worse than the constant report: 2.4 % starvation at 2 % loss. The measurement and the rule had to change together.
 - Above 5 % loss the 30 % parity ceiling leaves 1.4 % of blocks per hop to PULL at 10 % loss. Cellular links need a larger block or a higher ceiling (ISSUE-077).
 - The repair p95 limits of `baseline_100` and `internet_nat_detect` were met by seed luck. They are now 6 s and 8 s, from six seeds each way. `scripts/sim_seeds.sh` runs a gate over several seeds.
+
+## Round 3 (2026-11-11)
+
+| Work | Result |
+|---|---|
+| Parent round-trip estimate | The driver hands the core the QUIC round trip of every open connection once a second. The eviction deadline now follows a path that changed after the join. Test `transport_rtt_samples_move_the_parent_estimator` |
+| Identity | A publisher keeps a random key in `~/.bitstream/publisher.key` and so keeps its stream id across restarts. A viewer gets a new random key at every start. `--seed` still derives a fixed key for tests and fleets. A viewer must now pass `--stream` or `--publisher-seed` |
 

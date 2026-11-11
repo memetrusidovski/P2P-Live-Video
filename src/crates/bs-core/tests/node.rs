@@ -1577,3 +1577,46 @@ fn detecting_viewer_repeats_the_seed_ping_after_a_lost_pong() {
         "the viewer sent its self-lookup after the second PING ({pings} PINGs)"
     );
 }
+
+/// Ch3 §3.3.1: τ_evict follows the path. The parent estimator starts from the PROBE
+/// answer, and transport round-trip samples move it when the path grows longer.
+#[test]
+fn transport_rtt_samples_move_the_parent_estimator() {
+    let mut h = Harness::new();
+    let (p, v) = pub_and_viewer(&mut h);
+    let srtt = |h: &Harness| {
+        h.node(v).trees()[0]
+            .parent
+            .as_ref()
+            .expect("attached in tree 1")
+            .srtt
+    };
+    let before = srtt(&h);
+    assert!(
+        before < Duration::from_millis(60),
+        "seeded from a short path"
+    );
+    for _ in 0..40 {
+        h.feed(
+            v,
+            Input::RttSample {
+                peer: p,
+                rtt: Duration::from_millis(150),
+            },
+        );
+    }
+    let after = srtt(&h);
+    assert!(
+        after > Duration::from_millis(140),
+        "estimator follows the transport: {after:?}"
+    );
+    // A sample for another peer changes nothing.
+    h.feed(
+        v,
+        Input::RttSample {
+            peer: addr(9),
+            rtt: Duration::from_millis(900),
+        },
+    );
+    assert_eq!(srtt(&h), after);
+}

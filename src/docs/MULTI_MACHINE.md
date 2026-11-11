@@ -31,6 +31,9 @@ join from another machine:
   bsnode swarm --bootstrap 10.0.1.212:4000 --stream 25f3d0be... --count 10 --player-base 8080
 ```
 
+The stream id comes from the key in `~/.bitstream/publisher.key`. It stays the same
+across restarts while that file does.
+
 The address is the one the OS routes to the Internet through. On a VPN pass the VPN
 address: `--advertise-ip 100.64.0.5` (or `--listen 100.64.0.5:4000`).
 

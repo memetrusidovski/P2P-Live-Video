@@ -57,9 +57,14 @@ enum Cmd {
         /// Upload capacity, kbps.
         #[arg(long, default_value_t = 100_000)]
         upload_kbps: u32,
-        /// Seed (identity + RNG).
-        #[arg(long, default_value_t = 1)]
-        seed: u64,
+        /// Derive the keypair from this seed and the port. Every publisher with the
+        /// same seed and port shares one key: for tests and fleets only.
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Key file of this publisher (default: ~/.bitstream/publisher.key, created
+        /// on first use). The stream id stays the same while the file does.
+        #[arg(long, conflicts_with = "seed")]
+        identity: Option<PathBuf>,
         /// Seconds to wait before the first chunk so early viewers attach.
         #[arg(long, default_value_t = 3.0)]
         start_delay_s: f64,
@@ -100,12 +105,12 @@ enum Cmd {
         /// External IP to advertise (default: detected).
         #[arg(long)]
         advertise_ip: Option<std::net::IpAddr>,
-        /// Stream id (hex). Default: the publisher's, derived from `--publisher-seed`.
+        /// Stream id (hex), as the publisher prints it.
         #[arg(long)]
         stream: Option<String>,
-        /// Seed the publisher was started with (to derive the stream id).
-        #[arg(long, default_value_t = 1)]
-        publisher_seed: u64,
+        /// Derive the stream id of a publisher started with `--seed` (tests and fleets).
+        #[arg(long, conflicts_with = "stream")]
+        publisher_seed: Option<u64>,
         /// Publisher listen port (part of its identity derivation).
         #[arg(long, default_value_t = 4000)]
         publisher_port: u16,
@@ -127,9 +132,13 @@ enum Cmd {
         /// Upload capacity, kbps.
         #[arg(long, default_value_t = 20_000)]
         upload_kbps: u32,
-        /// Seed.
-        #[arg(long, default_value_t = 2)]
-        seed: u64,
+        /// Derive the keypair from this seed and the port (tests and fleets). The
+        /// default is a fresh random key per start.
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Key file to keep one viewer identity across starts.
+        #[arg(long, conflicts_with = "seed")]
+        identity: Option<PathBuf>,
         /// Stop after this many seconds (default: at STREAM_END).
         #[arg(long)]
         duration_s: Option<f64>,
@@ -148,12 +157,12 @@ enum Cmd {
         /// Viewers to run.
         #[arg(long, default_value_t = 10)]
         count: u16,
-        /// Stream id (hex). Default: the publisher's, derived from `--publisher-seed`.
+        /// Stream id (hex), as the publisher prints it.
         #[arg(long)]
         stream: Option<String>,
-        /// Seed the publisher was started with (to derive the stream id).
-        #[arg(long, default_value_t = 1)]
-        publisher_seed: u64,
+        /// Derive the stream id of a publisher started with `--seed` (tests and fleets).
+        #[arg(long, conflicts_with = "stream")]
+        publisher_seed: Option<u64>,
         /// Publisher listen port (part of its identity derivation).
         #[arg(long, default_value_t = 4000)]
         publisher_port: u16,
@@ -175,9 +184,10 @@ enum Cmd {
         /// Upload capacity per viewer, kbps.
         #[arg(long, default_value_t = 20_000)]
         upload_kbps: u32,
-        /// Seed of the first viewer; viewer i uses seed + i.
-        #[arg(long, default_value_t = 1000)]
-        seed: u64,
+        /// Derive the keypairs from seeds: viewer i uses seed + i (tests and fleets).
+        /// The default is a fresh random key per viewer.
+        #[arg(long)]
+        seed: Option<u64>,
         /// Stop every viewer after this many seconds (default: at STREAM_END).
         #[arg(long)]
         duration_s: Option<f64>,
@@ -285,18 +295,42 @@ async fn resolve_bootstrap(spec: &str) -> anyhow::Result<SocketAddr> {
     Ok(addr)
 }
 
-/// The stream id to join: `--stream` if given, else derived from the publisher's seed
-/// and port.
+/// The stream id to join: `--stream` if given, else derived from the seed and port of
+/// a publisher that was started with `--seed`.
 fn resolve_stream(
     stream: Option<&str>,
-    seed: u64,
+    seed: Option<u64>,
     port: u16,
     sim_pow: bool,
 ) -> anyhow::Result<StreamId> {
-    match stream {
-        Some(h) => h.trim().parse::<StreamId>().context("--stream"),
-        None => Ok(publisher_stream_id(seed, port, sim_pow)),
+    match (stream, seed) {
+        (Some(h), _) => h.trim().parse::<StreamId>().context("--stream"),
+        (None, Some(seed)) => Ok(publisher_stream_id(seed, port, sim_pow)),
+        (None, None) => anyhow::bail!(
+            "pass --stream with the stream id the publisher printed \
+             (or --publisher-seed for a publisher started with --seed)"
+        ),
     }
+}
+
+/// The keypair seed and the RNG seed of a node.
+///
+/// `--seed` gives a derived keypair (`None`) and that RNG seed. Otherwise the keypair
+/// seed comes from the key file, or is random with no file, and seeds the RNG too.
+fn node_identity(
+    seed: Option<u64>,
+    key_file: Option<&std::path::Path>,
+) -> anyhow::Result<(Option<[u8; 32]>, u64)> {
+    if let Some(seed) = seed {
+        return Ok((None, seed));
+    }
+    let id = match key_file {
+        Some(path) => bs_node::identity::load_or_create(path)?,
+        None => bs_node::identity::random(),
+    };
+    let mut first = [0u8; 8];
+    first.copy_from_slice(&id[..8]);
+    Ok((Some(id), u64::from_le_bytes(first)))
 }
 
 /// What `watch` and `swarm` share when they build a viewer.
@@ -310,6 +344,7 @@ struct ViewerArgs {
     top_layer: u8,
     upload_kbps: u32,
     seed: u64,
+    identity: Option<[u8; 32]>,
     duration_s: Option<f64>,
     result: Option<PathBuf>,
     media: Media,
@@ -337,6 +372,7 @@ impl ViewerArgs {
             media: self.media,
             params: self.params,
             seed: self.seed,
+            identity: self.identity,
             duration_s: self.duration_s,
             start_delay_s: 0.0,
             result_path: self.result,
@@ -518,6 +554,7 @@ async fn main() -> anyhow::Result<()> {
                         expect_hash: expect_hash.clone(),
                     },
                 };
+                let (identity, rng_seed) = node_identity(seed.map(|s| s + u64::from(i)), None)?;
                 let cfg = ViewerArgs {
                     bootstrap,
                     stream_id,
@@ -527,7 +564,8 @@ async fn main() -> anyhow::Result<()> {
                     nat: nat.clone(),
                     top_layer,
                     upload_kbps,
-                    seed: seed + u64::from(i),
+                    seed: rng_seed,
+                    identity,
                     duration_s,
                     result,
                     media,
@@ -611,6 +649,7 @@ async fn main() -> anyhow::Result<()> {
             forest,
             upload_kbps,
             seed,
+            identity,
             start_delay_s,
             duration_s,
             result,
@@ -621,6 +660,15 @@ async fn main() -> anyhow::Result<()> {
             fps,
             nat,
         } => {
+            let key_file = match (&identity, seed) {
+                (Some(path), _) => Some(path.clone()),
+                (None, Some(_)) => None,
+                (None, None) => Some(
+                    bs_node::identity::default_path("publisher")
+                        .context("no home directory for the key file: pass --identity <FILE>")?,
+                ),
+            };
+            let (identity, seed) = node_identity(seed, key_file.as_deref())?;
             let (media, lad) = if ingest.eq_ignore_ascii_case("ffmpeg") {
                 let input = input
                     .or(file)
@@ -665,6 +713,7 @@ async fn main() -> anyhow::Result<()> {
                 media,
                 params: params(cli.sim_pow, cli.parity),
                 seed,
+                identity,
                 duration_s,
                 start_delay_s,
                 result_path: result,
@@ -696,10 +745,12 @@ async fn main() -> anyhow::Result<()> {
             top_layer,
             upload_kbps,
             seed,
+            identity,
             duration_s,
             result,
             player,
         } => {
+            let (identity, seed) = node_identity(seed, identity.as_deref())?;
             let bootstrap = resolve_bootstrap(&bootstrap).await?;
             let stream_id = resolve_stream(
                 stream.as_deref(),
@@ -717,6 +768,7 @@ async fn main() -> anyhow::Result<()> {
                 top_layer,
                 upload_kbps,
                 seed,
+                identity,
                 duration_s,
                 result,
                 media: match player {

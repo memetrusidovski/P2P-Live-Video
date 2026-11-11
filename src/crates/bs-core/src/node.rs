@@ -183,16 +183,27 @@ pub struct Node {
 }
 
 impl Node {
-    /// Create a node. Solves the static puzzle at `params.c1`.
+    /// Create a node whose keypair derives from `cfg.seed` and the port. Solves the
+    /// static puzzle at `params.c1`.
+    ///
+    /// SECURITY: The derived key has 64 bits of entropy and is the same for every
+    ///           node with the same seed and port. Use it in tests and simulations
+    ///           only. A real node calls `with_identity` with a random seed.
     pub fn new(cfg: NodeConfig) -> Self {
+        let mut seed = [0u8; 32];
+        seed[..8].copy_from_slice(&cfg.seed.to_le_bytes());
+        seed[8..16].copy_from_slice(&cfg.addr.port().to_le_bytes()[..].repeat(4)[..8]);
+        Self::with_identity(cfg, seed)
+    }
+
+    /// Create a node whose keypair derives from `identity_seed`. Solves the static
+    /// puzzle at `params.c1`.
+    pub fn with_identity(cfg: NodeConfig, identity_seed: [u8; 32]) -> Self {
         let difficulty = Difficulty {
             c1: cfg.params.c1,
             c2_min: cfg.params.c2_min,
         };
-        let mut seed = [0u8; 32];
-        seed[..8].copy_from_slice(&cfg.seed.to_le_bytes());
-        seed[8..16].copy_from_slice(&cfg.addr.port().to_le_bytes()[..].repeat(4)[..8]);
-        let identity = Identity::from_seed(seed, difficulty);
+        let identity = Identity::from_seed(identity_seed, difficulty);
         let params = cfg.params.clone();
         let swarm = SwarmBuffer::new(&params);
         let node_class = match cfg.role {
@@ -414,6 +425,12 @@ impl Node {
                 session_key,
             } => self.on_session_opened(peer, node_id, session_key),
             Input::SessionClosed { peer } => self.on_session_closed(peer, "session closed"),
+            Input::RttSample { peer, rtt } => {
+                if rtt > Duration::ZERO && rtt < RTT_SAMPLE_MAX {
+                    self.note_rtt(rtt);
+                    self.parent_rtt_sample(peer, rtt);
+                }
+            }
             Input::Frame {
                 from,
                 channel,
@@ -2268,22 +2285,32 @@ impl Node {
         // RULE: Rebind before the DHT hook. The self-lookup it starts must carry a
         //       block bound to the reflected address.
         self.dht_on_pong(from, &p, verified);
-        if let Some(s) = self.sessions.get_mut(&from) {
-            if let Some(t0) = s.ping_sent_at.take() {
-                let sample = self.now.duration_since(t0);
-                for t in &mut self.trees {
-                    if let Some(p) = t.parent.as_mut() {
-                        if p.addr == from {
-                            // RFC 6298 style smoothing.
-                            let diff = if sample > p.srtt {
-                                sample - p.srtt
-                            } else {
-                                p.srtt - sample
-                            };
-                            p.rttvar = Duration((p.rttvar.0 * 3 + diff.0) / 4);
-                            p.srtt = Duration((p.srtt.0 * 7 + sample.0) / 8);
-                        }
-                    }
+        let sample = self
+            .sessions
+            .get_mut(&from)
+            .and_then(|s| s.ping_sent_at.take())
+            .map(|t0| self.now.duration_since(t0));
+        if let Some(sample) = sample {
+            self.parent_rtt_sample(from, sample);
+        }
+    }
+
+    /// Fold one round trip into the estimator of every tree whose parent is `from`.
+    ///
+    /// WHY: The estimator starts from the one PROBE answer. τ_evict follows it, so a
+    ///      path that grows longer after the join evicts a healthy parent.
+    fn parent_rtt_sample(&mut self, from: PeerAddr, sample: Duration) {
+        for t in &mut self.trees {
+            if let Some(p) = t.parent.as_mut() {
+                if p.addr == from {
+                    // RFC 6298 style smoothing.
+                    let diff = if sample > p.srtt {
+                        sample - p.srtt
+                    } else {
+                        p.srtt - sample
+                    };
+                    p.rttvar = Duration((p.rttvar.0 * 3 + diff.0) / 4);
+                    p.srtt = Duration((p.srtt.0 * 7 + sample.0) / 8);
                 }
             }
         }

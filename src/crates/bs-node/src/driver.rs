@@ -97,8 +97,11 @@ pub struct RunConfig {
     pub media: Media,
     /// Protocol parameters.
     pub params: Params,
-    /// Seed.
+    /// Seed of the node's random choices, and of its keypair when `identity` is `None`.
     pub seed: u64,
+    /// Secret seed of the node's keypair. `None` derives the keypair from `seed` and
+    /// the port: the same for every such node, so for tests and fleets only.
+    pub identity: Option<[u8; 32]>,
     /// Stop after this many seconds (`None` = until stream end).
     pub duration_s: Option<f64>,
     /// Publisher: wait this long before the first chunk so early viewers attach.
@@ -133,6 +136,7 @@ impl RunConfig {
             //           identity in 16 hashes, so a Sybil attacker floods the swarm.
             params: Params::default(),
             seed: 1,
+            identity: None,
             duration_s: None,
             start_delay_s: 3.0,
             result_path: None,
@@ -162,6 +166,7 @@ impl RunConfig {
             //           cheaper puzzle with `identity pow`.
             params: Params::default(),
             seed: 2,
+            identity: None,
             duration_s: None,
             start_delay_s: 0.0,
             result_path: None,
@@ -390,22 +395,26 @@ pub async fn start(cfg: RunConfig) -> anyhow::Result<Handle> {
     let addr = SocketAddr::new(advertise_ip, local_addr.port());
 
     let stream_id = cfg.stream_id.unwrap_or(StreamId::ZERO);
-    let node = Node::new(NodeConfig {
-        role: cfg.role.clone(),
-        node_class: cfg.node_class,
-        upload_kbps: cfg.upload_kbps,
-        addr,
-        stream_id,
-        bootstrap: cfg.bootstrap.into_iter().collect(),
-        discovery: bs_core::DiscoveryMode::Dht,
-        reachability: cfg.reachability,
-        params: cfg.params.clone(),
-        seed: cfg.seed,
-    });
+    let identity_seed = cfg.identity.unwrap_or_else(|| node_seed(&cfg, addr));
+    let node = Node::with_identity(
+        NodeConfig {
+            role: cfg.role.clone(),
+            node_class: cfg.node_class,
+            upload_kbps: cfg.upload_kbps,
+            addr,
+            stream_id,
+            bootstrap: cfg.bootstrap.into_iter().collect(),
+            discovery: bs_core::DiscoveryMode::Dht,
+            reachability: cfg.reachability,
+            params: cfg.params.clone(),
+            seed: cfg.seed,
+        },
+        identity_seed,
+    );
     let stream_id = node.stream_id();
     let node_id = node.node_id();
     let identity = bs_crypto::Identity::from_seed(
-        node_seed(&cfg, addr),
+        identity_seed,
         Difficulty {
             c1: cfg.params.c1,
             c2_min: cfg.params.c2_min,
@@ -478,7 +487,7 @@ pub async fn start(cfg: RunConfig) -> anyhow::Result<Handle> {
     })
 }
 
-/// Mirror of `Node::new`'s seed derivation so the TLS identity equals the node's.
+/// Mirror of `Node::new`'s seed derivation, for a node with no identity seed.
 fn node_seed(cfg: &RunConfig, addr: SocketAddr) -> [u8; 32] {
     let mut seed = [0u8; 32];
     seed[..8].copy_from_slice(&cfg.seed.to_le_bytes());
@@ -758,7 +767,10 @@ impl Driver {
                 Some(p) = self.plain_rx.recv() => self.on_plain(p),
                 Some(ev) = self.ev_rx.recv() => self.on_ev(ev),
                 _ = timer => self.feed(Input::Tick),
-                _ = housekeeping.tick() => self.check_bootstrap_silence(),
+                _ = housekeeping.tick() => {
+                    self.check_bootstrap_silence();
+                    self.feed_rtt_samples();
+                }
                 _ = publish.tick(), if is_pub && !self.ended && !live => {
                     if tokio::time::Instant::now() >= start_media_at {
                         self.publish_tick();
@@ -1061,6 +1073,23 @@ impl Driver {
     /// Discovery runs over plain UDP, so a bootstrap that is down or behind a
     /// firewall fails without an error. Silence past `BOOTSTRAP_SILENCE` is the
     /// signal, and the first frame from the contact clears the report.
+    /// Hand the core the QUIC round trip of every open connection.
+    ///
+    /// WHY: The core seeds a parent's estimator from one PROBE answer and updates
+    ///      it on a PONG only. With steady media no PING goes out, so the eviction
+    ///      deadline never follows a path that changed.
+    fn feed_rtt_samples(&mut self) {
+        let samples: Vec<(SocketAddr, std::time::Duration)> = self
+            .conns
+            .iter()
+            .map(|(peer, c)| (*peer, c.conn.stats().path.rtt))
+            .collect();
+        for (peer, rtt) in samples {
+            let rtt = bs_core::Duration(rtt.as_micros() as u64);
+            self.feed(Input::RttSample { peer, rtt });
+        }
+    }
+
     fn check_bootstrap_silence(&mut self) {
         let Some(bootstrap) = self.cfg.bootstrap else {
             return;

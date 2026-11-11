@@ -121,6 +121,7 @@ async fn viewer(state: &AppState, link: &str, upload_kbps: u32) -> Result<Status
     let mut cfg = RunConfig::viewer(bootstrap, parsed.stream_id);
     cfg.upload_kbps = upload_kbps;
     cfg.seed = seed_now();
+    cfg.identity = Some(bs_node::identity::random());
     cfg.player = Some(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0));
     launch(state, cfg, "viewer", Some(link.trim().to_string())).await
 }
@@ -175,6 +176,12 @@ async fn publisher(
     let mut cfg = RunConfig::publisher(media, ladder);
     cfg.upload_kbps = upload_kbps;
     cfg.seed = seed_now();
+    // WHY: The share link carries the stream id, and the stream id is the key. A
+    //      key that persists keeps old links valid after a restart.
+    let key_file = bs_node::identity::default_path("publisher")
+        .ok_or_else(|| "no home directory for the publisher key".to_string())?;
+    cfg.identity =
+        Some(bs_node::identity::load_or_create(&key_file).map_err(|e| format!("{e:#}"))?);
     cfg.player = Some(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0));
     launch(state, cfg, "publisher", None).await
 }

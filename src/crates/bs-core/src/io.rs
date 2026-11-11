@@ -6,7 +6,7 @@ use bs_media::LayeredChunk;
 use bs_wire::{Frame, NodeId, PeerRecord, SegmentSeq, StreamRecord, TreeId};
 use serde::{Deserialize, Serialize};
 
-use crate::time::Instant;
+use crate::time::{Duration, Instant};
 use crate::Lifecycle;
 
 /// Network address of a peer (the driver's session key).
@@ -55,6 +55,13 @@ pub enum Input {
     SessionClosed {
         /// Peer.
         peer: PeerAddr,
+    },
+    /// The transport measured the round trip of an open session.
+    RttSample {
+        /// Peer.
+        peer: PeerAddr,
+        /// Smoothed round trip of the session's path.
+        rtt: Duration,
     },
     /// A local command.
     Cmd(Command),

@@ -6,6 +6,7 @@
 #![warn(missing_docs, rust_2018_idioms)]
 
 pub mod driver;
+pub mod identity;
 pub mod tls;
 pub mod transport;
 
