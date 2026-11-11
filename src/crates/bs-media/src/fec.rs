@@ -17,12 +17,35 @@ fn oti() -> ObjectTransmissionInformation {
     ObjectTransmissionInformation::new(BLOCK_SIZE as u64, SYMBOL_SIZE as u16, 1, 1, 8)
 }
 
-/// Parity count for a link with loss rate `rho`:
-/// `E = max(1, ceil(clamp(2ρK, 0.05K, 0.30K)))` (Ch4 §4.2.2).
+/// Share of blocks a hop can leave to the PULL path (Ch4 §4.2.2).
+pub const BLOCK_FAILURE_TARGET: f64 = 1e-3;
+
+/// Parity count for a link with loss rate `rho` (Ch4 §4.2.2).
+///
+/// The smallest `E` for which more than `E` of the `K + E` symbols are lost in at
+/// most `BLOCK_FAILURE_TARGET` of the blocks. `E` stays between 1 and `⌈0.30K⌉`.
 pub fn parity_for_loss(rho: f64) -> u16 {
-    let k = K_BLOCK as f64;
-    let e = (2.0 * rho * k).clamp(0.05 * k, 0.30 * k).ceil();
-    (e as u16).max(1)
+    let rho = rho.clamp(0.0, 1.0);
+    let e_max = (0.30 * K_BLOCK as f64).ceil() as u16;
+    (1..=e_max)
+        .find(|e| block_failure(rho, *e) <= BLOCK_FAILURE_TARGET)
+        .unwrap_or(e_max)
+}
+
+/// Probability that more than `e` of the `K + e` symbols of a block are lost.
+fn block_failure(rho: f64, e: u16) -> f64 {
+    let n = K_BLOCK as u32 + e as u32;
+    // P(lost <= e) from the binomial terms, each derived from the term before.
+    let mut term = (1.0 - rho).powi(n as i32);
+    let mut within = term;
+    for i in 1..=e as u32 {
+        if rho >= 1.0 {
+            return 1.0;
+        }
+        term *= (n - i + 1) as f64 / i as f64 * rho / (1.0 - rho);
+        within += term;
+    }
+    (1.0 - within).max(0.0)
 }
 
 /// The per-responder repair ESI base of Ch4 §4.1.2:
@@ -152,6 +175,19 @@ impl SymbolCollector {
     /// Whether at least K symbols are held (decode may be attempted).
     pub fn is_complete(&self) -> bool {
         self.count() >= K_BLOCK
+    }
+    /// Source symbols held.
+    pub fn source_count(&self) -> usize {
+        self.have_source
+    }
+    /// ESIs of the source symbols not held.
+    pub fn source_missing(&self) -> Vec<u16> {
+        self.source
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_none())
+            .map(|(i, _)| i as u16)
+            .collect()
     }
     /// Whether every source symbol is present (fast path).
     pub fn all_source(&self) -> bool {

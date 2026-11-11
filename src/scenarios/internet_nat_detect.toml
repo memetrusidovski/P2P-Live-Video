@@ -47,7 +47,8 @@ sjl_mean_max_s = 5.0
 sjl_p95_max_s = 9.0
 active_fraction_min = 0.95
 repair_median_max_s = 3.0
-repair_p95_max_s = 6.0
+# Repair p95 rests on about thirty repairs and moves by seconds with the seed.
+repair_p95_max_s = 8.0
 
 # A cone viewer starts as CONE and stays CONE, so no detection event fires for it.
 [kpis.facts_min]

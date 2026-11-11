@@ -131,8 +131,9 @@ pub struct VerifiedBlock {
     pub sender_depth: u8,
     /// Whether RaptorQ decoding was needed.
     pub decoded: bool,
-    /// Symbols held when the block verified (loss estimation, Ch5 §5.2.3 `LossRate`).
-    pub symbols_received: u16,
+    /// Source symbols the tree push lost for this block (Ch5 §5.2.3 `LossRate`).
+    /// `None` if no push of the block reached us.
+    pub source_lost: Option<u16>,
 }
 
 /// A block the scheduler may pull.
@@ -194,6 +195,8 @@ pub struct SwarmBuffer {
     anchor: Option<(SegmentSeq, u8, Instant)>,
     /// Symbols and proofs that arrived before their manifest, keyed by (segment, block index).
     orphans: HashMap<(u32, u16), OrphanBlock>,
+    /// Source ESIs a block lacked when it decoded, keyed by (segment, block index).
+    late_source: HashMap<(u32, u16), Vec<u16>>,
     /// Segments whose chunks have all been played (floor for the acceptance window).
     played_through: SegmentSeq,
     /// Whether any chunk has reached its deadline yet.
@@ -220,6 +223,7 @@ impl SwarmBuffer {
             live_edge_at: None,
             anchor: None,
             orphans: HashMap::new(),
+            late_source: HashMap::new(),
             played_through: SegmentSeq::NONE,
             any_played: false,
             delta_buffer: params.delta_buffer,
@@ -497,6 +501,26 @@ impl SwarmBuffer {
         }
     }
 
+    /// A source symbol arrived for a block that decoded without it. Returns whether
+    /// the symbol was counted as lost when the block decoded.
+    ///
+    /// WHY: Jitter lets a repair symbol overtake a source symbol. The block decodes
+    ///      first, and the source symbol that follows was late, not lost.
+    pub fn take_late_source(&mut self, seg: SegmentSeq, idx: BlockIndex, esi: u16) -> bool {
+        let key = (seg.0, idx.0);
+        let Some(missing) = self.late_source.get_mut(&key) else {
+            return false;
+        };
+        let Some(pos) = missing.iter().position(|e| *e == esi) else {
+            return false;
+        };
+        missing.swap_remove(pos);
+        if missing.is_empty() {
+            self.late_source.remove(&key);
+        }
+        true
+    }
+
     /// Whether block `idx` is already verified.
     pub fn is_verified(&self, seg: SegmentSeq, idx: BlockIndex) -> bool {
         self.chunk(seg, idx.chunk())
@@ -533,7 +557,10 @@ impl SwarmBuffer {
             return Ok(None);
         }
         let decoded = !collector.all_source();
-        let symbols_received = collector.count().min(u16::MAX as usize) as u16;
+        // WHY: The parent sends the K source symbols first. The share of them
+        //      missing at decode time is the link loss, whatever parity was sent.
+        let source_lost = Some((K_BLOCK - collector.source_count()) as u16);
+        let source_missing = collector.source_missing();
         let bytes = match collector.decode() {
             Ok(b) => b,
             // WHY: RaptorQ decodes from exactly K symbols about 99 % of the time
@@ -553,6 +580,9 @@ impl SwarmBuffer {
             siblings: siblings.clone(),
         };
         cb.verified += 1;
+        if !source_missing.is_empty() {
+            self.late_source.insert((seg.0, idx.0), source_missing);
+        }
         Ok(Some(VerifiedBlock {
             segment: seg,
             index: idx,
@@ -562,7 +592,7 @@ impl SwarmBuffer {
             siblings,
             sender_depth,
             decoded,
-            symbols_received,
+            source_lost,
         }))
     }
 
@@ -625,6 +655,7 @@ impl SwarmBuffer {
             })
         });
         let floor = self.played_through;
+        self.late_source.retain(|(s, _), _| SegmentSeq(*s) > floor);
         self.orphans.retain(|(s, _), o| {
             SegmentSeq(*s) > floor
                 && o.since
@@ -674,6 +705,20 @@ impl SwarmBuffer {
         if let Err(e) = verify_block(&cb.manifest, idx, &padded, &siblings) {
             return Err((e, Some(from)));
         }
+        // RULE: A block the push started and the PULL path finished still counts as
+        //       push loss. An estimate from decoded blocks only reads low on a link
+        //       that loses more than the parity covers.
+        // RULE: Count the block only if its proof arrived. The proof leads the
+        //       symbols. A viewer that attached in the middle of the push holds
+        //       symbols and no proof, and lost nothing on the link.
+        let source_lost = match &cb.blocks[j] {
+            BlockSlot::Pending {
+                collector,
+                proof: Some(_),
+                ..
+            } if collector.count() > 0 => Some((K_BLOCK - collector.source_count()) as u16),
+            _ => None,
+        };
         cb.blocks[j] = BlockSlot::Verified {
             bytes: padded.clone(),
             siblings: siblings.clone(),
@@ -688,7 +733,7 @@ impl SwarmBuffer {
             siblings,
             sender_depth: u8::MAX,
             decoded: false,
-            symbols_received: K_BLOCK as u16,
+            source_lost,
         }))
     }
 

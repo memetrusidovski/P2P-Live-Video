@@ -46,6 +46,8 @@ $$\underbrace{\sum_{m \in \mathcal{T}_{\text{assigned}}} \text{children}_v(m)\, 
 
 $$\underbrace{\beta_{\text{pull}} \cdot \text{PullSlots}_v}_{\text{Tit-for-Tat unchoke, Ch5 §5.1}} \;+\; \underbrace{\sum_{\text{handovers in progress}} B_m \Omega_v}_{\text{preemption / displacement overlap, §2.2}} \;\le\; r_{\text{pull}}\, u_v$$
 
+The PULL reserve also carries the **FEC residue**: the $p_{\text{fail}} = 10^{-3}$ of blocks per hop that parity does not recover (Ch4 §4.2.2), about $0.7\%$ of a depth-7 viewer's stream, or $42$ kbps at $6$ Mbps. On links above $5\%$ loss the parity ceiling leaves more, and PULL service there competes with repair and late-join backfill.
+
 `PullSlots` is therefore **not** $\lfloor r_{\text{pull}} u_v / \beta_{\text{pull}} \rfloor$ unconditionally; it is recomputed at every Tit-for-Tat cycle from whatever the handovers in progress leave, and a handover that would not fit even with every PULL slot choked is made sequential rather than overlapped (§2.2). A relay that carries bridged children (Ch6 §6.3) computes its assigned-tree slots with $U_{\text{bridge}}$ removed from the numerator:
 
 $$K_v(m) = \left\lfloor \frac{(1 - r_{\text{pull}})\, u_v - U_{\text{bridge}}}{t_v \cdot B_m \cdot \Omega_v} \right\rfloor$$

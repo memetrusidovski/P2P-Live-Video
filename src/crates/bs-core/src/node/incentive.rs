@@ -82,7 +82,7 @@ pub struct IncentiveState {
     delivered: BTreeMap<(u32, u8, PeerAddr), Delivered>,
     /// Keys already receipted: a second receipt for a key would be an equivocation.
     issued: BTreeSet<(u32, u8, PeerAddr)>,
-    link_loss: BTreeMap<PeerAddr, VecDeque<(Instant, u16, u16)>>,
+    link_loss: BTreeMap<PeerAddr, VecDeque<(Instant, i32, u16)>>,
     pull_ingress: BTreeMap<PeerAddr, VecDeque<(Instant, u32)>>,
     /// Providers that have unchoked us (we only ask these).
     pub unchoked_by: BTreeSet<PeerAddr>,
@@ -119,12 +119,9 @@ pub struct IncentiveState {
 
 pub(super) use crate::dht::prefix_key;
 
-/// `E = max(1, ⌈clamp(2ρK, 0.05K, 0.30K)⌉)` (Ch4 §4.2.2).
+/// Parity for a reported loss byte (Ch4 §4.2.2).
 pub fn parity_for_loss(loss_byte: u8) -> u16 {
-    let rho = loss_byte as f64 / 255.0;
-    let k = K_BLOCK as f64;
-    let e = (2.0 * rho * k).clamp(0.05 * k, 0.30 * k).ceil();
-    (e as u16).max(1)
+    bs_media::fec::parity_for_loss(loss_byte as f64 / 255.0)
 }
 
 impl Node {
@@ -276,19 +273,34 @@ impl Node {
             d.blocks += 1;
         }
         d.chunks = d.chunks.max(vb.index.chunk() + 1);
-        if !via_pull {
-            // The sender pushes K + E symbols; we count what reached us (E is the
-            // default until the parent tells us otherwise: a floor on the estimate).
-            let sent = (K_BLOCK as u16).saturating_add(self.params.default_parity);
-            let lost = sent.saturating_sub(vb.symbols_received);
-            let q = self.incentive.link_loss.entry(from).or_default();
-            q.push_back((self.now, lost, sent));
+        // The loss belongs to the tree parent that pushed the block, also when a
+        // PULL provider finished it.
+        let pusher = if via_pull {
+            self.trees
+                .get(vb.tree.index())
+                .and_then(|t| t.parent.as_ref())
+                .map(|p| p.addr)
         } else {
+            Some(from)
+        };
+        if let (Some(lost), Some(pusher)) = (vb.source_lost, pusher) {
+            let q = self.incentive.link_loss.entry(pusher).or_default();
+            q.push_back((self.now, lost as i32, K_BLOCK as u16));
+        }
+        if via_pull {
             self.note_pull_ingress(from, BLOCK_SIZE as u32);
         }
         // Tree receipts for earlier segments are due now. PULL receipts wait for the
         // pull zone to close on their segment, so repairs are credited in full.
         self.flush_receipts_before(vb.segment.0, false);
+    }
+
+    /// A source symbol from `from` arrived after its block decoded: take back the
+    /// loss that the block counted for the symbol.
+    pub(super) fn credit_late_source(&mut self, from: PeerAddr) {
+        if let Some(q) = self.incentive.link_loss.get_mut(&from) {
+            q.push_back((self.now, -1, 0));
+        }
     }
 
     /// Bytes a provider served us on the PULL path (reciprocity input).
@@ -310,13 +322,15 @@ impl Node {
         {
             q.pop_front();
         }
-        let (lost, sent) = q.iter().fold((0u32, 0u32), |(l, s), (_, a, b)| {
-            (l + *a as u32, s + *b as u32)
+        let (lost, sent) = q.iter().fold((0i64, 0u32), |(l, s), (_, a, b)| {
+            (l + *a as i64, s + *b as u32)
         });
         if sent == 0 {
             0
         } else {
-            ((lost as f64 / sent as f64) * 255.0).floor().min(255.0) as u8
+            ((lost.max(0) as f64 / sent as f64) * 255.0)
+                .floor()
+                .min(255.0) as u8
         }
     }
 

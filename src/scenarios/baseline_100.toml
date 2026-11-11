@@ -31,3 +31,7 @@ depth_mean_max = 7.0
 depth_max = 8
 cdo_max = 0.05
 active_fraction_min = 0.99
+# Repair p95 rests on 10 to 25 repairs and moves between 0.6 s and 5.3 s with the
+# seed (scripts/sim_seeds.sh over six seeds). The slow repairs are viewers displaced
+# during the join ramp whose new parent still waits for data.
+repair_p95_max_s = 6.0

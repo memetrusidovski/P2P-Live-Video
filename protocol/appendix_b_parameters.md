@@ -96,7 +96,8 @@ To ensure uniform behavior across different implementations, the protocol define
 | $T_{\text{symbol}}$ | $1024$ | bytes | RaptorQ symbol size (fixed, anti-fragmentation) |
 | $K_{\text{block}}$ | $16$ | symbols | Source symbols per 16 KB block; SBN = Merkle block index |
 | $E_{\text{min}}$ | $1$ | symbol | Minimum parity symbols per block per link |
-| $\text{Overhead}_{\text{fec}}$| $5$–$30\%$ | percent | Adaptive systematic RaptorQ redundancy, $E = \max(1, \lceil\text{clamp}(2\rho K, 0.05K, 0.30K)\rceil)$ per link (default ~10% at typical loss) |
+| $\text{Overhead}_{\text{fec}}$| $6$–$31\%$ | percent | Adaptive systematic RaptorQ redundancy: per link, the smallest $E \in [1, \lceil 0.30K \rceil]$ that keeps the block-failure probability at or below $p_{\text{fail}}$ (Ch4 §4.2.2); $E = 2$ to $3$ at $1$–$2\%$ loss |
+| $p_{\text{fail}}$ | $10^{-3}$ | probability | Per-hop share of blocks the tree push may leave to the PULL path; sizes $E$ (Ch4 §4.2.2) |
 
 ### B.1.4 Kernel Filter (XDP/eBPF DDoS Shield)
 | Parameter | Default Value | Unit | Description |

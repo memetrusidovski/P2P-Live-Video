@@ -21,7 +21,7 @@ timer, default and defence assumes a LAN.
 | Identity and bootstrap | One publisher that never restarts, viewers who know its address | Every default publisher shares one key and stream id; a restart renumbers segments and viewers reject the stream forever; one home IP is the only contact |
 | NAT traversal | All mechanisms exist in `bs-core` and are wired through the driver | The rebind is once per process and has never run through a real NAT; a NATed publisher has nobody to register with; no relay exists for 30 minutes |
 | Transport and security | Mutual TLS over QUIC bound to the node identity, BBR, one demuxed socket | No per-source rate limit on plain frames, so a 20 Mbps spoofed PING flood takes any node down; no replay window; DHT answers reflect 5 to 6× toward a spoofed address |
-| Forest and repair | Join, shed, PULL zone, parity plumbing; PSR 0.01 % on a LAN at 3 % loss | The eviction deadline is seeded once from the probe and never follows the path; the receipt loss byte is a constant, so parity never follows loss; repair has no Deputy fast path |
+| Forest and repair | Join, shed, PULL zone, parity plumbing; PSR 0.01 % on a LAN at 3 % loss | The eviction deadline is seeded once from the probe and never follows the path; repair has no Deputy fast path |
 | Media and players | File ingest with two renditions and AAC, signed descriptor, MSE page, desktop shell | No live source (camera, screen, RTMP); rendition switches are not keyframe aligned; a phone has nothing to connect to |
 | Operations | Clean start and stop, three surfaced errors | A dead publisher is never reported; a crashed encoder reads as end of stream; nothing persists; the player API streams to anyone who can reach the port |
 
@@ -33,7 +33,7 @@ days. The counts below come from them.
 Sizes are engineer-days for one person who knows the code. Blocks 1 to 3 are needed
 before the first honest Internet test; 4 to 6 make it a product.
 
-### 1. Connect at all: bootstrap, identity, timers (about 17 days)
+### 1. Connect at all: bootstrap, identity, timers (about 14 days)
 
 The first Internet test cannot start until these land.
 
@@ -42,7 +42,6 @@ The first Internet test cannot start until these land.
 - Publisher restart: persisted segment and manifest counters or a monotonic stream clock, viewer re-anchor. Needs a spec decision first (the cold-start walk, finding F5). 4 days.
 - Several bootstrap contacts in the config, the CLI and the share link, tried in parallel with backoff. 2 days.
 - The eviction timer and the parent round-trip estimate fed from the QUIC estimator, and the bridge trigger scaled the same way. The probe and NEIGHBOR deadlines scale since round 2. 1 day.
-- Loss measurement the parent can act on: the child counts symbols past decode and knows the parity it was sent, so the receipt loss byte drives parity (ISSUE-078 sizes it). 3 days.
 
 ### 2. Survive the open Internet: transport defences (about 14 days)
 
@@ -83,8 +82,8 @@ window, because it is a full probe round plus a 1.5 RTT handshake.
 
 ### 6. Close the specification (about 15 days)
 
-Fourteen tickets from the tick-walk audit are open (ISSUE-073 to 085, 087). Five
-change behaviour a real audience will hit: the startup target (082), FEC sizing (078),
+Thirteen tickets from the tick-walk audit are open (ISSUE-073 to 085 without 078, and
+087). Four change behaviour a real audience will hit: the startup target (082),
 the per-hop latency budget (077), the M = 2 wire encoding (073, interoperability only)
 and the XDP allowlist key (087). Fifty-nine Medium and Low candidates from the same
 audit are unverified. Each ticket is a design decision plus a spec edit plus a core
@@ -99,7 +98,7 @@ change, through [`FIXER-AGENT.md`](FIXER-AGENT.md).
 | 7 to 10 | Block 4, the player half of block 5 | A broadcaster streams a camera from behind a NAT to ten viewers on three networks without editing a command line; rendition switches are clean |
 | 11 to 16 | Mobile viewer, block 6 | A phone on cellular watches the stream; the open tickets are closed or accepted with a recorded reason |
 
-About 105 engineer-days in all. One person reaches the first gate in a month and the
+About 100 engineer-days in all. One person reaches the first gate in a month and the
 last in about six; three people reach the last in two to three months, because blocks
 2, 3 and 5 are independent of each other.
 
@@ -147,11 +146,15 @@ Open points from the round:
 | Internet model in the simulator | Viewers can detect their reachability on a network that translates addresses, including one source port per peer behind a symmetric NAT. A scripted event changes every path's latency mid-run. Five `internet_*` gates run in the check script |
 | Probe and NEIGHBOR deadlines | A probe round still ends at `probe_timeout` when a usable parent answered. With none, it waits up to 1.5 times the lower quartile of the recent round trips. The NEIGHBOR deadline covers 3.5 round trips. With every pair 200 to 300 ms apart, active viewers went from 16 % to 100 % |
 | `bsnode publish --repeat` | The flag was ignored and the stream ended with the file. It now loops |
+| Loss report and parity (ISSUE-078, closed) | The child's loss report was a constant set by the default parity. It now measures loss on the source symbols. Parity is the smallest count that leaves one block in a thousand per hop to PULL. At 2 % loss starvation fell from 0.48 % to 0.09 %, at 5 % from 1.5 % to 0.3 % |
 
 Findings from the round:
 
 - The repair KPIs of a gate rest on about ten repairs, so they move with the seed. `baseline_100` passed two of six seeds before the round and passes two of three after. Judge a timer change over several seeds, never on one.
 - A 60-viewer swarm starves one tree when few relays hash to it. Seeds 25 and 27 put 9 of 45 relays in tree 1 and a third of the joins took over 15 s at any latency. This is a forest-balance problem, not a latency one, and it has no ticket yet.
 - A deadline built on the median or a high percentile of the round trips made short-path swarms worse. Slow answers there come from overloaded peers, and the fixed 200 ms cut filters those peers out.
-- `internet_rtt_step` and `internet_lossy_parity1` pass without any fix. Parity reaches 2 on every link through the constant loss byte, so the lossy gate does not yet prove that parity follows loss.
+- `internet_rtt_step` passed before any fix: a route change alone does not evict parents in the simulator.
+- Real loss with the old parity rule was worse than the constant report: 2.4 % starvation at 2 % loss. The measurement and the rule had to change together.
+- Above 5 % loss the 30 % parity ceiling leaves 1.4 % of blocks per hop to PULL at 10 % loss. Cellular links need a larger block or a higher ceiling (ISSUE-077).
+- The repair p95 limits of `baseline_100` and `internet_nat_detect` were met by seed luck. They are now 6 s and 8 s, from six seeds each way. `scripts/sim_seeds.sh` runs a gate over several seeds.
 

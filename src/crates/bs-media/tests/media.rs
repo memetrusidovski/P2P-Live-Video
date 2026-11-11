@@ -173,14 +173,24 @@ fn fec_roundtrip_with_loss() {
     assert!(!c.add(0, symbols[0].payload.clone()).unwrap());
 }
 
-/// Ch4 §4.2.2: E = max(1, ceil(clamp(2ρK, 0.05K, 0.30K))) — worked examples.
+/// Ch4 §4.2.2: E is the smallest parity that leaves at most one block in a
+/// thousand to the PULL path. E stays between 1 and ⌈0.30K⌉.
 #[test]
 fn parity_sizing() {
-    assert_eq!(parity_for_loss(0.0), 1);
-    assert_eq!(parity_for_loss(0.02), 1, "clean link clamps to floor");
-    assert_eq!(parity_for_loss(0.15), 5, "cellular: 0.30·16 = 4.8 → 5");
+    assert_eq!(parity_for_loss(0.0), 1, "floor");
+    assert_eq!(parity_for_loss(0.003), 2);
+    assert_eq!(parity_for_loss(0.01), 2);
+    assert_eq!(parity_for_loss(0.02), 3, "clean link");
+    assert_eq!(parity_for_loss(0.05), 5);
+    assert_eq!(parity_for_loss(0.15), 5, "cellular: the ceiling ⌈0.30·16⌉");
     assert_eq!(parity_for_loss(0.9), 5, "ceiling");
-    assert_eq!(parity_for_loss(0.1), 4, "2·0.1·16 = 3.2 → 4");
+    assert_eq!(parity_for_loss(1.0), 5, "ceiling at total loss");
+    let mut last = 0;
+    for i in 0..=255u16 {
+        let e = parity_for_loss(i as f64 / 255.0);
+        assert!(e >= last, "parity never falls as loss rises");
+        last = e;
+    }
 }
 
 /// Ch4 §4.1.2: repair ESI base is in [K, 2^16 − 256).

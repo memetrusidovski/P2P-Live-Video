@@ -2572,6 +2572,9 @@ impl Node {
 
     fn on_symbol(&mut self, from: PeerAddr, s: RaptorQSymbol) {
         if self.swarm.is_verified(s.segment, s.block) {
+            if self.swarm.take_late_source(s.segment, s.block, s.esi) {
+                self.credit_late_source(from);
+            }
             return;
         }
         let ready = self
@@ -2817,7 +2820,7 @@ impl Node {
                 siblings: built.tree.proof(j as usize),
                 sender_depth: 0,
                 decoded: false,
-                symbols_received: bs_wire::consts::K_BLOCK as u16,
+                source_lost: None,
             };
             let n = self.forward_block(&vb);
             self.preemit_block(&vb);

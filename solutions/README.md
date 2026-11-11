@@ -92,6 +92,7 @@ Open defects live in [`../issues/`](../issues/).
 | [017](SOLUTION-017-xdp-ddos-shield.md) | XDP DDoS shield | The kernel enforces the *result* of validation, never the validation |
 | [030](SOLUTION-030-sequence-windowed-manifest-acceptance.md) | Sequence-windowed manifests | Signature first, sequence window second, no wall clock; duplicates are never forgeries; bans are local and time-bounded |
 | [088](SOLUTION-088-receipt-ledger-index.md) | Receipt ledger index | Implementation: receipts keyed by canonical key, one lookup per receipt and one split per window trim; the `RANK_PROOF` list is a key range |
+| [078](SOLUTION-078-parity-from-the-binomial-tail.md) | Parity from the binomial tail | Ch4 §4.2.2, App B, Ch1 §1.2.1: `E` is the smallest parity that leaves at most 10⁻³ of blocks per hop to PULL, between 1 and ⌈0.30K⌉; the child measures loss on the source symbols |
 
 ### Structure
 
