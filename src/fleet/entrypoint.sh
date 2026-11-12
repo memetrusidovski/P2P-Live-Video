@@ -25,6 +25,7 @@ case "$ROLE" in
         --listen "0.0.0.0:${BS_PORT:-4000}" \
         --advertise-ip "$(hostname -i | awk '{print $1}')" \
         --start-delay-s "${BS_START_DELAY_S:-5}" \
+        --upload-kbps "${BS_PUB_UPLOAD_KBPS:-100000}" \
         --seed "${BS_SEED:-1}" \
         --player 0.0.0.0:8080 \
         --result "$OUT/result.json"
@@ -36,6 +37,7 @@ case "$ROLE" in
       --listen "0.0.0.0:${BS_PORT:-4000}" \
       --advertise-ip "$(hostname -i | awk '{print $1}')" \
       --start-delay-s "${BS_START_DELAY_S:-5}" \
+      --upload-kbps "${BS_PUB_UPLOAD_KBPS:-100000}" \
       --seed "${BS_SEED:-1}" \
       --result "$OUT/result.json"
     ;;

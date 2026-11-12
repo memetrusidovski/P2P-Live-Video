@@ -53,7 +53,7 @@ Without these the first public stream is a denial-of-service target.
 - Bans delivered to the transport, with prefix-keyed escalation. The requester's address signed into the punch forward (a wire change). Rounds 6 and 13 added the NodeID check on dial and the referrer rule for forwards. 2 days.
 - A hostile-network harness for `bs-node`: spoofed flood, replay, Retry, simultaneous open, uplink throttle. Nothing exercises `tls.rs`, `transport.rs` or the driver against an attacker today. 3 days.
 
-### 3. Repair at Internet RTTs (about 11 days)
+### 3. Repair at Internet RTTs (about 19 days)
 
 With timers scaled, repair still costs 1.8 s median at 250 ms RTT against a 2.0 s PULL
 window, because it is a full probe round plus a 1.5 RTT handshake.
@@ -63,6 +63,7 @@ window, because it is a full probe round plus a 1.5 RTT handshake.
 - A mobile profile in the simulator's Internet model: an address change mid-run and jitter bursts. Round 2 added the rest. 1 day.
 - A decision on which starvation number the gates use, and the same number in `fleet/report.py`. The simulator reports both since round 12. 1 day.
 - Keepalive and punch robustness: retransmit the punch forward and the punch PING once, keep mappings toward non-guardian referrers. 1 day.
+- Mobile conditions: a capped, lossy uplink. The cellular fleet profile fails (Round 18). Needs a send budget per node that all connections share, a PULL path that works at 8 % loss, and a simulator network model with uplink queues and reliable-stream delay. 8 days.
 
 ### 4. A broadcaster who is not a developer (about 15 days)
 
@@ -98,7 +99,7 @@ change, through [`FIXER-AGENT.md`](FIXER-AGENT.md).
 | 7 to 10 | Block 4, the player half of block 5 | A broadcaster streams a camera from behind a NAT to ten viewers on three networks without editing a command line; rendition switches are clean |
 | 11 to 16 | Mobile viewer, block 6 | A phone on cellular watches the stream; the open tickets are closed or accepted with a recorded reason |
 
-About 84 engineer-days in all. One person reaches the first gate in a month and the
+About 92 engineer-days in all. One person reaches the first gate in a month and the
 last in about six; three people reach the last in two to three months, because blocks
 2, 3 and 5 are independent of each other.
 
@@ -354,4 +355,33 @@ six killed viewers noticing a dead parent.
 The launcher also had a path bug: `scripts/check.sh` passes it
 `fleet/media/sample.mp4`, which it looked up after changing into `fleet/`. The fleet
 gate of the check script could not have started. Fixed.
+
+## Round 18 (2026-11-12)
+
+The fleet's `cellular` profile ran for the first time: twelve viewers, real video in
+two renditions (240p and 360p, 1.4 Mbps together), every node told its uplink is
+7 Mbps. Each row is one or two 70 s runs.
+
+| Network on every node | Starved chunks | What viewers saw |
+|---|---|---|
+| 240 ms round trip, 40 ms jitter | 0.8 % | Everyone plays |
+| 8 % loss, 40 ms round trip | 5.8 % | Everyone plays, with gaps |
+| 240 ms round trip and 8 % loss | 14 % | Everyone plays, with frequent gaps |
+| The same with an 8 Mbit uplink cap (`cellular`) | 35 to 93 % | Most viewers stall within 15 s or never start |
+| The same conditions in the simulator, no cap | 0.5 % | Everyone plays |
+
+What this says:
+
+- **Distance alone is solved.** The deadline work of round 2 holds on real sockets.
+- **Loss is not.** At 8 % loss the 30 % parity ceiling leaves about 1 % of blocks per hop to the PULL path, and PULL requests are mostly choked. This is the residual risk SOLUTION-078 names.
+- **A capped uplink collapses the swarm.** Nothing limits what a node sends in total. Each QUIC connection paces itself, the uplink queue grows, round trips stretch to seconds, and every timer then fires.
+- **The simulator cannot see any of it.** It has no congestion control, no uplink queue and no delay on reliable streams. Its cellular run passes.
+
+One accounting bug came out of it and is fixed: the ladder declared the video bitrate
+of each rendition, while the wire also carries 96 kbps of audio per rendition and the
+container. A 400 kbps rendition measured 489 kbps. Every node sized its child slots
+from the smaller number. The ladder now carries video plus audio plus 3 %.
+
+The mobile viewer of block 5 depends on this: a phone on cellular is the capped,
+lossy case. Block 3 has a new item for it.
 

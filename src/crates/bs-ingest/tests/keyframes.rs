@@ -61,3 +61,14 @@ async fn a_missing_input_fails_at_spawn() {
     let r = FfmpegSource::spawn("/nonexistent/clip.mp4".into(), specs, Some(30)).await;
     assert!(r.is_err(), "spawn reports an input ffmpeg cannot open");
 }
+
+/// The ladder carries each rendition's bitrate on the wire, not its video bitrate.
+#[test]
+fn ladder_counts_audio_and_container() {
+    let specs = RenditionSpec::parse_list("240p:400,720p:2500").unwrap();
+    let ladder = RenditionSpec::ladder(&specs);
+    let rates: Vec<u32> = ladder.layers.iter().map(|l| l.bitrate_kbps).collect();
+    // (400 + 96) and (2500 + 96), each plus 3 % rounded up.
+    assert_eq!(rates, vec![511, 2674]);
+    assert_eq!(specs[0].kbps, 400, "the video bitrate is unchanged");
+}

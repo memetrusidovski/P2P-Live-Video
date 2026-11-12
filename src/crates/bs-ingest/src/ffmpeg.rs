@@ -59,19 +59,35 @@ impl RenditionSpec {
             .collect()
     }
     /// Ladder for a list of renditions (lowest first as given).
+    ///
+    /// RULE: A layer's bitrate is what the rendition puts on the wire: the video,
+    ///       its own audio track and the container. Every node sizes its child
+    ///       slots from the ladder. With the video rate alone a 400 kbps rendition
+    ///       is 22 % heavier than declared, and a node on a tight uplink takes more
+    ///       children than it can feed.
     pub fn ladder(list: &[Self]) -> Ladder {
         Ladder {
             layers: list
                 .iter()
                 .map(|r| Layer {
                     label: r.label.clone(),
-                    bitrate_kbps: r.kbps,
+                    bitrate_kbps: r.wire_kbps(),
                 })
                 .collect(),
         }
     }
+
+    /// Bitrate of the rendition on the wire, kbps: video, audio and container.
+    pub fn wire_kbps(&self) -> u32 {
+        let media = self.kbps + AUDIO_KBPS;
+        media + (media * CONTAINER_OVERHEAD_PERCENT).div_ceil(100)
+    }
 }
 
+/// Audio bitrate of every rendition, kbps. The ffmpeg command encodes AAC at this rate.
+pub const AUDIO_KBPS: u32 = 96;
+/// Share of a rendition's bitrate that the fragmented MP4 container adds, percent.
+const CONTAINER_OVERHEAD_PERCENT: u32 = 3;
 /// Chunk period.
 const CHUNK_US: u64 = 250_000;
 /// A rendition this many fragments behind the leader is skipped for the chunk.
@@ -205,7 +221,7 @@ impl FfmpegSource {
             // renditions never changes the set of tracks (MSE type
             // `video/mp4; codecs="avc1.…,mp4a.40.2"`).
             cmd.args(["-map", "0:v:0", "-map", "0:a:0?"])
-                .args(["-c:a", "aac", "-b:a", "96k", "-ac", "2"])
+                .args(["-c:a", "aac", "-b:a", &format!("{AUDIO_KBPS}k"), "-ac", "2"])
                 .args([
                     "-c:v",
                     "libx264",
