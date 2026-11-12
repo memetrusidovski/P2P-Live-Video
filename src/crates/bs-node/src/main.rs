@@ -48,6 +48,11 @@ enum Cmd {
         /// External IP to advertise (default: detected or the listen IP).
         #[arg(long)]
         advertise_ip: Option<std::net::IpAddr>,
+        /// Ask this STUN server (host:port) for the public address of the listen port
+        /// and advertise that address. For a publisher behind a port forward. Sends
+        /// one request to the server named, for example stun.l.google.com:19302.
+        #[arg(long, conflicts_with = "advertise_ip")]
+        stun: Option<String>,
         /// Ladder: "reference" (1.5+1.5+3.0 Mbps) or "single:<kbps>".
         #[arg(long, default_value = "reference")]
         ladder: String,
@@ -422,6 +427,26 @@ fn hostname() -> String {
 }
 
 /// The commands another machine runs to join this publisher.
+/// The public IP of the listen port, as a STUN server observes it.
+///
+/// Warns when the observed port differs from the listen port: peers then cannot
+/// reach the node at the address it prints until the port is forwarded.
+async fn public_ip_from_stun(listen: SocketAddr, server: &str) -> anyhow::Result<IpAddr> {
+    let mapped =
+        bs_node::stun::public_addr(listen, server, std::time::Duration::from_secs(2)).await?;
+    eprintln!("public address {mapped} (observed by {server})");
+    if mapped.port() != listen.port() {
+        eprintln!(
+            "the router maps UDP port {} to {}: forward UDP {} to this machine, or \
+             viewers on other networks cannot reach the address below",
+            listen.port(),
+            mapped.port(),
+            listen.port()
+        );
+    }
+    Ok(mapped.ip())
+}
+
 fn print_join_hint(h: &bs_node::Handle) {
     eprintln!("join from another machine:");
     eprintln!(
@@ -673,6 +698,7 @@ async fn main() -> anyhow::Result<()> {
             repeat,
             listen,
             advertise_ip,
+            stun,
             ladder: l,
             forest,
             upload_kbps,
@@ -697,6 +723,10 @@ async fn main() -> anyhow::Result<()> {
                 ),
             };
             let (identity, seed) = node_identity(seed, key_file.as_deref())?;
+            let advertise_ip = match stun {
+                Some(server) => Some(public_ip_from_stun(listen, &server).await?),
+                None => advertise_ip,
+            };
             let (media, lad) = if ingest.eq_ignore_ascii_case("ffmpeg") {
                 let input = input
                     .or(file)

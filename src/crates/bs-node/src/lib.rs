@@ -8,6 +8,7 @@
 pub mod driver;
 pub mod identity;
 pub mod ratelimit;
+pub mod stun;
 pub mod tls;
 pub mod transport;
 

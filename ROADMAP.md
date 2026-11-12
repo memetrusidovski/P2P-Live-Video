@@ -64,12 +64,12 @@ window, because it is a full probe round plus a 1.5 RTT handshake.
 - The simulator's PSR made to match Ch8 §8.2, and the same definition in `fleet/report.py`. 1 day.
 - Keepalive and punch robustness: retransmit the punch forward and the punch PING once, keep mappings toward non-guardian referrers. 1 day.
 
-### 4. A broadcaster who is not a developer (about 20 days)
+### 4. A broadcaster who is not a developer (about 19 days)
 
 - Live ingest: camera, microphone, screen, and an RTMP or SRT listener so OBS can feed the publisher. One decode feeding every rendition. 7 days.
 - A publisher behind a NAT without a port forward: publisher-named ingress relays that skip the 30 minute uptime criterion (spec change to Ch6 §6.3.1), or UPnP and NAT-PMP first. 4 days.
 - A public seed: an always-on relay-class `bsnode` with no stream as the default bootstrap and first guardian. This is the one standing piece of infrastructure the no-servers goal has to decide on; without it a NATed publisher has nobody to register with. 2 days of code, one decision.
-- Reachability self-check and uplink probe at publish time, the public address in the share link, a health view of the encoder and the swarm on the publisher page. 5 days.
+- A reachability self-check and an uplink probe at publish time, and a health view of the encoder and the swarm on the publisher page. Since round 11 `--stun` looks up the public address and the join commands carry it. 4 days.
 - Persistence and logs: a state directory, settings, a log file with rotation, periodic result snapshots. 2 days.
 
 ### 5. A viewer who is not a developer (about 27 days)
@@ -98,7 +98,7 @@ change, through [`FIXER-AGENT.md`](FIXER-AGENT.md).
 | 7 to 10 | Block 4, the player half of block 5 | A broadcaster streams a camera from behind a NAT to ten viewers on three networks without editing a command line; rendition switches are clean |
 | 11 to 16 | Mobile viewer, block 6 | A phone on cellular watches the stream; the open tickets are closed or accepted with a recorded reason |
 
-About 90 engineer-days in all. One person reaches the first gate in a month and the
+About 89 engineer-days in all. One person reaches the first gate in a month and the
 last in about six; three people reach the last in two to three months, because blocks
 2, 3 and 5 are independent of each other.
 
@@ -239,4 +239,14 @@ counterparty sets, and the observed prefixes. Each is part of a protocol rule (r
 verification, the collusion test, the prefix cap), so pruning them is a design
 decision. The investigation was wrong about four tables: the audit samples, the PULL
 wants, the punches and the choke state already expire.
+
+## Round 11 (2026-11-12)
+
+| Work | Result |
+|---|---|
+| Public address of a publisher behind a port forward | `bsnode publish --stun host:port` asks a STUN server for the public address of the listen port, advertises it, prints join commands with it, and warns when the router maps the port to another one. Tested against a local stand-in server only, not a public one |
+
+Without the flag or `--advertise-ip`, such a publisher advertises its LAN address and
+every viewer on another network rejects it. The lookup stays opt-in because it sends a
+request to a third party.
 
