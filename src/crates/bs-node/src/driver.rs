@@ -1667,7 +1667,21 @@ impl Driver {
             self.sink.started = true;
             self.sink.first_segment = Some(chunk.segment.0);
         }
-        if full {
+        // RULE: `chunks_full` counts chunks with every layer the viewer asked for. A
+        //       viewer that shed a layer plays shorter chunks, and its output is
+        //       not the source byte for byte.
+        // The delivered chunk carries its complete layers only, so the layer count
+        // comes from the stream's layout.
+        let layers_total = self
+            .node
+            .matrix()
+            .map(|m| m.layer_count as usize)
+            .unwrap_or(self.cfg.ladder.len());
+        let wanted = match self.cfg.role {
+            Role::Viewer { top_layer } => (top_layer as usize).saturating_add(1).min(layers_total),
+            Role::Publisher { .. } => layers_total,
+        };
+        if layers_complete as usize >= wanted.max(1) {
             self.full += 1;
         }
         for l in chunk.layers.iter().take(layers_complete as usize) {

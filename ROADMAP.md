@@ -322,10 +322,18 @@ killed at 30 s) ran for the first time since round 1.
 | 3 | pass | 1.7 % | |
 | 4 | pass | 1.1 % | |
 
-Run 1 is unexplained. The pattern fits a publisher whose event loop stopped three
-seconds into the stream, but its log was gone with the container, three reruns passed,
-and reading the code found no cause. `fleet/down.sh` now saves every container's log
-and exit status before teardown, so a repeat can be diagnosed.
+Run 1 was a crash, found when it recurred with the logs kept. Round 9 shrank the
+datagram send buffer to 512 KiB so that quinn drops the oldest datagram on a slow
+link. quinn-proto 0.11.17 subtracts a dropped datagram's bytes twice: once the queue
+drains, its byte counter wraps, the next send empties the queue and panics, and the
+poisoned lock aborts the node. On a LAN the buffer never filled, so no local test
+saw it. On a slow or lossy uplink the publisher died a few seconds into the stream.
+quinn-proto is now pinned at 0.11.19, which rewrote that code, and
+`tests/datagram_overflow.rs` reproduces the crash on the old version.
+
+The report also counted a viewer that shed a layer as having played the stream in
+full, and then flagged its shorter output as a hash mismatch. `chunks_full` now
+counts chunks with every layer the viewer asked for.
 
 The passing runs sit near the 2 % limit. There is no earlier number to compare with:
 the October result folders have another layout.

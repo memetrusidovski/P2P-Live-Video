@@ -15,6 +15,9 @@ bs-ingest.workspace = true
 bs-player-api.workspace = true
 tokio.workspace = true
 quinn.workspace = true
+# RULE: At least 0.11.19. Earlier versions corrupt the datagram send queue's byte
+#       count when a full buffer drops a datagram, and then panic (tests/datagram_overflow.rs).
+quinn-proto = "0.11.19"
 socket2.workspace = true
 rustls.workspace = true
 rcgen.workspace = true

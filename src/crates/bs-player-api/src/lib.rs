@@ -66,7 +66,7 @@ pub struct Status {
     pub played: u64,
     /// Chunks starved.
     pub starved: u64,
-    /// Chunks with every subscribed layer.
+    /// Chunks with every layer the viewer asked for.
     pub chunks_full: u64,
     /// Seconds to the first chunk.
     pub first_chunk_s: Option<f64>,
