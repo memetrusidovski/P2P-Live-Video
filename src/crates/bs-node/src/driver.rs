@@ -619,6 +619,8 @@ struct Driver {
 /// problem. Longer than one DHT round trip plus a retry, short enough to read as
 /// an answer to "is the link right?".
 const BOOTSTRAP_SILENCE: std::time::Duration = std::time::Duration::from_secs(5);
+/// Peers remembered so that a rejected validation block is logged once per peer.
+const REJECTED_PEERS_MAX: usize = 4096;
 /// How long a closed session's connection stays open so queued frames are written.
 const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 /// How long a node that stops keeps running so its last frames leave.
@@ -1716,6 +1718,10 @@ impl Driver {
                 // WHY: One line per peer. A peer bound to one address (loopback) that
                 //      sends from another (LAN) fails every block. A flood of warnings
                 //      hides the cause.
+                // A flood of spoofed sources must not grow the set without bound.
+                if self.rejected_peers.len() >= REJECTED_PEERS_MAX {
+                    self.rejected_peers.clear();
+                }
                 if self.rejected_peers.insert(*from) {
                     warn!(
                         "validation block from {from} rejected: {error}. Peers must reach \

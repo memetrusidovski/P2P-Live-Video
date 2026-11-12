@@ -23,7 +23,7 @@ timer, default and defence assumes a LAN.
 | Transport and security | Mutual TLS over QUIC bound to the node identity, BBR, one demuxed socket | No rate limit on QUIC handshakes; no replay window; DHT answers reflect 5 to 6× toward a spoofed address |
 | Forest and repair | Join, shed, PULL zone, parity plumbing; PSR 0.01 % on a LAN at 3 % loss | The eviction deadline is seeded once from the probe and never follows the path; repair has no Deputy fast path |
 | Media and players | File ingest with two renditions and AAC, signed descriptor, MSE page, desktop shell | No live source (camera, screen, RTMP); a phone has nothing to connect to |
-| Operations | Clean start and stop; a dead publisher, a crashed encoder and a silent bootstrap are reported | Nothing persists but the publisher key; tables keyed by peer grow for the life of the process; the player API streams to anyone on the LAN who can reach the port |
+| Operations | Clean start and stop; a dead publisher, a crashed encoder and a silent bootstrap are reported | Nothing persists but the publisher key; three core tables still keep an entry per peer ever met; the player API streams to anyone on the LAN who can reach the port |
 
 The six notes list 55 bugs with file and line, and the missing pieces with a size in
 days. The counts below come from them.
@@ -227,4 +227,16 @@ The runbook's symptom table has a row for each.
 |---|---|
 | The 8 MB datagram send buffer serves stale symbols | 512 KiB per connection: about half a second of the whole stream to one child. A twelve-viewer LAN swarm starves the same share of chunks as before |
 | Stop does not flush DISCONNECT frames | A node that stops, or reaches `--duration-s`, tells its peers and runs 400 ms more. A closed session's connection stays open 250 ms so queued frames are written. With a publisher stopped under eight viewers, all 24 parent links ended with `disconnect:Quit` |
+
+## Round 10 (2026-11-12)
+
+| Bug | Result |
+|---|---|
+| Per-peer tables in the core are never pruned | Loss and PULL-ingress samples, unchoke marks, bitfields, accusation rates and descriptor marks are dropped for peers that left. PONG reflections stop at 32 entries. The driver's rejected-peer set is bounded |
+
+Three tables still keep one entry per peer ever met: the learned keys, the audit's
+counterparty sets, and the observed prefixes. Each is part of a protocol rule (receipt
+verification, the collusion test, the prefix cap), so pruning them is a design
+decision. The investigation was wrong about four tables: the audit samples, the PULL
+wants, the punches and the choke state already expire.
 

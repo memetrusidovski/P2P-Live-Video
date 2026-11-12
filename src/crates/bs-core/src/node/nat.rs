@@ -41,6 +41,9 @@ struct BridgeRequest {
     since: Instant,
 }
 
+/// PONG reflections kept to classify the NAT.
+const REFLECTIONS_MAX: usize = 32;
+
 /// NAT state on a node.
 #[derive(Debug, Default)]
 pub struct NatState {
@@ -382,7 +385,12 @@ impl Node {
                 self.on_ingress_proposal(p);
             }
         }
-        self.nat.reflections.insert(from, reflected);
+        // RULE: Enough responders decide the class. More PONGs add nothing, and one
+        //       entry per peer ever met grows for the life of the node.
+        if self.nat.reflections.len() < REFLECTIONS_MAX || self.nat.reflections.contains_key(&from)
+        {
+            self.nat.reflections.insert(from, reflected);
+        }
         if self.nat.reflections.len() < 2 {
             if self.nat.reflection_deadline.is_none() {
                 self.nat.reflection_deadline = Some(self.now + self.params.reflection_timeout);

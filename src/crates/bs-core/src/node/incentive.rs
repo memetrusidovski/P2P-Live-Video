@@ -774,6 +774,7 @@ impl Node {
         let alive: BTreeSet<PeerAddr> = peers.iter().copied().collect();
         self.incentive.choke.retain(|p, _| alive.contains(p));
         self.incentive.first_seen.retain(|p, _| alive.contains(p));
+        self.forget_departed(&alive);
         for p in &peers {
             self.incentive.first_seen.entry(*p).or_insert(now);
         }
@@ -915,6 +916,31 @@ impl Node {
                 self.incentive.unchoked_by.insert(from);
             }
         }
+    }
+
+    /// Drop per-peer state of peers that are gone.
+    ///
+    /// WHY: A relay that runs for days meets every peer of a swarm with churn. A
+    ///      table that keeps one entry per peer ever met grows without bound.
+    fn forget_departed(&mut self, alive: &BTreeSet<PeerAddr>) {
+        let now = self.now;
+        let window = self.params.tft_window;
+        // RULE: Keep a departed peer's samples for one window. A parent that left
+        //       and came back inside the window keeps its loss history.
+        self.incentive.link_loss.retain(|p, q| {
+            q.retain(|(t, _, _)| now.duration_since(*t) <= window);
+            alive.contains(p) || !q.is_empty()
+        });
+        self.incentive.pull_ingress.retain(|p, q| {
+            q.retain(|(t, _)| now.duration_since(*t) <= window);
+            alive.contains(p) || !q.is_empty()
+        });
+        self.incentive.unchoked_by.retain(|p| alive.contains(p));
+        self.pull.bitfields.retain(|p, _| alive.contains(p));
+        let version = self.descriptor.as_ref().map(|d| d.version);
+        let sessions = &self.sessions;
+        self.descriptor_sent
+            .retain(|(v, peer)| Some(*v) == version && sessions.contains_key(peer));
     }
 
     /// A peer asked us for PULL service: it is waiting (bootstrap queue input).

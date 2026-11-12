@@ -536,6 +536,11 @@ impl Node {
         self.audit
             .seen
             .retain(|_, s| now.duration_since(s.at) <= keep);
+        // Accusers that sent nothing in the last minute need no rate entry.
+        self.audit.rate.retain(|_, q| {
+            q.retain(|t| now.duration_since(*t) <= Duration::from_secs(60));
+            !q.is_empty()
+        });
         let parked = std::mem::take(&mut self.audit.parked);
         for (g, from, since) in parked {
             if self.resolve_addr(&g.accuser).is_some() {
