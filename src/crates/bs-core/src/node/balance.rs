@@ -123,8 +123,8 @@ impl Node {
         let in_second = counts[second.index()] as f64;
 
         if let Some(g) = self.balance.granted {
-            // RULE: The grant lapses when the granted tree holds no child of ours and
-            //       is no longer short (Ch1 §1.2.1 §1.3).
+            // RULE: The grant lapses when the granted tree holds no child of ours.
+            //       The tree must also be no longer short (Ch1 §1.2.1 §1.3).
             let idle = self.trees[g.index()].children.is_empty()
                 && self.now.duration_since(self.balance.granted_at) >= GRANT_HOLD;
             if g != second || (idle && relays >= MIN_SAMPLE && in_second >= mean) {
@@ -149,8 +149,8 @@ impl Node {
         if !t.subscribed || t.parent.is_none() || t.verified_segments == 0 {
             return;
         }
-        // Capacity gate: one slot at least in each of the two trees, and spare
-        // capacity now for one slot in the granted tree.
+        // Capacity gate: one slot at least in each of the two trees. Spare capacity
+        // must also buy one slot in the granted tree now.
         let parity = self.mean_child_parity();
         let slots = |tree: TreeId, trees: u32| {
             matrix
@@ -176,7 +176,7 @@ impl Node {
         }
         // RULE: Each candidate volunteers with the probability the gap calls for, drawn
         //       from its NodeID. The draw is the same at every evaluation, so the set
-        //       of volunteers is stable and a filled gap attracts no further relay.
+        //       of volunteers is stable. A filled gap attracts no further relay.
         let share = 1.0 - in_second / mean;
         let mut seedb = self.node_id().0.to_vec();
         seedb.extend_from_slice(b"balance-grant");
