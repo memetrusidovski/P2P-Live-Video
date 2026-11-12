@@ -103,6 +103,8 @@ pub struct NodeStats {
     pub forest_switches: u64,
     /// Rendezvous reassignments at a resize.
     pub relay_reassignments: u64,
+    /// Chunks played with fewer complete layers than the node subscribes to.
+    pub layer_short: u64,
     /// PUNCH_REQUESTs sent to referrers.
     pub punches_sent: u64,
     /// Identity rebinds to a reflected address.
@@ -295,8 +297,17 @@ impl Kpis {
                     s.active_us = Some(t);
                 }
             }
-            Event::ChunkPlayed { ok, backfill, .. } => {
+            Event::ChunkPlayed {
+                ok,
+                backfill,
+                layers_complete,
+                layers_subscribed,
+                ..
+            } => {
                 s.played += 1;
+                if layers_complete < layers_subscribed {
+                    s.layer_short += 1;
+                }
                 if *ok {
                     s.played_ok += 1;
                 }
@@ -446,6 +457,22 @@ impl Kpis {
             pl += s.steady_played;
         }
         (if pl == 0 { 1.0 } else { st as f64 / pl as f64 }, st, pl)
+    }
+    /// PSR as Ch8 §8.2 defines it, and the share of chunks short of a subscribed
+    /// layer. Both count every chunk a viewer played: backfill and the chunks
+    /// before the first complete one are in the denominator.
+    pub fn psr_spec(&self) -> (f64, f64) {
+        let (mut bad, mut short, mut played) = (0u64, 0u64, 0u64);
+        for s in self.nodes.iter().filter(|s| !s.is_publisher) {
+            bad += s.played - s.played_ok;
+            short += s.layer_short;
+            played += s.played;
+        }
+        if played == 0 {
+            (1.0, 1.0)
+        } else {
+            (bad as f64 / played as f64, short as f64 / played as f64)
+        }
     }
     /// Startup join latencies, seconds, for viewers that got a first chunk.
     pub fn sjl(&self) -> Vec<f64> {

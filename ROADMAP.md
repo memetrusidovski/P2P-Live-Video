@@ -61,7 +61,7 @@ window, because it is a full probe round plus a 1.5 RTT handshake.
 - ROSTER and Deputy election (Ch1 §1.2.3): the subtree re-attaches as a unit instead of a thundering herd, with the timer scaled per ISSUE-074. 6 days.
 - QUIC resumption tickets kept per NodeID so re-attach is 1 RTT (the spec's repair timeline assumes it; `rustls` keys tickets by server name today). 2 days.
 - A mobile profile in the simulator's Internet model: an address change mid-run and jitter bursts. Round 2 added the rest. 1 day.
-- The simulator's PSR made to match Ch8 §8.2, and the same definition in `fleet/report.py`. 1 day.
+- A decision on which starvation number the gates use, and the same number in `fleet/report.py`. The simulator reports both since round 12. 1 day.
 - Keepalive and punch robustness: retransmit the punch forward and the punch PING once, keep mappings toward non-guardian referrers. 1 day.
 
 ### 4. A broadcaster who is not a developer (about 19 days)
@@ -249,4 +249,22 @@ wants, the punches and the choke state already expire.
 Without the flag or `--advertise-ip`, such a publisher advertises its LAN address and
 every viewer on another network rejects it. The lookup stays opt-in because it sends a
 request to a third party.
+
+## Round 12 (2026-11-12)
+
+The simulator now reports starvation as Ch8 §8.2 defines it (`psr_spec`, every played
+chunk in the denominator) and the share of chunks short of a subscribed layer
+(`layer_miss`), beside the steady-state number the gates use.
+
+| Gate | Steady-state PSR (gated) | `psr_spec` | `layer_miss` |
+|---|---|---|---|
+| `baseline_100` | 0.02 % | 2.3 % | 5.8 % |
+| `churn_storm` | 0.11 % | 2.5 % | 7.2 % |
+| `lossy_links` | 0.04 % | 2.6 % | 12.6 % |
+| `internet_far_swarm` | 0.24 % | 2.2 % | 4.9 % |
+
+The spec number is about two percent everywhere because it counts the chunks a viewer
+plays while it is still joining. The Ch8 target of 0.1 % cannot be met under that
+definition by any run with joins in it. Either the definition or the target needs a
+decision.
 

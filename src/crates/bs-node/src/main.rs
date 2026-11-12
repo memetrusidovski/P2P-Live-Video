@@ -429,7 +429,7 @@ fn hostname() -> String {
 /// The commands another machine runs to join this publisher.
 /// The public IP of the listen port, as a STUN server observes it.
 ///
-/// Warns when the observed port differs from the listen port: peers then cannot
+/// Warns when the observed port differs from the listen port. Peers then cannot
 /// reach the node at the address it prints until the port is forwarded.
 async fn public_ip_from_stun(listen: SocketAddr, server: &str) -> anyhow::Result<IpAddr> {
     let mapped =

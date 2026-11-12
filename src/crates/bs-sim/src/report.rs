@@ -252,6 +252,9 @@ pub fn verdict(sim: &mut Sim, scenario_path: &Path, out: &Path) -> Verdict {
         "chunks_published".into(),
         serde_json::json!(k.chunks_published),
     );
+    let (psr_spec, layer_miss) = k.psr_spec();
+    facts.insert("psr_spec".into(), serde_json::json!(psr_spec));
+    facts.insert("layer_miss".into(), serde_json::json!(layer_miss));
     facts.insert("chunks_played".into(), serde_json::json!(played));
     facts.insert("chunks_starved".into(), serde_json::json!(starved));
     facts.insert(
