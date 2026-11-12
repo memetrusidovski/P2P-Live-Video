@@ -434,6 +434,17 @@ impl Node {
                 if rtt > Duration::ZERO && rtt < RTT_SAMPLE_MAX {
                     self.note_rtt(rtt);
                     self.parent_rtt_sample(peer, rtt);
+                    // RULE: The transport reports a smoothed round trip. Its samples
+                    //       barely differ, so the variance they yield falls toward
+                    //       zero and τ_evict falls with it. Keep the variance at
+                    //       half the round trip, the value a new link starts with.
+                    for t in &mut self.trees {
+                        if let Some(p) = t.parent.as_mut() {
+                            if p.addr == peer {
+                                p.rttvar = p.rttvar.max(p.srtt.div_by(2));
+                            }
+                        }
+                    }
                 }
             }
             Input::Frame {

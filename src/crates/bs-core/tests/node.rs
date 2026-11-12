@@ -1610,6 +1610,12 @@ fn transport_rtt_samples_move_the_parent_estimator() {
         after > Duration::from_millis(140),
         "estimator follows the transport: {after:?}"
     );
+    // The variance does not collapse under smoothed samples: τ_evict keeps its margin.
+    let var = h.node(v).trees()[0].parent.as_ref().unwrap().rttvar;
+    assert!(
+        var >= Duration::from_millis(70),
+        "variance stays at half the round trip: {var:?}"
+    );
     // A sample for another peer changes nothing.
     h.feed(
         v,

@@ -335,8 +335,21 @@ The report also counted a viewer that shed a layer as having played the stream i
 full, and then flagged its shorter output as a hash mismatch. `chunks_full` now
 counts chunks with every layer the viewer asked for.
 
-The passing runs sit near the 2 % limit. There is no earlier number to compare with:
-the October result folders have another layout.
+A third fault came from round 3. QUIC reports a smoothed round trip, so feeding it to
+the parent estimator every second drove the variance term to about 1 ms and the
+eviction deadline to its floor. Transport samples now keep the variance at half the
+round trip.
+
+After the three fixes, eleven runs in a row had no crash and no hash mismatch:
+
+| Build | Runs | Passed | Starvation |
+|---|---|---|---|
+| quinn fix | 6 | 4 | 1.0 to 2.8 %, mean 1.7 % |
+| quinn fix and variance floor | 5 | 5 | 0.9 to 1.7 %, mean 1.3 % |
+
+The limit is 2 %. There is no earlier number to compare with: the October result
+folders have another layout. About 35 parent losses per run are the children of the
+six killed viewers noticing a dead parent.
 
 The launcher also had a path bug: `scripts/check.sh` passes it
 `fleet/media/sample.mp4`, which it looked up after changing into `fleet/`. The fleet
