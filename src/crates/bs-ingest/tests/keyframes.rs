@@ -9,7 +9,8 @@ use bs_ingest::mp4::starts_with_keyframe;
 use bs_ingest::{container, FfmpegSource, RecordType, RenditionSpec};
 
 /// With a 1 s GOP and 250 ms fragments, fragments 0, 4 and 8 start with a keyframe
-/// and no other fragment does.
+/// and no other fragment does. One ffmpeg process feeds both renditions, so the
+/// keyframes of the two renditions fall in the same chunks.
 #[tokio::test]
 async fn every_fourth_fragment_starts_with_a_keyframe() {
     let sample =
@@ -21,7 +22,7 @@ async fn every_fourth_fragment_starts_with_a_keyframe() {
         eprintln!("skipped: needs ffmpeg and scripts/make_testdata.sh");
         return;
     }
-    let specs = RenditionSpec::parse_list("360p:800").unwrap();
+    let specs = RenditionSpec::parse_list("240p:400,360p:800").unwrap();
     let mut src = FfmpegSource::spawn(sample, specs, Some(30)).await.unwrap();
     let mut keys = Vec::new();
     for _ in 0..9 {
@@ -29,13 +30,34 @@ async fn every_fourth_fragment_starts_with_a_keyframe() {
             .await
             .expect("ffmpeg produced a chunk in time")
             .expect("the clip is longer than nine chunks");
-        let media = container::decode(&chunk.layers[0])
-            .into_iter()
-            .find(|r| r.kind == RecordType::Media)
-            .expect("a media fragment per chunk");
-        // Track 1 is the video track of ffmpeg's mp4 muxer.
-        keys.push(starts_with_keyframe(&media.data, 1));
+        assert_eq!(chunk.layers.len(), 2, "one layer per rendition");
+        let key_of = |layer: usize| {
+            let media = container::decode(&chunk.layers[layer])
+                .into_iter()
+                .find(|r| r.kind == RecordType::Media)
+                .expect("a media fragment per rendition per chunk");
+            // Track 1 is the video track of ffmpeg's mp4 muxer.
+            starts_with_keyframe(&media.data, 1)
+        };
+        assert_eq!(key_of(0), key_of(1), "renditions are keyframe aligned");
+        keys.push(key_of(0));
     }
     let expected: Vec<Option<bool>> = (0..9).map(|i| Some(i % 4 == 0)).collect();
     assert_eq!(keys, expected);
+}
+
+/// A process that cannot open its input is an error at spawn, not a silent end.
+#[tokio::test]
+async fn a_missing_input_fails_at_spawn() {
+    if std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipped: needs ffmpeg");
+        return;
+    }
+    let specs = RenditionSpec::parse_list("240p:400").unwrap();
+    let r = FfmpegSource::spawn("/nonexistent/clip.mp4".into(), specs, Some(30)).await;
+    assert!(r.is_err(), "spawn reports an input ffmpeg cannot open");
 }

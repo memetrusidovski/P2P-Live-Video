@@ -58,8 +58,13 @@ pub enum Media {
         input: PathBuf,
         /// Renditions, e.g. `["480p:1500", "720p:3000"]`.
         renditions: Vec<String>,
-        /// Frame rate (`None` = probe).
+        /// Frame rate (`None` = probe a file, 30 for a live input).
         fps: Option<u32>,
+        /// ffmpeg arguments placed before `-i`: `-f avfoundation` for a camera,
+        /// `-listen 1` for an RTMP listener.
+        input_args: Vec<String>,
+        /// The input produces frames in real time (a camera, a screen, a network feed).
+        live: bool,
     },
     /// Viewer: serve the player API (and optionally also write/hash the output).
     Play {
@@ -900,14 +905,22 @@ impl Driver {
                 input,
                 renditions,
                 fps,
+                input_args,
+                live,
             } if matches!(self.cfg.role, Role::Publisher { .. }) => {
+                let options = bs_ingest::InputOptions {
+                    args: input_args,
+                    live,
+                };
                 let specs = bs_ingest::RenditionSpec::parse_list(&renditions.join(","))?;
                 let (tx, rx) = mpsc::channel::<LayeredChunk>(16);
                 let delay = std::time::Duration::from_secs_f64(self.cfg.start_delay_s);
                 let ev_tx = self.ev_tx.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(delay).await;
-                    let mut src = match bs_ingest::FfmpegSource::spawn(input, specs, fps).await {
+                    let spawned =
+                        bs_ingest::FfmpegSource::spawn_with(input, specs, fps, options).await;
+                    let mut src = match spawned {
                         Ok(s) => s,
                         Err(e) => {
                             warn!("ffmpeg ingest failed to start: {e:#}");

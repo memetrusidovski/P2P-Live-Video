@@ -22,7 +22,7 @@ timer, default and defence assumes a LAN.
 | NAT traversal | All mechanisms exist in `bs-core` and are wired through the driver | The rebind is once per process and has never run through a real NAT; a NATed publisher has nobody to register with; no relay exists for 30 minutes |
 | Transport and security | Mutual TLS over QUIC bound to the node identity, BBR, one demuxed socket | No rate limit on QUIC handshakes; no replay window; DHT answers reflect 5 to 6× toward a spoofed address |
 | Forest and repair | Join, shed, PULL zone, parity plumbing; PSR 0.01 % on a LAN at 3 % loss | The eviction deadline is seeded once from the probe and never follows the path; repair has no Deputy fast path |
-| Media and players | File ingest with two renditions and AAC, signed descriptor, MSE page, desktop shell | No live source (camera, screen, RTMP); a phone has nothing to connect to |
+| Media and players | File ingest with two renditions and AAC, signed descriptor, MSE page, desktop shell | Live sources (camera, screen, RTMP) open through ffmpeg flags but are untested on real devices; a phone has nothing to connect to |
 | Operations | Clean start and stop; a dead publisher, a crashed encoder and a silent bootstrap are reported | Nothing persists but the publisher key; three core tables still keep an entry per peer ever met; the player API streams to anyone on the LAN who can reach the port |
 
 The six notes list 55 bugs with file and line, and the missing pieces with a size in
@@ -64,9 +64,9 @@ window, because it is a full probe round plus a 1.5 RTT handshake.
 - A decision on which starvation number the gates use, and the same number in `fleet/report.py`. The simulator reports both since round 12. 1 day.
 - Keepalive and punch robustness: retransmit the punch forward and the punch PING once, keep mappings toward non-guardian referrers. 1 day.
 
-### 4. A broadcaster who is not a developer (about 19 days)
+### 4. A broadcaster who is not a developer (about 15 days)
 
-- Live ingest: camera, microphone, screen, and an RTMP or SRT listener so OBS can feed the publisher. One decode feeding every rendition. 7 days.
+- Live ingest verified with a real camera, a screen capture and OBS over RTMP, with a device picker in the desktop app. Since round 15 one ffmpeg process feeds every rendition and `--live --input-args` opens a live source. 3 days.
 - A publisher behind a NAT without a port forward: publisher-named ingress relays that skip the 30 minute uptime criterion (spec change to Ch6 §6.3.1), or UPnP and NAT-PMP first. 4 days.
 - A public seed: an always-on relay-class `bsnode` with no stream as the default bootstrap and first guardian. This is the one standing piece of infrastructure the no-servers goal has to decide on; without it a NATed publisher has nobody to register with. 2 days of code, one decision.
 - A reachability self-check and an uplink probe at publish time, and a health view of the encoder and the swarm on the publisher page. Since round 11 `--stun` looks up the public address and the join commands carry it. 4 days.
@@ -98,7 +98,7 @@ change, through [`FIXER-AGENT.md`](FIXER-AGENT.md).
 | 7 to 10 | Block 4, the player half of block 5 | A broadcaster streams a camera from behind a NAT to ten viewers on three networks without editing a command line; rendition switches are clean |
 | 11 to 16 | Mobile viewer, block 6 | A phone on cellular watches the stream; the open tickets are closed or accepted with a recorded reason |
 
-About 89 engineer-days in all. One person reaches the first gate in a month and the
+About 85 engineer-days in all. One person reaches the first gate in a month and the
 last in about six; three people reach the last in two to three months, because blocks
 2, 3 and 5 are independent of each other.
 
@@ -208,7 +208,7 @@ drives two real nodes into either case yet.
 | Bug | Result |
 |---|---|
 | A viewer with a dead publisher reports no error | A viewer that played and then gets no media for 10 s sets `no media for over 10 s: the publisher is gone or unreachable`. The next chunk clears it. Checked live with a killed publisher |
-| ffmpeg failure is reported as a normal end of stream | The ingest reads each ffmpeg exit status. A failure sets `ingest: ffmpeg for <rendition> ended with <status>`, the result file carries it, and `bsnode publish` exits with code 4 |
+| ffmpeg failure is reported as a normal end of stream | The ingest reads each ffmpeg exit status. A failure sets `ingest: ffmpeg ended with <status>`, the result file carries it, and `bsnode publish` exits with code 4 |
 | The player HTTP server is never shut down | The server stops when its node does |
 | Linux relays get a 20th of the intended socket buffer | The node warns once with the size it got and the sysctl to raise |
 
@@ -294,4 +294,12 @@ What went wrong on the way, since each is a rule in the final design:
 The limits of `internet_far_swarm` moved to a join mean of 6 s and a repair p95 of
 10 s: over eight seeds the join mean is 5.1 to 5.2 s with or without the grant, so
 the old 5.0 s limit passed by seed luck.
+
+## Round 15 (2026-11-12)
+
+| Work | Result |
+|---|---|
+| One decode for every rendition | The ingest runs one ffmpeg process that decodes the input once and encodes each rendition to its own loopback connection. One process per rendition could not share a camera or a listening socket, and the processes drifted apart. Test: two renditions have their keyframes in the same chunks |
+| Live inputs | `bsnode publish --live --input-args "<ffmpeg args>"` opens a camera, a screen or an RTMP listener. Checked end to end with ffmpeg's test pattern as a real-time source. A real camera and OBS are untested |
+| A bad input | ffmpeg that cannot open its input fails the start with an error |
 

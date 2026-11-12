@@ -1,5 +1,5 @@
-//! One ffmpeg process per simulcast rendition, fragment-aligned, combined into
-//! `LayeredChunk`s (layer `l` = rendition `l`).
+//! One ffmpeg process that encodes every simulcast rendition, fragment-aligned,
+//! combined into `LayeredChunk`s (layer `l` = rendition `l`).
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -130,18 +130,54 @@ pub async fn probe_fps(input: &Path) -> anyhow::Result<u32> {
     Ok((n / d.max(1.0)).round().max(1.0) as u32)
 }
 
+/// How ffmpeg reads the input.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InputOptions {
+    /// ffmpeg arguments placed before `-i`, such as `-f avfoundation` for a camera or
+    /// `-listen 1` for an RTMP listener.
+    pub args: Vec<String>,
+    /// The input produces frames in real time (a camera, a screen, a network feed).
+    /// ffmpeg then reads as fast as frames arrive. A file is read at its frame rate.
+    pub live: bool,
+}
+
+/// Frame rate assumed for a live input when none is given: a device cannot be probed.
+const LIVE_FPS: u32 = 30;
+
 impl FfmpegSource {
-    /// Spawn one ffmpeg per rendition. `fps` = None probes the input.
+    /// Spawn ffmpeg on a file. `fps` = None probes the input.
     pub async fn spawn(
         input: PathBuf,
         renditions: Vec<RenditionSpec>,
         fps: Option<u32>,
+    ) -> anyhow::Result<Self> {
+        Self::spawn_with(input, renditions, fps, InputOptions::default()).await
+    }
+
+    /// Spawn one ffmpeg process that decodes the input once and encodes every
+    /// rendition.
+    ///
+    /// WHY: One process per rendition opens the input once per rendition. A camera or
+    ///      a listening socket can be opened once only, and separate processes drift
+    ///      apart in time.
+    ///
+    /// Args:
+    ///     input: File, device or URL, as ffmpeg's `-i` takes it.
+    ///     renditions: Renditions in layer order, lowest first.
+    ///     fps: Frame rate. `None` probes a file and assumes `LIVE_FPS` for a live input.
+    ///     options: How ffmpeg reads the input.
+    pub async fn spawn_with(
+        input: PathBuf,
+        renditions: Vec<RenditionSpec>,
+        fps: Option<u32>,
+        options: InputOptions,
     ) -> anyhow::Result<Self> {
         if renditions.is_empty() {
             anyhow::bail!("at least one rendition");
         }
         let fps = match fps {
             Some(f) => f,
+            None if options.live => LIVE_FPS,
             None => probe_fps(&input).await?,
         };
         info!(
@@ -149,22 +185,28 @@ impl FfmpegSource {
             renditions.len(),
             input.display()
         );
-        let (tx, rx) = mpsc::channel::<Ev>(256);
-        let mut children = Vec::new();
-        for (i, r) in renditions.iter().enumerate() {
-            let mut cmd = Command::new("ffmpeg");
-            cmd.args(["-hide_banner", "-loglevel", "error", "-re", "-i"])
-                .arg(&input)
-                // Every rendition carries its own AAC audio track, so switching
-                // renditions never changes the set of tracks (MSE type
-                // `video/mp4; codecs="avc1.…,mp4a.40.2"`).
+        // Each rendition leaves ffmpeg on its own loopback TCP connection.
+        let mut listeners = Vec::with_capacity(renditions.len());
+        for _ in &renditions {
+            listeners.push(
+                tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .context("binding a loopback port for ffmpeg output")?,
+            );
+        }
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args(["-hide_banner", "-loglevel", "error"]);
+        if !options.live {
+            cmd.arg("-re");
+        }
+        cmd.args(&options.args).arg("-i").arg(&input);
+        for (r, l) in renditions.iter().zip(&listeners) {
+            // Every rendition carries its own AAC audio track, so switching
+            // renditions never changes the set of tracks (MSE type
+            // `video/mp4; codecs="avc1.…,mp4a.40.2"`).
+            cmd.args(["-map", "0:v:0", "-map", "0:a:0?"])
+                .args(["-c:a", "aac", "-b:a", "96k", "-ac", "2"])
                 .args([
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    "96k",
-                    "-ac",
-                    "2",
                     "-c:v",
                     "libx264",
                     "-preset",
@@ -199,20 +241,29 @@ impl FfmpegSource {
                 // RULE: No `-min_frag_duration`. With it ffmpeg does not cut at a
                 //       keyframe, and the keyframe lands in the middle of a fragment.
                 //       A player can then never switch renditions at a fragment start.
-                .args(["-frag_duration", "250000", "pipe:1"])
-                .stdout(Stdio::piped())
-                .stdin(Stdio::null())
-                .kill_on_drop(true);
-            let mut child = cmd
-                .spawn()
-                .with_context(|| format!("spawning ffmpeg for {}", r.label))?;
-            let mut stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+                .args(["-frag_duration", "250000"])
+                .arg(format!("tcp://{}", l.local_addr()?));
+        }
+        cmd.stdout(Stdio::null())
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().context("spawning ffmpeg")?;
+        let (tx, rx) = mpsc::channel::<Ev>(256);
+        for (i, listener) in listeners.into_iter().enumerate() {
+            // ffmpeg opens its outputs in order. A process that dies first never connects.
+            let stream = tokio::select! {
+                r = listener.accept() => r.context("ffmpeg output connection")?.0,
+                status = child.wait() => {
+                    anyhow::bail!("ffmpeg ended before it opened its outputs: {}", status?)
+                }
+            };
             let tx = tx.clone();
             tokio::spawn(async move {
+                let mut stream = stream;
                 let mut asm = FragmentAssembler::new();
                 let mut buf = vec![0u8; 64 * 1024];
                 loop {
-                    match stdout.read(&mut buf).await {
+                    match stream.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             for u in asm.feed(&buf[..n]) {
@@ -229,8 +280,8 @@ impl FfmpegSource {
                 }
                 let _ = tx.send(Ev::Ended(i)).await;
             });
-            children.push(child);
         }
+        let children = vec![child];
         let n = renditions.len();
         Ok(Self {
             ladder: RenditionSpec::ladder(&renditions),
@@ -258,11 +309,11 @@ impl FfmpegSource {
     /// Returns `None` if every ffmpeg process exited with success: the input ended.
     pub async fn failure(&mut self) -> Option<String> {
         let mut failed = Vec::new();
-        for (child, spec) in self.children.iter_mut().zip(&self.specs) {
+        for child in self.children.iter_mut() {
             match child.wait().await {
                 Ok(status) if status.success() => {}
-                Ok(status) => failed.push(format!("ffmpeg for {} ended with {status}", spec.label)),
-                Err(e) => failed.push(format!("ffmpeg for {}: {e}", spec.label)),
+                Ok(status) => failed.push(format!("ffmpeg ended with {status}")),
+                Err(e) => failed.push(format!("ffmpeg: {e}")),
             }
         }
         if failed.is_empty() {

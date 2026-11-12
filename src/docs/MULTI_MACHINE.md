@@ -37,6 +37,21 @@ across restarts while that file does.
 The address is the one the OS routes to the Internet through. On a VPN pass the VPN
 address: `--advertise-ip 100.64.0.5` (or `--listen 100.64.0.5:4000`).
 
+A live source takes `--live` and the ffmpeg arguments that open it. One ffmpeg process
+decodes the input once and encodes every rendition.
+
+```sh
+# camera and microphone on macOS (list devices: ffmpeg -f avfoundation -list_devices true -i "")
+bsnode publish --ingest ffmpeg --live --input-args "-f avfoundation -framerate 30" \
+  --input "0:0" --renditions 360p:800,720p:2500 --listen 0.0.0.0:4000
+# an RTMP listener: point OBS at rtmp://<this machine>:1935/live/stream
+bsnode publish --ingest ffmpeg --live --input-args "-listen 1" \
+  --input rtmp://0.0.0.0:1935/live/stream --renditions 360p:800,720p:2500 --listen 0.0.0.0:4000
+```
+
+Pass `--fps` if the source is not 30 frames per second. The camera and RTMP commands
+are untested here: the live path was checked with ffmpeg's test pattern source only.
+
 For a byte-exact check instead of video, publish a file: `--file sample.mp4
 --max-bytes 25000000`. The stream ends when the file ends, so make it longer than the
 time you need to start every machine.
@@ -142,7 +157,7 @@ simulator, not yet through a real NAT.
 | Plays, then `parent lost` and starvation on one machine | That machine's firewall drops incoming UDP from other viewers; allow `bsnode` or run it as `--class leaf` so it never relays |
 | Everything starves at once | The publisher's machine is saturated; move viewers off it |
 | `no media for over 10 s: the publisher is gone or unreachable` | The publisher stopped without ending the stream, or its network changed. The viewer plays again if media returns |
-| Publisher exits with code 4 and `ingest: ffmpeg for ... ended with ...` | The encoder crashed. Viewers got a STREAM_END |
+| Publisher exits with code 4 and `ingest: ffmpeg ended with ...` | The encoder crashed. Viewers got a STREAM_END |
 | `--stream` is missing | A viewer needs the stream id the publisher printed |
 | `UDP receive buffer is N KiB of the 8192 KiB asked for` | The kernel caps socket buffers. On Linux raise `net.core.rmem_max` and `net.core.wmem_max` to 8388608 |
 | `plain_rate_limited` above zero in a result file | A source sent more plain datagrams than its budget: 50 per second with no open session |

@@ -160,6 +160,8 @@ async fn publisher(
                         .map(|r| format!("{}:{}", r.label, r.kbps))
                         .collect(),
                     fps: None,
+                    input_args: Vec::new(),
+                    live: false,
                 },
                 bs_ingest::RenditionSpec::ladder(&specs),
             )

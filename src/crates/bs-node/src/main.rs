@@ -91,6 +91,16 @@ enum Cmd {
         /// Renditions for `--ingest ffmpeg`, lowest first: e.g. 480p:1500,720p:3000,1080p:6000.
         #[arg(long, default_value = "480p:1500,720p:3000,1080p:6000")]
         renditions: String,
+        /// The input is live: a camera, a screen or a network feed. ffmpeg then reads
+        /// frames as they arrive, and `--fps` defaults to 30.
+        #[arg(long)]
+        live: bool,
+        /// ffmpeg arguments placed before the input, in one string. A camera on macOS:
+        /// `--live --input-args "-f avfoundation -framerate 30" --input "0:0"`. An RTMP
+        /// listener for OBS: `--live --input-args "-listen 1" --input
+        /// rtmp://0.0.0.0:1935/live/stream`.
+        #[arg(long, allow_hyphen_values = true)]
+        input_args: Option<String>,
         /// Frame rate of the input (default: probe with ffprobe).
         #[arg(long)]
         fps: Option<u32>,
@@ -712,6 +722,8 @@ async fn main() -> anyhow::Result<()> {
             input,
             renditions,
             fps,
+            live,
+            input_args,
             nat,
         } => {
             let key_file = match (&identity, seed) {
@@ -741,6 +753,13 @@ async fn main() -> anyhow::Result<()> {
                             .map(|r| format!("{}:{}", r.label, r.kbps))
                             .collect(),
                         fps,
+                        input_args: input_args
+                            .as_deref()
+                            .unwrap_or("")
+                            .split_whitespace()
+                            .map(str::to_string)
+                            .collect(),
+                        live,
                     },
                     lad,
                 )

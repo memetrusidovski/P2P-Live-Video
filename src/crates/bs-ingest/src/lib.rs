@@ -18,4 +18,4 @@ pub mod ffmpeg;
 pub mod mp4;
 
 pub use container::{Record, RecordType};
-pub use ffmpeg::{FfmpegSource, RenditionSpec};
+pub use ffmpeg::{FfmpegSource, InputOptions, RenditionSpec};
