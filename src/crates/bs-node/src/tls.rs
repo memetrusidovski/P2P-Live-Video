@@ -23,6 +23,8 @@ use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 pub const ALPN: &[u8] = b"bitstream/1";
 /// The server name clients present (unused for verification).
 pub const SERVER_NAME: &str = "bitstream";
+/// Bytes of media datagrams queued per connection before the oldest is dropped.
+pub const DATAGRAM_SEND_BUFFER: usize = 512 << 10;
 /// Inbound handshakes in progress at once; more are refused.
 pub const MAX_INCOMING: usize = 256;
 /// Inbound handshakes in progress above which a new one must prove its source
@@ -241,7 +243,11 @@ pub fn quic_configs(
     ));
     transport.keep_alive_interval(Some(std::time::Duration::from_secs(3)));
     transport.datagram_receive_buffer_size(Some(8 << 20));
-    transport.datagram_send_buffer_size(8 << 20);
+    // WHY: quinn drops the oldest queued datagram when this buffer is full. A large
+    //      buffer on a slow uplink sends symbols of chunks that played long ago.
+    //      The current symbols wait behind them. 512 KiB holds about half a
+    //      second of the whole stream to one child.
+    transport.datagram_send_buffer_size(DATAGRAM_SEND_BUFFER);
     transport.max_concurrent_bidi_streams(64u32.into());
     // Symbols ride QUIC DATAGRAM frames, which are congestion controlled (RFC 9221).
     // A loss-based controller reads random link loss as congestion: at 2 % loss and

@@ -619,6 +619,10 @@ struct Driver {
 /// problem. Longer than one DHT round trip plus a retry, short enough to read as
 /// an answer to "is the link right?".
 const BOOTSTRAP_SILENCE: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long a closed session's connection stays open so queued frames are written.
+const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+/// How long a node that stops keeps running so its last frames leave.
+const QUIT_GRACE: std::time::Duration = std::time::Duration::from_millis(400);
 /// A viewer that played and then gets no media for this long reports the stream dead.
 const STREAM_SILENCE: std::time::Duration = std::time::Duration::from_secs(10);
 /// First words of the error a silent stream sets; a new chunk clears that error.
@@ -804,6 +808,7 @@ impl Driver {
             .duration_s
             .map(|d| self.epoch + std::time::Duration::from_secs_f64(d));
         let mut housekeeping = tokio::time::interval(std::time::Duration::from_secs(1));
+        let mut quitting = false;
         loop {
             let next_timer = self
                 .node
@@ -850,8 +855,17 @@ impl Driver {
                         }
                     }
                 }
-                _ = self.stop_rx.changed() => { self.feed(Input::Cmd(Command::Quit)); break; }
-                _ = end => break,
+                _ = self.stop_rx.changed(), if !quitting => {
+                    quitting = true;
+                    self.begin_quit();
+                }
+                _ = end => {
+                    if quitting {
+                        break;
+                    }
+                    quitting = true;
+                    self.begin_quit();
+                }
             }
             if self.node.state() == Lifecycle::Terminated && self.end_at.is_none() {
                 // Give in-flight frames a moment to leave.
@@ -868,6 +882,13 @@ impl Driver {
             std::fs::write(p, serde_json::to_string_pretty(&report)?)?;
         }
         Ok(report)
+    }
+
+    /// Tell the peers this node leaves, and keep the loop alive for `QUIT_GRACE` so
+    /// the DISCONNECT frames and the last receipts are written.
+    fn begin_quit(&mut self) {
+        self.feed(Input::Cmd(Command::Quit));
+        self.end_at = Some(tokio::time::Instant::now() + QUIT_GRACE);
     }
 
     /// Start ffmpeg ingest (publisher, after `start_delay_s`).
@@ -1496,7 +1517,17 @@ impl Driver {
             }
             Output::CloseSession(peer) => {
                 if let Some(c) = self.conns.remove(&peer) {
-                    c.conn.close(0u32.into(), b"");
+                    // WHY: The core queues a DISCONNECT and its last receipts right
+                    //      before it closes a session. Dropping the writers lets
+                    //      their tasks write what is queued. An immediate close
+                    //      cuts the connection under those frames.
+                    let Conn { conn, writers, .. } = c;
+                    drop(writers);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(CLOSE_GRACE).await;
+                        conn.close(0u32.into(), b"");
+                    });
+                    self.sync_peer_budget();
                 }
             }
             Output::Discover { .. } | Output::Register(_) | Output::StoreRecord(_) => {

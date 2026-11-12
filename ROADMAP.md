@@ -18,7 +18,7 @@ timer, default and defence assumes a LAN.
 
 | Area | Works today | Breaks on the Internet |
 |---|---|---|
-| Identity and bootstrap | One publisher that never restarts, viewers who know its address | A restart renumbers segments and viewers reject the stream forever; one home IP is the only contact |
+| Identity and bootstrap | One publisher that never restarts, viewers who know its address | A restart renumbers segments and viewers reject the stream forever; the share link names one contact |
 | NAT traversal | All mechanisms exist in `bs-core` and are wired through the driver | The rebind is once per process and has never run through a real NAT; a NATed publisher has nobody to register with; no relay exists for 30 minutes |
 | Transport and security | Mutual TLS over QUIC bound to the node identity, BBR, one demuxed socket | No rate limit on QUIC handshakes; no replay window; DHT answers reflect 5 to 6× toward a spoofed address |
 | Forest and repair | Join, shed, PULL zone, parity plumbing; PSR 0.01 % on a LAN at 3 % loss | The eviction deadline is seeded once from the probe and never follows the path; repair has no Deputy fast path |
@@ -220,4 +220,11 @@ The runbook's symptom table has a row for each.
 |---|---|
 | Several bootstrap contacts | `--bootstrap` takes a list. The node asks every contact, and a viewer given one dead and one live contact joins. The share link of the desktop app still names one |
 | Relay balance across trees | Filed as ISSUE-089 with measurements over eight seeds |
+
+## Round 9 (2026-11-12)
+
+| Bug | Result |
+|---|---|
+| The 8 MB datagram send buffer serves stale symbols | 512 KiB per connection: about half a second of the whole stream to one child. A twelve-viewer LAN swarm starves the same share of chunks as before |
+| Stop does not flush DISCONNECT frames | A node that stops, or reaches `--duration-s`, tells its peers and runs 400 ms more. A closed session's connection stays open 250 ms so queued frames are written. With a publisher stopped under eight viewers, all 24 parent links ended with `disconnect:Quit` |
 
