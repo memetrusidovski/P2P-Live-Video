@@ -583,11 +583,11 @@ impl Node {
         child: PeerAddr,
         seg: u32,
     ) -> bool {
-        // RULE: A receipt crosses the link once and its trigger, the first block of
-        //       the next segment, crosses it once before. On a long path both take
-        //       a share of the one-segment margin, and a loss on the control stream
-        //       adds a round trip. The deadline moves one segment per
-        //       `RECEIPT_GRACE_RTT` of round trip, so a far child is not evicted
+        // RULE: A receipt crosses the link once. Its trigger, the first block of the
+        //       next segment, crosses the link once before. On a long path both
+        //       take a share of the one-segment margin. A loss on the control
+        //       stream adds a round trip. The deadline moves one segment per
+        //       `RECEIPT_GRACE_RTT` of round trip. A far child is then not evicted
         //       as a free rider.
         let grace = self
             .session_rtt(child)

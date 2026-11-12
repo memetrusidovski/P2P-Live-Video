@@ -638,8 +638,8 @@ const BOOTSTRAP_SILENCE: std::time::Duration = std::time::Duration::from_secs(5)
 /// Share of the declared upload that media datagrams can use, percent. The rest
 /// carries control streams, PULL answers, DHT frames and QUIC acknowledgements.
 const UPLINK_MEDIA_PERCENT: u64 = 90;
-/// A datagram that must wait longer than this for the uplink is dropped, µs: two
-/// chunk periods, after which its chunk is in the PULL zone anyway.
+/// A datagram that must wait longer than this for the uplink is dropped, µs. The
+/// value is two chunk periods: after that the chunk is in the PULL zone anyway.
 const MAX_PACING_DELAY_US: u64 = 500_000;
 /// QUIC, UDP and IPv4 header bytes around one media datagram.
 const DATAGRAM_OVERHEAD_BYTES: u64 = 60;
@@ -1621,8 +1621,8 @@ impl Driver {
     ///     len: Datagram size, bytes.
     ///
     /// Returns:
-    ///     Microseconds from now at which to send, or `None` if the uplink is so far
-    ///     behind that the datagram would arrive too late to be of use.
+    ///     Microseconds from now at which to send. `None` if the uplink is so far
+    ///     behind that the datagram would arrive too late.
     fn pace_uplink(&mut self, delay_us: u64, len: usize) -> Option<u64> {
         let now = self.now().0;
         let rate_bps = self.cfg.upload_kbps as u64 * 1000 * UPLINK_MEDIA_PERCENT / 100;

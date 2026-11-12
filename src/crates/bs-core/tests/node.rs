@@ -1730,8 +1730,8 @@ fn forwarded_punch_is_answered_for_a_referrer_only() {
 }
 
 /// Ch5 §5.2.1: a receipt is due two segments after its segment. A child on a long
-/// path gets one more segment per 150 ms of round trip, so a far child whose
-/// receipts stop is evicted later than a near one.
+/// path gets one more segment per 150 ms of round trip. A far child whose receipts
+/// stop is therefore evicted later than a near one.
 #[test]
 fn a_far_child_gets_more_time_for_its_receipt() {
     let first_eviction_after_silence = |rtt_ms: Option<u64>| {
