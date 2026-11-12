@@ -186,7 +186,7 @@ pub struct DhtState {
     /// GET_PEERS requests sent, by target, so a late answer is still used.
     peers_asked: BTreeMap<PeerAddr, Instant>,
     /// Guardians that hold our current registration.
-    registered_with: BTreeSet<NodeId>,
+    pub(super) registered_with: BTreeSet<NodeId>,
     /// Their addresses, for the CONE keep-alive.
     registered_addrs: Vec<PeerAddr>,
     /// STORE_RECORD_ACKs collected since the last record (publisher).

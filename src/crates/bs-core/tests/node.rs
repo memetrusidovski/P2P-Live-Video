@@ -1655,3 +1655,70 @@ fn session_with_another_identity_is_not_asked_to_be_a_parent() {
         "the impostor is nobody's parent"
     );
 }
+
+/// App D §D.4.14: a forwarded punch makes the target PING the requester. The target
+/// answers a forward from a referrer only, and once per requester per second.
+#[test]
+fn forwarded_punch_is_answered_for_a_referrer_only() {
+    use bs_crypto::Difficulty;
+    use bs_wire::{PeerFlags, PeerRecord, WireAddr};
+
+    let mut h = Harness::new();
+    let (p, v) = pub_and_viewer(&mut h);
+    let params = h.params.clone();
+    let d = Difficulty {
+        c1: params.c1,
+        c2_min: params.c2_min,
+    };
+    let stream_id = h.node(v).stream_id();
+    let victim = addr(77);
+    let forward = |signer: &bs_crypto::Identity, from: std::net::SocketAddr, now: Instant| {
+        let requester = PeerRecord {
+            node_id: NodeId([0x42; 32]),
+            node_class: NodeClass::Leaf,
+            assigned_trees: TreeSet::EMPTY,
+            flags: PeerFlags::PUBLIC,
+            addr: WireAddr(victim),
+        };
+        let mut body = Vec::new();
+        body.extend_from_slice(&requester.node_id.0);
+        body.extend_from_slice(stream_id.as_bytes());
+        let nonce = signer.solve_dynamic(from.ip(), d.dynamic_required(2, NodeClass::Relay, false));
+        Frame::PunchRequest(PunchFrame::Forward(PunchForward {
+            validation: signer.validation_block(
+                FrameType::PUNCH_REQUEST,
+                nonce,
+                now.as_micros(),
+                &body,
+            ),
+            requester,
+            stream_id,
+        }))
+    };
+    let pings_to_victim = |h: &Harness| {
+        sends_of(h, v, FrameType::PING)
+            .iter()
+            .filter(|(_, to, _, _)| *to == victim)
+            .count()
+    };
+
+    // A stranger with a valid identity: no session with the viewer, not its guardian.
+    let stranger_addr = addr(9);
+    let stranger = identity_for(99, stranger_addr, &params);
+    let f = forward(&stranger, stranger_addr, h.now);
+    h.inject(v, stranger_addr, Channel::Udp, f);
+    assert_eq!(
+        pings_to_victim(&h),
+        0,
+        "a stranger cannot aim the viewer's PING"
+    );
+
+    // The publisher is the viewer's parent and guardian: a referrer.
+    let publisher = identity_for(1, p, &params);
+    let f = forward(&publisher, p, h.now);
+    h.inject(v, p, Channel::Udp, f);
+    assert_eq!(pings_to_victim(&h), 1, "a referrer's forward is answered");
+    let f = forward(&publisher, p, h.now);
+    h.inject(v, p, Channel::Udp, f);
+    assert_eq!(pings_to_victim(&h), 1, "one PING per requester per second");
+}

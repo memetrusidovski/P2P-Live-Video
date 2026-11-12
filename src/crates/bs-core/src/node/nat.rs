@@ -41,6 +41,10 @@ struct BridgeRequest {
     since: Instant,
 }
 
+/// Shortest time between two PINGs sent for one requester's forwarded punches.
+const PUNCH_INTERVAL: Duration = Duration::from_secs(1);
+/// Requesters answered inside one `PUNCH_INTERVAL`.
+const PUNCH_ANSWERED_MAX: usize = 64;
 /// PONG reflections kept to classify the NAT.
 const REFLECTIONS_MAX: usize = 32;
 
@@ -56,6 +60,10 @@ pub struct NatState {
     referrers: BTreeMap<NodeId, PeerAddr>,
     /// Punches sent, by target, so one candidate is punched once per round.
     punched: BTreeMap<NodeId, Instant>,
+    /// Requesters whose forwarded punch we answered with a PING, and when.
+    punch_answered: BTreeMap<NodeId, Instant>,
+    /// Forwarded punches refused: not from a referrer, or over the rate.
+    pub punches_refused: u64,
     /// Next keep-alive PING to the guardians (CONE registrants).
     next_keepalive: Option<Instant>,
     /// The RELAY_CAPABLE bit last registered, so a change re-registers.
@@ -556,6 +564,30 @@ impl Node {
                 {
                     return;
                 }
+                // SECURITY: A forward makes us send a PING to an address the sender
+                //           chose. Only a referrer can have named us to a joiner: a
+                //           guardian we registered with, or a peer we hold a session
+                //           with. Any other sender aims our PING at a third party.
+                let forwarder = fw.validation.node_id;
+                let referrer = self.dht.registered_with.contains(&forwarder)
+                    || self.sessions.get(&from).is_some_and(|s| s.open);
+                if !referrer {
+                    self.nat.punches_refused += 1;
+                    return;
+                }
+                // RULE: One PING per requester per `PUNCH_INTERVAL`, and a bounded
+                //       number of requesters remembered.
+                let now = self.now;
+                self.nat
+                    .punch_answered
+                    .retain(|_, t| now.duration_since(*t) < PUNCH_INTERVAL);
+                if self.nat.punch_answered.len() >= PUNCH_ANSWERED_MAX
+                    || self.nat.punch_answered.contains_key(&fw.requester.node_id)
+                {
+                    self.nat.punches_refused += 1;
+                    return;
+                }
+                self.nat.punch_answered.insert(fw.requester.node_id, now);
                 // The PING opens our mapping toward the requester; its PROBE follows.
                 self.send_ping(fw.requester.addr.0);
             }

@@ -50,7 +50,7 @@ Without these the first public stream is a denial-of-service target.
 - Per-source budgets for QUIC handshakes, and a cache of verified static puzzles so a repeated PING costs no proof-of-work check. Round 6 capped handshakes in progress and added QUIC Retry under load. 1 day.
 - Freshness and replay for pre-session frames: a UTC timestamp in the validation block with a ±60 s window and a per-NodeID LRU. Today the timestamp is process uptime. Spec change. 2 days.
 - Reflection defence for DHT RPCs: a cookie round or a response cap on first contact, so the home publisher does not amplify toward spoofed addresses. Spec change. 2 days.
-- Bans delivered to the transport, with prefix-keyed escalation; a punch forward that a third party cannot aim. Round 6 added the check of a session's NodeID against the record dialed. 2 days.
+- Bans delivered to the transport, with prefix-keyed escalation. The requester's address signed into the punch forward (a wire change). Rounds 6 and 13 added the NodeID check on dial and the referrer rule for forwards. 2 days.
 - A hostile-network harness for `bs-node`: spoofed flood, replay, Retry, simultaneous open, uplink throttle. Nothing exercises `tls.rs`, `transport.rs` or the driver against an attacker today. 3 days.
 
 ### 3. Repair at Internet RTTs (about 11 days)
@@ -267,4 +267,13 @@ The spec number is about two percent everywhere because it counts the chunks a v
 plays while it is still joining. The Ch8 target of 0.1 % cannot be met under that
 definition by any run with joins in it. Either the definition or the target needs a
 decision.
+
+## Round 13 (2026-11-12)
+
+| Bug | Result |
+|---|---|
+| PUNCH Forward lets any identity make any node PING any address | A node answers a forwarded punch only from a guardian it registered with or a peer it holds a session with, once per requester per second. Test `forwarded_punch_is_answered_for_a_referrer_only`. The four NAT gates still pass |
+
+The forward's signed body still omits the requester's address. A referrer can aim one
+PING per second per requester; a stranger can aim none.
 
