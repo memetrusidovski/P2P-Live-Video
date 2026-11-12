@@ -29,6 +29,7 @@
     <h1>BitStream Player</h1>
     <table>
       <tr><td>socket</td><td id="s-sock">connecting</td></tr>
+      <tr><td>health</td><td id="s-health">-</td></tr>
       <tr><td>node state</td><td id="s-state">-</td></tr>
       <tr><td>depth per tree</td><td id="s-depth">-</td></tr>
       <tr><td>playing rendition</td><td id="s-layer">-</td></tr>
@@ -339,6 +340,12 @@
   }
 
   function onStatus(s) {
+    if (s.health) {
+      const cls = { playing: 'ok', publishing: 'ok', connecting: '', degraded: 'warn', stalled: 'bad', failed: 'bad', ended: '' }[s.health] || '';
+      const h = $('s-health');
+      h.textContent = s.health + (s.health_reason ? ': ' + s.health_reason : '');
+      h.className = cls;
+    }
     $('s-state').textContent = s.state || '-';
     $('s-depth').textContent = (s.depth || []).map(d => d === 255 ? '-' : d).join(' / ');
     $('s-chunks').innerHTML = `${s.played} / <span class="${s.starved ? 'warn' : 'ok'}">${s.starved}</span>`;

@@ -615,6 +615,10 @@ struct Driver {
     last_error: Option<String>,
     /// When the last chunk with media reached the sink (viewers).
     last_media_at: Option<tokio::time::Instant>,
+    /// When the last chunk starved.
+    last_starved_at: Option<tokio::time::Instant>,
+    /// Layers subscribed at the last played chunk.
+    layers_subscribed_last: u8,
     /// Whether any frame ever arrived from the bootstrap contact.
     bootstrap_answered: bool,
     layers_complete_last: u8,
@@ -748,6 +752,8 @@ impl Driver {
             status_tx,
             last_error: None,
             last_media_at: None,
+            last_starved_at: None,
+            layers_subscribed_last: 0,
             bootstrap_answered: false,
             layers_complete_last: 0,
         })
@@ -840,6 +846,8 @@ impl Driver {
                 _ = housekeeping.tick() => {
                     self.check_bootstrap_silence();
                     self.check_stream_silence();
+                    // The health word depends on elapsed time, not on events alone.
+                    self.publish_status();
                     self.feed_rtt_samples();
                     self.sync_peer_budget();
                 }
@@ -992,7 +1000,19 @@ impl Driver {
                 },
             )
         };
+        let (health, health_reason) = bs_player_api::health(&bs_player_api::HealthInputs {
+            publisher: is_pub,
+            terminated: self.node.state() == Lifecycle::Terminated,
+            started: self.first_chunk.is_some(),
+            last_error: self.last_error.as_deref(),
+            media_age_s: self.last_media_at.map(|t| t.elapsed().as_secs_f64()),
+            starved_age_s: self.last_starved_at.map(|t| t.elapsed().as_secs_f64()),
+            layers_complete: self.layers_complete_last,
+            layers_wanted: self.layers_subscribed_last,
+        });
         let st = bs_player_api::Status {
+            health: health.to_string(),
+            health_reason,
             role: if is_pub {
                 "publisher".into()
             } else {
@@ -1702,9 +1722,11 @@ impl Driver {
                 if *ok {
                     self.ok += 1;
                 }
+                self.layers_subscribed_last = *layers_subscribed;
                 if self.first_chunk.is_some() {
                     self.steady_played += 1;
                     if !ok {
+                        self.last_starved_at = Some(tokio::time::Instant::now());
                         self.steady_starved += 1;
                         warn!("starved: segment {segment} chunk {chunk} ({layers_complete}/{layers_subscribed} layers)");
                     }

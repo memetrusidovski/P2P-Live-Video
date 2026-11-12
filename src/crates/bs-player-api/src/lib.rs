@@ -98,6 +98,79 @@ pub struct Status {
     /// an ingest process that did not start. Cleared on recovery.
     #[serde(default)]
     pub last_error: Option<String>,
+    /// What the user needs to know, in one word: `connecting`, `playing`,
+    /// `degraded`, `stalled`, `ended` or `failed` for a viewer, and `publishing`,
+    /// `ended` or `failed` for a publisher.
+    #[serde(default)]
+    pub health: String,
+    /// Why the health is not `playing` or `publishing`, in a sentence.
+    #[serde(default)]
+    pub health_reason: Option<String>,
+}
+
+/// What `health` is derived from.
+#[derive(Debug, Clone, Default)]
+pub struct HealthInputs<'a> {
+    /// The node publishes the stream.
+    pub publisher: bool,
+    /// The node reached its final state.
+    pub terminated: bool,
+    /// A first chunk was played.
+    pub started: bool,
+    /// See `Status::last_error`.
+    pub last_error: Option<&'a str>,
+    /// Seconds since the last chunk with media, if one arrived.
+    pub media_age_s: Option<f64>,
+    /// Seconds since the last starved chunk, if one starved.
+    pub starved_age_s: Option<f64>,
+    /// Complete layers in the last chunk.
+    pub layers_complete: u8,
+    /// Layers the viewer asked for.
+    pub layers_wanted: u8,
+}
+
+/// A viewer with no media for this long is stalled, seconds.
+pub const STALLED_AFTER_S: f64 = 2.0;
+/// A starved chunk marks the viewer degraded for this long, seconds.
+pub const DEGRADED_FOR_S: f64 = 5.0;
+
+/// The health word and its reason for the given inputs.
+pub fn health(i: &HealthInputs<'_>) -> (&'static str, Option<String>) {
+    let error = i.last_error.map(str::to_string);
+    if i.terminated {
+        return ("ended", error);
+    }
+    if i.publisher {
+        return match error {
+            Some(e) => ("failed", Some(e)),
+            None => ("publishing", None),
+        };
+    }
+    if !i.started {
+        return match error {
+            Some(e) => ("failed", Some(e)),
+            None => ("connecting", None),
+        };
+    }
+    if let Some(age) = i.media_age_s.filter(|a| *a > STALLED_AFTER_S) {
+        return (
+            "stalled",
+            Some(error.unwrap_or_else(|| format!("no media for {age:.0} s"))),
+        );
+    }
+    if i.starved_age_s.is_some_and(|a| a <= DEGRADED_FOR_S) {
+        return ("degraded", Some("chunks arrive incomplete".into()));
+    }
+    if i.layers_complete < i.layers_wanted {
+        return (
+            "degraded",
+            Some(format!(
+                "playing {} of {} layers",
+                i.layers_complete, i.layers_wanted
+            )),
+        );
+    }
+    ("playing", None)
 }
 
 /// One layer of the STREAM_DESCRIPTOR as the page sees it.
@@ -383,6 +456,84 @@ async fn ws_session(mut sock: WebSocket, s: Arc<PlayerState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_words() {
+        let base = HealthInputs {
+            started: true,
+            media_age_s: Some(0.2),
+            layers_complete: 2,
+            layers_wanted: 2,
+            ..Default::default()
+        };
+        assert_eq!(health(&base), ("playing", None));
+        let h = |i: HealthInputs<'_>| health(&i).0;
+        assert_eq!(
+            h(HealthInputs {
+                started: false,
+                ..Default::default()
+            }),
+            "connecting"
+        );
+        assert_eq!(
+            h(HealthInputs {
+                started: false,
+                last_error: Some("bootstrap x: no answer in 5 s"),
+                ..Default::default()
+            }),
+            "failed"
+        );
+        assert_eq!(
+            h(HealthInputs {
+                media_age_s: Some(3.0),
+                ..base.clone()
+            }),
+            "stalled"
+        );
+        assert_eq!(
+            h(HealthInputs {
+                starved_age_s: Some(1.0),
+                ..base.clone()
+            }),
+            "degraded"
+        );
+        assert_eq!(
+            h(HealthInputs {
+                starved_age_s: Some(30.0),
+                ..base.clone()
+            }),
+            "playing"
+        );
+        assert_eq!(
+            health(&HealthInputs {
+                layers_complete: 1,
+                ..base.clone()
+            }),
+            ("degraded", Some("playing 1 of 2 layers".into()))
+        );
+        assert_eq!(
+            h(HealthInputs {
+                terminated: true,
+                ..base.clone()
+            }),
+            "ended"
+        );
+        assert_eq!(
+            h(HealthInputs {
+                publisher: true,
+                ..Default::default()
+            }),
+            "publishing"
+        );
+        assert_eq!(
+            h(HealthInputs {
+                publisher: true,
+                last_error: Some("ingest: ffmpeg ended with signal: 9"),
+                ..Default::default()
+            }),
+            "failed"
+        );
+    }
 
     #[test]
     fn frame_layout() {

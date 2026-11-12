@@ -72,11 +72,11 @@ window, because it is a full probe round plus a 1.5 RTT handshake.
 - A reachability self-check and an uplink probe at publish time, and a health view of the encoder and the swarm on the publisher page. Since round 11 `--stun` looks up the public address and the join commands carry it. 4 days.
 - Persistence and logs: a state directory, settings, a log file with rotation, periodic result snapshots. 2 days.
 
-### 5. A viewer who is not a developer (about 27 days)
+### 5. A viewer who is not a developer (about 26 days)
 
 - Player controls and a latency readout. Round 4 did switching, hole jumping, error recovery and buffer trim. 1 day.
 - Per-rendition subscription so a viewer downloads the rendition it watches, not every layer and two audio tracks; a 240p or audio-only floor in the default ladder. 5 days.
-- A viewer health model: connecting, playing, degraded, stalled, ended, failed, with a reason, rendered by the page and the desktop app. Since round 7 a dead publisher sets an error in the status. 2 days.
+- The health word of round 16 rendered by the desktop app, with advice per reason. 1 day.
 - A token for a player API bound to a non-loopback address: anyone on the LAN can still open the page (the Origin check of round 4 stops other web sites only). 1 day.
 - Mobile viewer: `bs-node` built for iOS and Android inside a thin shell, or `bs-core` in WebAssembly as a WebTransport leaf behind public relays. A phone browser cannot view at all today, because the page is a loopback client of a local node. This is the largest single item and the one most users will judge the product by. 20 days.
 
@@ -98,7 +98,7 @@ change, through [`FIXER-AGENT.md`](FIXER-AGENT.md).
 | 7 to 10 | Block 4, the player half of block 5 | A broadcaster streams a camera from behind a NAT to ten viewers on three networks without editing a command line; rendition switches are clean |
 | 11 to 16 | Mobile viewer, block 6 | A phone on cellular watches the stream; the open tickets are closed or accepted with a recorded reason |
 
-About 85 engineer-days in all. One person reaches the first gate in a month and the
+About 84 engineer-days in all. One person reaches the first gate in a month and the
 last in about six; three people reach the last in two to three months, because blocks
 2, 3 and 5 are independent of each other.
 
@@ -302,4 +302,11 @@ the old 5.0 s limit passed by seed luck.
 | One decode for every rendition | The ingest runs one ffmpeg process that decodes the input once and encodes each rendition to its own loopback connection. One process per rendition could not share a camera or a listening socket, and the processes drifted apart. Test: two renditions have their keyframes in the same chunks |
 | Live inputs | `bsnode publish --live --input-args "<ffmpeg args>"` opens a camera, a screen or an RTMP listener. Checked end to end with ffmpeg's test pattern as a real-time source. A real camera and OBS are untested |
 | A bad input | ffmpeg that cannot open its input fails the start with an error |
+
+## Round 16 (2026-11-12)
+
+| Work | Result |
+|---|---|
+| Viewer health | The status carries one word, `connecting`, `playing`, `degraded`, `stalled`, `ended` or `failed`, and a reason. The web page shows it. A killed publisher reads `stalled: no media for 9 s` |
+| Uplink | The publisher warns when it runs on the assumed 100 Mbps uplink. The runbook says to pass `--upload-kbps` on a home connection |
 
