@@ -24,6 +24,10 @@ fleet/report.py --profile lossy           # writes results/fleet/verdict.json, e
 fleet/down.sh
 ```
 
+`fleet/down.sh` saves every container's log and exit status to
+`results/fleet/logs/<run id>.log` and `.status` before it removes the containers.
+
+
 The hash check compares each viewer that started at segment 1 with the publisher's whole
 stream. The stream must therefore end before the viewers do. `--max-bytes` bounds it
 (25 MB is about a minute of the sample) and `--duration` outlasts it.

@@ -2,6 +2,9 @@
 # Bring up one publisher and N viewers under a netem profile.
 #   fleet/up.sh --viewers 20 --profile lossy [--file path/to/sample.mp4] [--duration 60] [--seed 1] [--no-ports]
 set -euo pipefail
+# WHY: The caller names --file relative to its own directory. Resolve it before the
+#      cd below, or a path such as fleet/media/sample.mp4 is looked up inside fleet/.
+CALLER_DIR="$PWD"
 cd "$(dirname "${BASH_SOURCE[0]}")"
 VIEWERS=5; PROFILE=clean; FILE=""; DURATION=60; SEED=1; MAX_BYTES=""; INGEST=file; RENDITIONS="360p:800,720p:2500"
 PORTS=1
@@ -21,7 +24,12 @@ while [ $# -gt 0 ]; do
 done
 [ -f "profiles/$PROFILE.env" ] || { echo "unknown profile $PROFILE" >&2; exit 2; }
 mkdir -p media
-if [ -n "$FILE" ]; then cp "$FILE" media/sample.mp4; fi
+if [ -n "$FILE" ]; then
+  case "$FILE" in /*) ;; *) FILE="$CALLER_DIR/$FILE" ;; esac
+  [ -f "$FILE" ] || { echo "no such file: $FILE" >&2; exit 2; }
+  # The sample may already be the file in media/: cp refuses to copy a file onto itself.
+  [ "$FILE" -ef media/sample.mp4 ] || cp "$FILE" media/sample.mp4
+fi
 [ -f media/sample.mp4 ] || { echo "no media/sample.mp4; pass --file" >&2; exit 2; }
 # Viewers are checked against the publisher's reported source hash by report.py.
 EXPECT_HASH=""

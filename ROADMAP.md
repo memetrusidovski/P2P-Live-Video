@@ -310,3 +310,27 @@ the old 5.0 s limit passed by seed luck.
 | Viewer health | The status carries one word, `connecting`, `playing`, `degraded`, `stalled`, `ended` or `failed`, and a reason. The web page shows it. A killed publisher reads `stalled: no media for 9 s` |
 | Uplink | The publisher warns when it runs on the assumed 100 Mbps uplink. The runbook says to pass `--upload-kbps` on a home connection |
 
+## Round 17 (2026-11-12)
+
+The Docker fleet gate (twenty viewers, 2 % loss, 40 ms delay, a third of the viewers
+killed at 30 s) ran for the first time since round 1.
+
+| Run | Verdict | Starvation | Notes |
+|---|---|---|---|
+| 1 | fail | 9.4 % | Every viewer stopped after 12 chunks and the publisher left no result file |
+| 2 | pass | 0.75 % | |
+| 3 | pass | 1.7 % | |
+| 4 | pass | 1.1 % | |
+
+Run 1 is unexplained. The pattern fits a publisher whose event loop stopped three
+seconds into the stream, but its log was gone with the container, three reruns passed,
+and reading the code found no cause. `fleet/down.sh` now saves every container's log
+and exit status before teardown, so a repeat can be diagnosed.
+
+The passing runs sit near the 2 % limit. There is no earlier number to compare with:
+the October result folders have another layout.
+
+The launcher also had a path bug: `scripts/check.sh` passes it
+`fleet/media/sample.mp4`, which it looked up after changing into `fleet/`. The fleet
+gate of the check script could not have started. Fixed.
+
