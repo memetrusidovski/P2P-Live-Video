@@ -13,6 +13,9 @@ use bs_node::{Media, RunConfig};
 use bs_wire::{NodeClass, StreamId};
 use clap::{Parser, Subcommand};
 
+/// Upload a publisher assumes when `--upload-kbps` is not given: a wired LAN.
+const DEFAULT_PUBLISHER_UPLOAD_KBPS: u32 = 100_000;
+
 #[derive(Parser)]
 #[command(name = "bsnode", about = "BitStream peer", version)]
 struct Cli {
@@ -59,8 +62,8 @@ enum Cmd {
         /// Forest size M.
         #[arg(long, default_value_t = 3)]
         forest: u8,
-        /// Upload capacity, kbps.
-        #[arg(long, default_value_t = 100_000)]
+        /// Upload capacity, kbps. The publisher sizes its child slots from it.
+        #[arg(long, default_value_t = DEFAULT_PUBLISHER_UPLOAD_KBPS)]
         upload_kbps: u32,
         /// Derive the keypair from this seed and the port. Every publisher with the
         /// same seed and port shares one key: for tests and fleets only.
@@ -805,6 +808,14 @@ async fn main() -> anyhow::Result<()> {
                 h.node_id.short()
             );
             print_join_hint(&h);
+            if upload_kbps == DEFAULT_PUBLISHER_UPLOAD_KBPS {
+                eprintln!(
+                    "upload capacity assumed {} Mbps: on a home connection pass \
+                     --upload-kbps with the real uplink, or the publisher takes more \
+                     children than it can feed",
+                    upload_kbps / 1000
+                );
+            }
             stop_on_signal(vec![h.stop.clone()]);
             let report = h.done.await??;
             println!("{}", serde_json::to_string_pretty(&report)?);

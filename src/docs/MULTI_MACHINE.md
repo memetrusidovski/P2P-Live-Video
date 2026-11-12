@@ -140,7 +140,11 @@ with `--advertise-ip <public ip>`. To have the publisher look the address up, pa
 STUN server: `--stun stun.l.google.com:19302`. It sends one request to that server,
 prints the public address, and warns if the router maps the port to another one. A
 publisher that advertises its LAN address to viewers on other networks is rejected by
-all of them. A viewer behind a NAT binds its identity to the
+all of them.
+
+Tell every node its real uplink with `--upload-kbps`. The publisher assumes 100 Mbps
+and a viewer 20 Mbps. A node that overstates its uplink accepts more children than it
+can feed, and they starve. A viewer behind a NAT binds its identity to the
 address the publisher's first PONG reflects, re-registers under it, and logs
 `address rebound to <ip:port>`. From then on the publisher accepts its frames. Two
 viewers behind different NATs reach each other only through a mapping the NAT keeps
