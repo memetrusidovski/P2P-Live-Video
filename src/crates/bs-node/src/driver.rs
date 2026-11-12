@@ -256,6 +256,9 @@ pub struct RunReport {
     /// Held plain datagrams dropped when the hold queue overflowed.
     #[serde(default)]
     pub plain_sends_dropped: u64,
+    /// Media datagrams dropped because the node's uplink budget was too far behind.
+    #[serde(default)]
+    pub datagrams_paced_out: u64,
     /// Plain datagrams refused by the per-source budgets.
     #[serde(default)]
     pub plain_rate_limited: u64,
@@ -617,6 +620,10 @@ struct Driver {
     last_media_at: Option<tokio::time::Instant>,
     /// When the last chunk starved.
     last_starved_at: Option<tokio::time::Instant>,
+    /// Driver clock, µs, at which the uplink budget is free for the next datagram.
+    uplink_free_at: u64,
+    /// Media datagrams dropped because the uplink budget was too far behind.
+    datagrams_paced_out: u64,
     /// Layers subscribed at the last played chunk.
     layers_subscribed_last: u8,
     /// Whether any frame ever arrived from the bootstrap contact.
@@ -628,6 +635,14 @@ struct Driver {
 /// problem. Longer than one DHT round trip plus a retry, short enough to read as
 /// an answer to "is the link right?".
 const BOOTSTRAP_SILENCE: std::time::Duration = std::time::Duration::from_secs(5);
+/// Share of the declared upload that media datagrams can use, percent. The rest
+/// carries control streams, PULL answers, DHT frames and QUIC acknowledgements.
+const UPLINK_MEDIA_PERCENT: u64 = 90;
+/// A datagram that must wait longer than this for the uplink is dropped, µs: two
+/// chunk periods, after which its chunk is in the PULL zone anyway.
+const MAX_PACING_DELAY_US: u64 = 500_000;
+/// QUIC, UDP and IPv4 header bytes around one media datagram.
+const DATAGRAM_OVERHEAD_BYTES: u64 = 60;
 /// Peers remembered so that a rejected validation block is logged once per peer.
 const REJECTED_PEERS_MAX: usize = 4096;
 /// How long a closed session's connection stays open so queued frames are written.
@@ -753,6 +768,8 @@ impl Driver {
             last_error: None,
             last_media_at: None,
             last_starved_at: None,
+            uplink_free_at: 0,
+            datagrams_paced_out: 0,
             layers_subscribed_last: 0,
             bootstrap_answered: false,
             layers_complete_last: 0,
@@ -1478,6 +1495,10 @@ impl Driver {
                             Ok(b) => b,
                             Err(_) => return,
                         };
+                        let Some(delay) = self.pace_uplink(delay, bytes.len()) else {
+                            self.datagrams_paced_out += 1;
+                            return;
+                        };
                         if delay == 0 {
                             if conn.send_datagram(bytes).is_err() {
                                 self.datagram_send_errors += 1;
@@ -1586,6 +1607,36 @@ impl Driver {
                 );
             }
         }
+    }
+
+    /// Fit one media datagram into the node's uplink budget.
+    ///
+    /// WHY: Each QUIC connection paces itself, and nothing limits their sum. A node
+    ///      with several children sends them one chunk at the same instant. On an
+    ///      uplink near its capacity the burst queues, round trips stretch to
+    ///      seconds, and every timer of the protocol fires.
+    ///
+    /// Args:
+    ///     delay_us: Microseconds from now at which the core wants the datagram sent.
+    ///     len: Datagram size, bytes.
+    ///
+    /// Returns:
+    ///     Microseconds from now at which to send, or `None` if the uplink is so far
+    ///     behind that the datagram would arrive too late to be of use.
+    fn pace_uplink(&mut self, delay_us: u64, len: usize) -> Option<u64> {
+        let now = self.now().0;
+        let rate_bps = self.cfg.upload_kbps as u64 * 1000 * UPLINK_MEDIA_PERCENT / 100;
+        if rate_bps == 0 {
+            return Some(delay_us);
+        }
+        let start = (now + delay_us).max(self.uplink_free_at);
+        if start - now > MAX_PACING_DELAY_US {
+            return None;
+        }
+        // Wire size: the datagram plus QUIC, UDP and IP headers.
+        let wire_bits = (len as u64 + DATAGRAM_OVERHEAD_BYTES) * 8;
+        self.uplink_free_at = start + wire_bits * 1_000_000 / rate_bps;
+        Some(start - now)
     }
 
     fn writer(&mut self, to: SocketAddr, channel: Channel) -> Option<mpsc::UnboundedSender<Bytes>> {
@@ -1910,6 +1961,7 @@ impl Driver {
                 .sock
                 .plain_dropped
                 .load(std::sync::atomic::Ordering::Relaxed),
+            datagrams_paced_out: self.datagrams_paced_out,
             plain_rate_limited: self
                 .sock
                 .plain_rate_limited

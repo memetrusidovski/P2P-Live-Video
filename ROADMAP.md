@@ -53,7 +53,7 @@ Without these the first public stream is a denial-of-service target.
 - Bans delivered to the transport, with prefix-keyed escalation. The requester's address signed into the punch forward (a wire change). Rounds 6 and 13 added the NodeID check on dial and the referrer rule for forwards. 2 days.
 - A hostile-network harness for `bs-node`: spoofed flood, replay, Retry, simultaneous open, uplink throttle. Nothing exercises `tls.rs`, `transport.rs` or the driver against an attacker today. 3 days.
 
-### 3. Repair at Internet RTTs (about 19 days)
+### 3. Repair at Internet RTTs (about 16 days)
 
 With timers scaled, repair still costs 1.8 s median at 250 ms RTT against a 2.0 s PULL
 window, because it is a full probe round plus a 1.5 RTT handshake.
@@ -63,7 +63,7 @@ window, because it is a full probe round plus a 1.5 RTT handshake.
 - A mobile profile in the simulator's Internet model: an address change mid-run and jitter bursts. Round 2 added the rest. 1 day.
 - A decision on which starvation number the gates use, and the same number in `fleet/report.py`. The simulator reports both since round 12. 1 day.
 - Keepalive and punch robustness: retransmit the punch forward and the punch PING once, keep mappings toward non-guardian referrers. 1 day.
-- Mobile conditions: a capped, lossy uplink. The cellular fleet profile fails (Round 18). Needs a send budget per node that all connections share, a PULL path that works at 8 % loss, and a simulator network model with uplink queues and reliable-stream delay. 8 days.
+- Mobile conditions: 8 % loss still starves 3 to 8 % of chunks (Round 18). Needs a PULL path that is not choked under loss, a decision on the 30 % parity ceiling, and a simulator network model with uplink queues and reliable-stream delay. 5 days.
 
 ### 4. A broadcaster who is not a developer (about 15 days)
 
@@ -99,7 +99,7 @@ change, through [`FIXER-AGENT.md`](FIXER-AGENT.md).
 | 7 to 10 | Block 4, the player half of block 5 | A broadcaster streams a camera from behind a NAT to ten viewers on three networks without editing a command line; rendition switches are clean |
 | 11 to 16 | Mobile viewer, block 6 | A phone on cellular watches the stream; the open tickets are closed or accepted with a recorded reason |
 
-About 92 engineer-days in all. One person reaches the first gate in a month and the
+About 89 engineer-days in all. One person reaches the first gate in a month and the
 last in about six; three people reach the last in two to three months, because blocks
 2, 3 and 5 are independent of each other.
 
@@ -384,4 +384,18 @@ from the smaller number. The ladder now carries video plus audio plus 3 %.
 
 The mobile viewer of block 5 depends on this: a phone on cellular is the capped,
 lossy case. Block 3 has a new item for it.
+
+Two fixes followed, and the cellular profile ran three more times:
+
+- **One uplink budget per node.** Media datagrams of all connections pass one pacer sized at 90 % of the declared upload. A datagram that would wait over 500 ms is dropped.
+- **Receipt deadline scaled by round trip.** A child gets one more segment per 150 ms of round trip, up to three. At 300 ms with loss, receipts arrived late, three misses evicted the child, and the eviction banned its address prefix for a minute. In the fleet every container shares one prefix, so one eviction locked everyone out of that parent.
+
+| Cellular profile | Starved chunks | Viewers that played to the end |
+|---|---|---|
+| Before | 35 to 93 % | 2 of 12 |
+| After | 3.3, 5.7 and 7.9 % | 12 of 12 in each run |
+
+The limit for the profile is 5 %, so it still fails two runs of three. What is left
+is the loss itself: the same 5 to 8 % that loss alone costs. The lossy gate passed
+three more runs at about 1 %.
 

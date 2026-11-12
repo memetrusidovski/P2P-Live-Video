@@ -119,6 +119,11 @@ pub struct IncentiveState {
 
 pub(super) use crate::dht::prefix_key;
 
+/// Round trip to a child per extra segment of receipt deadline.
+const RECEIPT_GRACE_RTT: crate::time::Duration = crate::time::Duration::from_millis(150);
+/// Most extra segments a far child gets for its receipt.
+const RECEIPT_GRACE_MAX: u32 = 3;
+
 /// Parity for a reported loss byte (Ch4 §4.2.2).
 pub fn parity_for_loss(loss_byte: u8) -> u16 {
     bs_media::fec::parity_for_loss(loss_byte as f64 / 255.0)
@@ -578,6 +583,16 @@ impl Node {
         child: PeerAddr,
         seg: u32,
     ) -> bool {
+        // RULE: A receipt crosses the link once and its trigger, the first block of
+        //       the next segment, crosses it once before. On a long path both take
+        //       a share of the one-segment margin, and a loss on the control stream
+        //       adds a round trip. The deadline moves one segment per
+        //       `RECEIPT_GRACE_RTT` of round trip, so a far child is not evicted
+        //       as a free rider.
+        let grace = self
+            .session_rtt(child)
+            .map(|rtt| (rtt.0 / RECEIPT_GRACE_RTT.0).min(RECEIPT_GRACE_MAX as u64) as u32)
+            .unwrap_or(0);
         let e = self
             .incentive
             .child_receipts
@@ -594,7 +609,7 @@ impl Node {
         }
         let mut newly_missed = 0u8;
         for k in (e.checked_up_to + 1)..=seg {
-            let due = k.saturating_sub(2);
+            let due = k.saturating_sub(2 + grace);
             if due == 0 {
                 continue;
             }

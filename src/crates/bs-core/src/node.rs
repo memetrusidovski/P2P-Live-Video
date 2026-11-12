@@ -93,6 +93,8 @@ struct Session {
     last_rx: Instant,
     ping_sent_at: Option<Instant>,
     session_key: Option<[u8; 32]>,
+    /// Round trip the transport last reported for the session.
+    rtt: Option<Duration>,
 }
 
 /// A round trip longer than this value is not a sample: the answer was to an
@@ -432,6 +434,9 @@ impl Node {
             Input::SessionClosed { peer } => self.on_session_closed(peer, "session closed"),
             Input::RttSample { peer, rtt } => {
                 if rtt > Duration::ZERO && rtt < RTT_SAMPLE_MAX {
+                    if let Some(s) = self.sessions.get_mut(&peer) {
+                        s.rtt = Some(rtt);
+                    }
                     self.note_rtt(rtt);
                     self.parent_rtt_sample(peer, rtt);
                     // RULE: The transport reports a smoothed round trip. Its samples
@@ -2037,6 +2042,7 @@ impl Node {
             last_rx: self.now,
             ping_sent_at: None,
             session_key: None,
+            rtt: None,
         });
         if !s.open {
             self.out.push_back(Output::OpenSession(addr));
@@ -2050,6 +2056,7 @@ impl Node {
             last_rx: self.now,
             ping_sent_at: None,
             session_key: None,
+            rtt: None,
         });
         s.open = true;
         s.node_id = Some(node_id);
@@ -2104,6 +2111,11 @@ impl Node {
             self.membership_send_neighbor(peer);
         }
         self.nat_session_opened(peer);
+    }
+
+    /// Round trip the transport last reported for the session with `peer`.
+    pub(super) fn session_rtt(&self, peer: PeerAddr) -> Option<Duration> {
+        self.sessions.get(&peer).and_then(|s| s.rtt)
     }
 
     /// Count and report a session whose NodeID differs from the record dialed.

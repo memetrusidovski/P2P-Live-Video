@@ -1728,3 +1728,39 @@ fn forwarded_punch_is_answered_for_a_referrer_only() {
     h.inject(v, p, Channel::Udp, f);
     assert_eq!(pings_to_victim(&h), 1, "one PING per requester per second");
 }
+
+/// Ch5 §5.2.1: a receipt is due two segments after its segment. A child on a long
+/// path gets one more segment per 150 ms of round trip, so a far child whose
+/// receipts stop is evicted later than a near one.
+#[test]
+fn a_far_child_gets_more_time_for_its_receipt() {
+    let first_eviction_after_silence = |rtt_ms: Option<u64>| {
+        let mut h = Harness::new();
+        let (p, v) = pub_and_viewer(&mut h);
+        h.run_for(secs(4.0));
+        if let Some(ms) = rtt_ms {
+            h.feed(
+                p,
+                Input::RttSample {
+                    peer: v,
+                    rtt: Duration::from_millis(ms),
+                },
+            );
+        }
+        h.drop_types.insert((v, FrameType::PROOF_OF_UPLOAD));
+        let silent_from = h.now;
+        for _ in 0..120 {
+            h.run_for(secs(0.1));
+            if h.node(p).deadline_evictions() > 0 {
+                return h.now.duration_since(silent_from);
+            }
+        }
+        panic!("a silent child was never evicted");
+    };
+    let near = first_eviction_after_silence(None);
+    let far = first_eviction_after_silence(Some(320));
+    assert!(
+        far >= near + secs(1.8),
+        "320 ms of round trip buys two segments: near {near:?}, far {far:?}"
+    );
+}
