@@ -27,6 +27,7 @@ use crate::time::{Duration, Instant};
 use crate::Lifecycle;
 
 mod audit;
+mod balance;
 mod dht;
 mod incentive;
 mod membership;
@@ -136,6 +137,8 @@ pub struct Node {
     next_liveness: Instant,
     /// Next greedy upward-migration evaluation (Ch1 §1.2.3).
     next_migrate: Instant,
+    /// Balance grant: a second tree taken when it is short of relays (ISSUE-089).
+    balance: balance::BalanceState,
     started_at: Option<Instant>,
     first_ok_chunk: bool,
     manifests_forwarded: HashSet<(u32, u8, PeerAddr)>,
@@ -248,6 +251,7 @@ impl Node {
             vb_rejected: 0,
             next_liveness: Instant::ZERO,
             next_migrate: Instant::ZERO,
+            balance: balance::BalanceState::default(),
             started_at: None,
             first_ok_chunk: false,
             manifests_forwarded: HashSet::new(),
@@ -398,6 +402,7 @@ impl Node {
         m(self.nat_next_timer());
         m(self.incentive_next_timer());
         m(Some(self.next_migrate));
+        m(Some(self.balance.next_round));
         for tree in &self.trees {
             match &tree.join {
                 JoinState::Probing { deadline, .. } => m(Some(*deadline)),
@@ -562,6 +567,7 @@ impl Node {
             // Bridge slots are paid from the bridge budget, on top of the tree's own.
             t.k_v = self.params.slots(upload, assigned_count, b, parity) + bridge_counts[i];
         }
+        self.balance_split_slots(&matrix, upload, parity, &bridge_counts);
         // A K_v(m) that fell (parity rose, or the mean moved with the child set) is
         // honoured by draining, never by dropping (Ch1 §1.2.1 §1.3).
         let ids: Vec<TreeId> = self
@@ -696,7 +702,15 @@ impl Node {
         let assigned = if self.is_ingress() {
             TreeSet::first_n(m)
         } else if self.effective_class() == NodeClass::Relay && !self.is_source() {
-            TreeSet::single(rendezvous::assigned_tree(&self.node_id(), m))
+            let rank = rendezvous::rendezvous_rank(&self.node_id(), m);
+            let mut set = TreeSet::single(rank[0]);
+            // RULE: A balance grant covers the second-ranked tree only, and only while
+            //       the node receives that tree.
+            match self.balance.granted {
+                Some(g) if rank.get(1) == Some(&g) && subscribed.contains(g) => set.insert(g),
+                _ => self.balance.granted = None,
+            }
+            set
         } else {
             TreeSet::EMPTY
         };
@@ -1074,6 +1088,22 @@ impl Node {
         let proved = self.sessions.get(&addr).and_then(|s| s.node_id);
         if open && proved.is_some_and(|id| id != rec.node_id) {
             self.reject_impostor(addr);
+            self.request_next(tree, queue, saturated);
+            return;
+        }
+        // INVARIANT: The trees are edge-disjoint. One relay is our parent in one tree
+        //            at most, the source excepted. A relay that serves two trees is
+        //            a candidate in both, and two joins can run at once.
+        let taken = !rec.flags.source
+            && self.trees.iter().any(|t| {
+                t.id != tree
+                    && (t.parent.as_ref().map(|p| p.node_id) == Some(rec.node_id)
+                        || matches!(
+                            &t.join,
+                            JoinState::Requesting { current_id, .. } if *current_id == rec.node_id
+                        ))
+            });
+        if taken {
             self.request_next(tree, queue, saturated);
             return;
         }
@@ -1582,9 +1612,13 @@ impl Node {
                 // tree can grow interior nodes. Verified against the rendezvous rule, not
                 // the self-declared bit alone. One displacement in progress per tree.
                 let m = self.matrix.as_ref().map(|x| x.m()).unwrap_or(0);
+                // A balance grant makes the second-ranked tree a relay duty too.
                 let requester_relays_m = n.node_class == NodeClass::Relay
                     && n.assigned_trees.contains(n.tree_id)
-                    && rendezvous::assigned_tree(&n.sender, m) == n.tree_id;
+                    && rendezvous::rendezvous_rank(&n.sender, m)
+                        .iter()
+                        .take(2)
+                        .any(|t| *t == n.tree_id);
                 let draining = t.children.values().any(|c| c.draining_until.is_some());
                 // Only a serving parent can displace: an unparented relay has nothing
                 // to push and an undefined depth.
@@ -2959,6 +2993,7 @@ impl Node {
         self.dht_timers();
         self.incentive_timers();
         self.migration_round();
+        self.balance_round();
         self.forest_timers();
         self.nat_timers();
         self.ingress_timers();

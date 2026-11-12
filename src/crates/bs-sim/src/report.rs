@@ -396,6 +396,13 @@ pub fn verdict(sim: &mut Sim, scenario_path: &Path, out: &Path) -> Verdict {
             serde_json::json!(sum(|n| n.ingress_bound)),
         );
         facts.insert("nat_drops".into(), serde_json::json!(sim.network.nat_drops));
+        facts.insert(
+            "balance_grants".into(),
+            serde_json::json!(nodes
+                .iter()
+                .filter(|n| n.node.granted_tree().is_some())
+                .count()),
+        );
         if let Some(m) = nodes.first().and_then(|n| n.node.matrix()) {
             facts.insert("forest_m".into(), serde_json::json!(m.m()));
             facts.insert("forest_layers".into(), serde_json::json!(m.layer_count));

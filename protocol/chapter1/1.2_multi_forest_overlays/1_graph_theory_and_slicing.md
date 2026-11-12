@@ -201,6 +201,18 @@ The **coverage grant** is a bounded, local, deterministic response that needs no
 
 Because "second-ranked" is a deterministic function of NodeID, every joiner facing the same empty tree converges on the same small set of candidates, and the grant is a *coverage* mechanism, not a back door to multi-tree standing: it is capacity-gated, limited to one tree, and lapses when the granted tree empties.
 
+The **balance grant** covers the case the coverage grant leaves open: a tree that has relays, but too few. Rendezvous assignment gives each tree a binomial share of the relays, so at $N_{\text{relay}} = 45$ and $M = 3$ a given tree holds $9$ relays or fewer in $3.7\%$ of swarms, and its viewers then find no free slot although the swarm as a whole has upload to spare. A relay evaluates the grant itself, every $2$ s, from the relay records it knows (its Active and Passive Sets and itself):
+
+*   Let $c_m$ be the known relays of tree $m$ and $\bar{c}$ their mean over the trees. The relay judges only when it knows at least $12$ relays and $\bar{c} \ge 6$: smaller trees are uneven by chance.
+*   It takes its **second-ranked** tree $b$ iff $c_b < 0.6\,\bar{c}$, its first-ranked tree holds $c_a \ge \bar{c}$, it receives tree $b$, it could hold one slot in each tree (the coverage-grant capacity gate), and it has spare capacity for one slot of $b$ now.
+*   It volunteers with probability $1 - c_b / \bar{c}$, drawn as $\text{Blake3}(\text{NodeID} \parallel \texttt{"balance-grant"})$ read as a fraction. The draw is fixed per node, so the volunteers are a stable set whose expected size is the shortfall, and a tree that has filled attracts no more.
+*   **A grant spends spare capacity only.** The first-ranked tree keeps every child it has. Its slot count is its current child count, never below the $t_v = 2$ share, and the upload it does not use buys slots in the granted tree. No child is drained for a grant.
+*   The relay sets bit $b-1$ in its `AssignedTreeBitmap`, so joiners find it without further rules, and a parent verifies a claimed assignment against the **first or second** rendezvous rank.
+*   The grant lapses when the relay holds no child in $b$, has held the grant for $30$ s, and $c_b \ge \bar{c}$. No grant is taken while a `MANIFEST_UPDATE` is pending or within $60$ s of a resize: the ladder sizes $M$ to the relay count and reassigns relays itself.
+
+A relay that serves two trees is a candidate in both, so the joiner enforces edge-disjointness itself: it never requests a relay that is already its parent, or its pending parent, in another tree (the source excepted).
+
+
 ### Shrinking the Forest
 
 A shrink runs the §4.5 migration in reverse and is otherwise identical: the source publishes a `MANIFEST_UPDATE` with the smaller `num_trees`, the new `tree_mapping` and an `EffectiveSegmentSeq`; the relays of the closed tree — and only they — release their children with `DRAIN_NOTICE` (reason `REASSIGNED`, scope *all children*, §2.2 *The Drain Path*), keep serving them through the sibling election that notice triggers, and re-attach in their next-ranked tree; at the switch the closed tree stops receiving data.

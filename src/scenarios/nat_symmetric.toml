@@ -9,6 +9,9 @@ forest_size = 3
 
 [params]
 relay_capable_uptime = 5000000
+# With the balance grant the public relays take a second tree, every symmetric viewer
+# finds a direct parent and no bridge is needed. The gate is here to test bridges.
+balance_grant = false
 
 [publisher]
 upload_kbps = 24000

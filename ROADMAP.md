@@ -82,8 +82,8 @@ window, because it is a full probe round plus a 1.5 RTT handshake.
 
 ### 6. Close the specification (about 15 days)
 
-Fourteen tickets are open (ISSUE-073 to 085 without 078, 087 and 089). Five change
-behaviour a real audience will hit: relay balance across trees (089), the startup target (082),
+Thirteen tickets are open (ISSUE-073 to 085 without 078, and 087). Four change
+behaviour a real audience will hit: the startup target (082),
 the per-hop latency budget (077), the M = 2 wire encoding (073, interoperability only)
 and the XDP allowlist key (087). Fifty-nine Medium and Low candidates from the same
 audit are unverified. Each ticket is a design decision plus a spec edit plus a core
@@ -276,4 +276,22 @@ decision.
 
 The forward's signed body still omits the requester's address. A referrer can aim one
 PING per second per requester; a stranger can aim none.
+
+## Round 14 (2026-11-12)
+
+ISSUE-089 is closed (SOLUTION-089). A relay now takes its second-ranked tree when
+that tree is short of relays, from spare capacity only. On the two seeds that left
+tree 1 with 8 or 9 of 45 relays, the join mean fell from 5.2 s to 3.4 s and from
+7.3 s to 5.9 s. `scenarios/tree_short_of_relays.toml` is the regression gate, the
+21st.
+
+What went wrong on the way, since each is a rule in the final design:
+
+- A relay that serves two trees became one viewer's parent in both. The simulator's edge-disjoint invariant caught it. The joiner now refuses such a parent.
+- Halving the first tree's slots drained its children and added repairs. The grant now spends spare capacity only.
+- Under the dynamic forest ladder the grant fired constantly and every resize undid it: starvation in `forest_resize` rose to 5 %. No grant is taken near a resize or with under 6 known relays per tree.
+
+The limits of `internet_far_swarm` moved to a join mean of 6 s and a repair p95 of
+10 s: over eight seeds the join mean is 5.1 to 5.2 s with or without the grant, so
+the old 5.0 s limit passed by seed luck.
 

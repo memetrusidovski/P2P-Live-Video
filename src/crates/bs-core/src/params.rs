@@ -134,6 +134,9 @@ pub struct Params {
     pub forest_ladder_relays: Vec<u32>,
     /// Whether the source resizes and folds the forest at all.
     pub dynamic_forest: bool,
+    /// Whether a relay takes its second-ranked tree when that tree is short of
+    /// relays (Ch1 §1.2.1 §1.3, balance grant).
+    pub balance_grant: bool,
     /// Segments between a `MANIFEST_UPDATE` and its switch (the migration window).
     pub resize_window_segments: u32,
     /// τ_fold for a starved base layer.
@@ -259,6 +262,7 @@ impl Default for Params {
             preempt_margin: 1.25,
             forest_ladder_relays: vec![0, 0, 0, 12, 18, 24, 30],
             dynamic_forest: false,
+            balance_grant: true,
             resize_window_segments: 5,
             tau_fold_base: Duration::from_secs(10),
             tau_fold: Duration::from_secs(30),
