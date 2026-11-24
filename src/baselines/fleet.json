@@ -1,0 +1,116 @@
+{
+ "commit": "7d2d7aa",
+ "date": "2026-11-24T12:29:25",
+ "scenarios": {
+  "cellular": {
+   "hash_mismatches": {
+    "op": "<=",
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "psr": {
+    "op": "<=",
+    "values": [
+     0.036546,
+     0.040848,
+     0.145805
+    ]
+   },
+   "sjl_mean_s": {
+    "op": "<=",
+    "values": [
+     3.734863,
+     8.850311,
+     6.161291
+    ]
+   },
+   "viewers_never_played": {
+    "op": "<=",
+    "values": [
+     0.0,
+     0.0,
+     2.0
+    ]
+   }
+  },
+  "clean": {
+   "hash_mismatches": {
+    "op": "<=",
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "psr": {
+    "op": "<=",
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "sjl_mean_s": {
+    "op": "<=",
+    "values": [
+     1.941813,
+     2.101114,
+     2.192538
+    ]
+   },
+   "viewers_never_played": {
+    "op": "<=",
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   }
+  },
+  "lossy-churn": {
+   "hash_mismatches": {
+    "op": "<=",
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "psr": {
+    "op": "<=",
+    "values": [
+     0.015038,
+     0.011278,
+     0.005376
+    ]
+   },
+   "sjl_mean_s": {
+    "op": "<=",
+    "values": [
+     2.226067,
+     2.189723,
+     2.227468
+    ]
+   },
+   "survivors_stalled": {
+    "op": "<=",
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "viewers_never_played": {
+    "op": "<=",
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   }
+  }
+ }
+}

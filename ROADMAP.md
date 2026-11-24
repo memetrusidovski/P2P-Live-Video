@@ -399,3 +399,31 @@ The limit for the profile is 5 %, so it still fails two runs of three. What is l
 is the loss itself: the same 5 to 8 % that loss alone costs. The lossy gate passed
 three more runs at about 1 %.
 
+## Round 19 (2026-11-24)
+
+Regression tooling, so later rounds cannot slide a KPI unseen. The rules are in
+`src/docs/TESTING.md`.
+
+- `scripts/gates.py` runs every simulator gate over five seeds, judges the median and flags drift against `baselines/sim.json`.
+- `fleet/matrix.py` runs three fleet cases three times each against `baselines/fleet.json`.
+- `scripts/smoke.py` drives a publisher with ffmpeg ingest and three viewers through the player API.
+- `scripts/check.sh` takes a tier: `quick` (4 minutes), `full` (16 minutes), `fleet` (35 minutes).
+
+The first five-seed run showed that five gates passed only on the seed in their file:
+
+| Scenario | Seeds 1 to 5 | Reading |
+|---|---|---|
+| `small_swarm` | Viewers never play on 3 seeds | A fault. With 5 relays and 3 trees, one tree gets no relay. The coverage grant of Ch1 §1.2.1 §1.4 is specified and not built. |
+| `rank_preemption` | 12 to 18 % of contributors miss a tree on 3 seeds | Not investigated. |
+| `layer_fold` | Join p95 of 60 to 64 s against a limit of 60 s | The limit needs a decision. |
+| `nat_symmetric`, `tree_short_of_relays` | A mechanism counter below its minimum | The check holds on the own seed only. Skipped on other seeds. |
+
+The first three are listed in `baselines/known.json`.
+
+The fleet matrix repeated the cellular result without the luck of round 18:
+
+| Case | Starved chunks, three runs | Verdict |
+|---|---|---|
+| `clean` | 0, 0, 0 % | Pass |
+| `lossy-churn` | 1.5, 1.1, 0.5 % | Pass |
+| `cellular` | 3.7, 4.1, 14.6 % | Fail, not gating. Two viewers of twelve never played in the third run, and the mean join took 6 s. |
