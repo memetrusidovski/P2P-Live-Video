@@ -442,3 +442,15 @@ wait up to 40 s. In `rank_preemption` every contributor ends at full quality on 
 seeds of five, where 12 to 18 % stayed a layer short on three. The drift check caught
 the first version of the fix raising starvation in `layer_fold` from 7.5 to 9.4 %;
 the backoff removed that. One known failure is left, the `layer_fold` join limit.
+
+The fleet matrix after both fixes: `clean` 0 % and `lossy-churn` 0.5 to 0.9 % starved,
+no drift. `cellular` ran five times on each side of the fixes to separate them from
+noise:
+
+| Cellular, five runs | Starved chunks | Median | Runs with a viewer that never played |
+|---|---|---|---|
+| Before the fixes | 4.2 to 14.1 % | 10.2 % | 1 |
+| After the fixes | 1.2 to 19.7 % | 8.9 % | 0 |
+
+The fixes did not move it. The profile sits near 10 % with a wide spread, so the 3 to
+8 % of round 18 was three lucky runs. Judge any cellular change on five runs or more.
