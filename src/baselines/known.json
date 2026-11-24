@@ -8,9 +8,6 @@
   }
  },
  "known_failures": {
-  "small_swarm": {
-   "active_fraction": "Viewers never play on 3 seeds of 5. On seed 1 no relay of 5 is assigned tree 1, the publisher's 3 slots in that tree fill, and 6 viewers of 9 find no parent. The balance grant does not act below 6 relays per tree."
-  },
   "rank_preemption": {
    "fact:attached_all:contributors": "On 3 seeds of 5, 12 to 18 % of the contributors miss one tree at the end of the run. Not yet investigated."
   },

@@ -427,3 +427,11 @@ The fleet matrix repeated the cellular result without the luck of round 18:
 | `clean` | 0, 0, 0 % | Pass |
 | `lossy-churn` | 1.5, 1.1, 0.5 % | Pass |
 | `cellular` | 3.7, 4.1, 14.6 % | Fail, not gating. Two viewers of twelve never played in the third run, and the mean join took 6 s. |
+
+## Round 20 (2026-11-24)
+
+The coverage grant is built. A relay takes its second-ranked tree when it has known
+no relay of that tree for 4 s. `small_swarm` now plays on ten seeds of ten, where
+viewers never played on 3 of the first 5. The five-seed run of the other 20 gates
+shows no drift. The spec had the joiner ask for the grant; Ch1 §1.2.1 §1.4 now has
+the relay take it, which reuses the balance-grant path and adds no admission rule.

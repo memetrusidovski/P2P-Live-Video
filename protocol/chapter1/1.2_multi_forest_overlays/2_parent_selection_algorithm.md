@@ -115,10 +115,10 @@ def execute_tree_join(node_i, target_tree_m, dht_interface, passive_pool):
                       and r.node_id not in node_i.current_parents]      # distinct-parent rule (§1.3)
 
     if not candidate_list:
-        # Coverage grant (§1.4): no relay is assigned to m — ask a relay whose
-        # SECOND-ranked rendezvous tree is m, before falling back to the source.
-        candidate_list = [r for r in records if rendezvous_rank(r.node_id, M)[1] == target_tree_m]
-        candidate_list.append(source_record)
+        # No relay is assigned to m: the source is the parent of last resort. A relay
+        # ranked second for m takes the coverage grant within seconds (§1.4) and then
+        # appears in `records` like any other relay of m.
+        candidate_list = [source_record]
 
     scored_candidates = []
 

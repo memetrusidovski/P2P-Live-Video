@@ -40,3 +40,5 @@ At $M = 1$ every relay with usable upload below one full stream ($\approx 6.9$ M
 
 *   Source egress versus $(N, \text{upload distribution})$ for $M = 2$ versus $M = 6$-with-grants at $N_{\text{relay}} \le 12$ — the measurement that would justify moving further toward a fixed fine slice.
 *   Grant uptake and duration: how often a granted tree persists after the swarm grows enough to cover it by rank.
+
+**Amended 2026-11-24.** The relay takes the coverage grant itself after its second-ranked tree shows no relay for 4 s; the joiner no longer asks. The multi-seed gate `small_swarm` showed the fault this closes: with 5 relays and 3 trees, viewers never played on 3 seeds of 5. Code: `src/crates/bs-core/src/node/balance.rs`.

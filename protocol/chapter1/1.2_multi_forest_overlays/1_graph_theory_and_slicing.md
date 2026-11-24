@@ -193,13 +193,14 @@ $M$ is computed from $N_{\text{relay}}$ directly rather than stepped, so a flash
 
 The ladder makes an empty tree *unlikely*; it cannot make it impossible, and at $N_{\text{relay}} < 12$ with $M = 2$ the probability that both relays land in the same tree is not small ($50\%$ at $N_{\text{relay}} = 2$, $12.5\%$ at $4$). Without a rule, the only parent for an uncovered tree is the source, at a cost of $B_m$ per viewer.
 
-The **coverage grant** is a bounded, local, deterministic response that needs no publisher round-trip:
+The **coverage grant** is a bounded, local, deterministic response that needs no publisher round-trip and no new frame. A relay evaluates it itself, every $2$ s, from the relay records it knows (its Active and Passive Sets, each of which carries assignments, Ch2 §2.3.2):
 
-*   A joiner whose discovery for tree $m$ returns **no `RELAY`-class candidate assigned to $m$** other than the source (Ch2 §2.3.2 returns assignments in every record) may send `NEIGHBOR(TreeID = m, Priority = HIGH)` to a relay whose **second-ranked** tree is $m$ — a fact the joiner computes from the candidate's NodeID and $M$ using the rendezvous rule above.
-*   The candidate **accepts the grant iff** it can hold at least one slot in each of two trees: $(1 - r_{\text{pull}})\,u_v \ge 2\,\Omega_v B_m$ for both trees. On accepting, it behaves as a $t_v = 2$ node (per-tree slots recomputed accordingly) for as long as it has children in the granted tree, and sets bit $m-1$ in its `AssignedTreeBitmap` so later joiners find it without a grant.
-*   A relay holds at most **one** granted tree beyond its ranked assignment. If no candidate can accept, the source serves the tree directly — the last resort, not the first.
+*   A relay takes its **second-ranked** tree $m$ when it has known **no `RELAY`-class record assigned to $m$** for $4$ s. The wait covers a node that joined a moment ago and knows few records.
+*   It takes the grant **iff** it receives tree $m$, it can hold at least one slot in each of two trees ($(1 - r_{\text{pull}})\,u_v \ge 2\,\Omega_v B_m$ for both), and it has spare capacity for one slot of $m$ now. It then behaves as the balance grant below describes: spare capacity only, and bit $m-1$ set in its `AssignedTreeBitmap`, so joiners find it through ordinary discovery.
+*   A relay holds at most **one** granted tree beyond its ranked assignment. If no relay can take the grant, the source serves the tree directly.
+*   The grant lapses when the relay holds no child in $m$, has held the grant for $30$ s, and knows another relay of $m$.
 
-Because "second-ranked" is a deterministic function of NodeID, every joiner facing the same empty tree converges on the same small set of candidates, and the grant is a *coverage* mechanism, not a back door to multi-tree standing: it is capacity-gated, limited to one tree, and lapses when the granted tree empties.
+"Second-ranked" is a deterministic function of NodeID, so the relays that cover an empty tree are a fixed small set, about $N_{\text{relay}} / M$ of them. The grant is a *coverage* mechanism, not a back door to multi-tree standing: it is capacity-gated and limited to one tree. An earlier draft had the joiner ask for the grant with a `NEIGHBOR`; the relay-side rule reaches the same state without a second admission path, and the balance grant already needed it.
 
 The **balance grant** covers the case the coverage grant leaves open: a tree that has relays, but too few. Rendezvous assignment gives each tree a binomial share of the relays, so at $N_{\text{relay}} = 45$ and $M = 3$ a given tree holds $9$ relays or fewer in $3.7\%$ of swarms, and its viewers then find no free slot although the swarm as a whole has upload to spare. A relay evaluates the grant itself, every $2$ s, from the relay records it knows (its Active and Passive Sets and itself):
 

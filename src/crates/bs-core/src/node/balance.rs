@@ -1,5 +1,9 @@
-//! Balance grant (Ch1 §1.2.1 §1.3): a relay takes its second-ranked tree when that
-//! tree is short of relays.
+//! Coverage and balance grants (Ch1 §1.2.1 §1.4): a relay takes its second-ranked
+//! tree when that tree has no relay, or too few.
+//!
+//! In a swarm of a few relays, rendezvous assignment can leave a tree with no relay.
+//! The source is then its only parent, and viewers beyond the source's slots never
+//! play. A relay whose second-ranked tree is the empty one covers it.
 //!
 //! Rendezvous assignment gives each tree a binomial share of the relays. In a swarm
 //! of tens of relays one tree can hold half its share, and its viewers then find no
@@ -25,12 +29,19 @@ const SHORT_SHARE: f64 = 0.6;
 /// A grant with no child is kept at least this long, so a tree is not left and
 /// taken again on every evaluation.
 const GRANT_HOLD: Duration = Duration::from_secs(30);
+/// Time a tree must show no relay before a relay covers it. A node that joined a
+/// moment ago knows few records, and a relay of the tree can be among the unknown.
+const COVER_WAIT: Duration = Duration::from_secs(4);
 
 /// Balance-grant state of a node.
 #[derive(Debug)]
 pub struct BalanceState {
     /// The second-ranked tree this relay serves beside its first-ranked one.
     pub(super) granted: Option<TreeId>,
+    /// The grant covers a tree that had no relay. It is not a balance grant.
+    coverage: bool,
+    /// Since when the second-ranked tree shows no relay.
+    empty_since: Option<Instant>,
     granted_at: Instant,
     pub(super) next_round: Instant,
     /// Forest size at the last evaluation.
@@ -43,6 +54,8 @@ impl Default for BalanceState {
     fn default() -> Self {
         Self {
             granted: None,
+            coverage: false,
+            empty_since: None,
             granted_at: Instant::ZERO,
             next_round: Instant::ZERO,
             last_m: 0,
@@ -98,7 +111,7 @@ impl Node {
         };
         let m = matrix.m();
         if m < 2
-            || !self.params.balance_grant
+            || !(self.params.balance_grant || self.params.coverage_grant)
             || self.state != Lifecycle::Active
             || self.is_source()
             || self.is_ingress()
@@ -127,7 +140,13 @@ impl Node {
             //       The tree must also be no longer short (Ch1 §1.2.1 §1.3).
             let idle = self.trees[g.index()].children.is_empty()
                 && self.now.duration_since(self.balance.granted_at) >= GRANT_HOLD;
-            if g != second || (idle && relays >= MIN_SAMPLE && in_second >= mean) {
+            // `in_second` counts this relay. A covered tree needs one relay more.
+            let filled = if self.balance.coverage {
+                in_second >= 2.0
+            } else {
+                relays >= MIN_SAMPLE && in_second >= mean
+            };
+            if g != second || (idle && filled) {
                 self.set_grant(None);
             } else {
                 // Slots move to the granted tree as the first tree's children leave.
@@ -135,14 +154,31 @@ impl Node {
             }
             return;
         }
-        // RULE: Trees of a few relays each are uneven by chance alone. Below
-        //       `MIN_MEAN` relays per tree the count says nothing about a shortage.
-        if quiet || relays < MIN_SAMPLE || mean < MIN_MEAN {
+        // RULE: A tree with no relay is covered at any swarm size (coverage grant).
+        //       The tree must stay empty for `COVER_WAIT` first.
+        if counts[second.index()] > 0 {
+            self.balance.empty_since = None;
+        } else if self.balance.empty_since.is_none() {
+            self.balance.empty_since = Some(self.now);
+        }
+        let cover = self.params.coverage_grant
+            && self
+                .balance
+                .empty_since
+                .is_some_and(|t| self.now.duration_since(t) >= COVER_WAIT);
+        if quiet {
             return;
         }
-        // RULE: Only a relay of a tree at or above the mean gives half its slots away.
-        if in_second >= SHORT_SHARE * mean || (counts[first.index()] as f64) < mean {
-            return;
+        if !cover {
+            // RULE: Trees of a few relays each are uneven by chance alone. Below
+            //       `MIN_MEAN` relays per tree the count says nothing about a shortage.
+            if !self.params.balance_grant || relays < MIN_SAMPLE || mean < MIN_MEAN {
+                return;
+            }
+            // RULE: Only a relay of a tree at or above the mean gives half its slots away.
+            if in_second >= SHORT_SHARE * mean || (counts[first.index()] as f64) < mean {
+                return;
+            }
         }
         // The relay must receive the tree it is to relay.
         let t = &self.trees[second.index()];
@@ -174,6 +210,12 @@ impl Node {
         if (slots(second, 1) as f64 * spare) < 1.0 {
             return;
         }
+        if cover {
+            // Every relay ranked second for an empty tree covers it: no draw.
+            self.balance.coverage = true;
+            self.set_grant(Some(second));
+            return;
+        }
         // RULE: Each candidate volunteers with the probability the gap calls for, drawn
         //       from its NodeID. The draw is the same at every evaluation, so the set
         //       of volunteers is stable. A filled gap attracts no further relay.
@@ -185,6 +227,7 @@ impl Node {
         first8.copy_from_slice(&h.0[..8]);
         let draw = u64::from_be_bytes(first8) as f64 / u64::MAX as f64;
         if draw < share {
+            self.balance.coverage = false;
             self.set_grant(Some(second));
         }
     }
