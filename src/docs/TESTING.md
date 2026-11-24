@@ -8,14 +8,70 @@ how to reproduce it, and what the node was doing when it went wrong.
 ## Single entrypoint
 
 ```
-scripts/check.sh            # everything, writes results/check.json
-just check                  # same thing if `just` is installed (brew install just)
+scripts/check.sh            # quick tier, writes results/check.json
+scripts/check.sh full       # quick, then every simulator gate over 5 seeds
+scripts/check.sh fleet      # the Docker fleet matrix only
+scripts/check.sh all        # full, then the fleet matrix
+just check                  # the quick tier, if `just` is installed
 ```
+
+| Tier | Runs | Time on a 10-core laptop | Run it |
+|---|---|---|---|
+| `quick` | fmt, clippy, tests, Python cross-decoder, every simulator gate on its own seed, the smoke test | about 4 minutes | before every push |
+| `full` | `quick`, then the simulator gates over seeds 1 to 5 against the baseline | about 16 minutes | after a change to `bs-core`, timers, parity or the simulator |
+| `fleet` | three fleet cases, three runs each | about 20 minutes | after a change to the driver, the transport or a timer |
+
+There is no CI server. The tiers run on the developer's machine.
 
 `results/check.json` has one entry per step: `name`, `status` (`pass`, `fail`,
 `skip`), `seconds`, `repro` (the exact command to re-run that step alone) and, on
-failure, `tail` (the last 40 lines of output). CI uploads `results/` as an
-artifact, so a red build is a JSON file, not a scrollback.
+failure, `tail` (the last 40 lines of output).
+
+## Regression tracking
+
+A threshold alone lets a KPI slide most of the way to its limit unseen, and a
+gate judged on one seed passes or fails by luck. Two tools cover both, with the
+same rules:
+
+| Tool | Covers | Baseline |
+|---|---|---|
+| `scripts/gates.py` | simulator scenarios over several seeds | `baselines/sim.json` |
+| `fleet/matrix.py` | Docker fleet cases over several runs | `baselines/fleet.json` |
+
+```
+scripts/gates.py run --seeds 5                       # what `check.sh full` runs
+scripts/gates.py run --seeds 5 --only lossy_links    # one scenario
+scripts/gates.py show lossy_links                    # last run beside the baseline
+scripts/gates.py accept --note "why the numbers moved"
+```
+
+Each scenario gets one status:
+
+| Status | Meaning |
+|---|---|
+| `PASS` | The median over the seeds meets every threshold. Fault counters (hash mismatches, hard invariant violations) are judged on the worst seed. |
+| `FAIL` | A median misses its threshold, or a run wrote no verdict. |
+| `DRIFT` | Every threshold holds, but a KPI is worse than the worst baseline seed by more than the allowance. |
+| `KNOWN` | The only misses are listed in `baselines/known.json`. |
+
+The drift allowance is the largest of half the baseline spread, 10 % of the
+baseline median, and a floor per KPI (`DRIFT_FLOOR` in `scripts/gates.py`).
+Drift fails a multi-seed run. On a single seed it is a warning.
+
+When a change moves a KPI on purpose, run `accept` and commit `baselines/`. The
+note lands in `baselines/history.jsonl` with the commit and the new medians, so
+the file is the record of how each KPI moved and why.
+
+`baselines/known.json` holds the exceptions, each with its reason. They apply to
+multi-seed runs only. Every scenario must pass in full on the seed in its file.
+
+- `seed_bound`: a check that holds only on the scenario's own seed, such as a count of bridges on a seed that needs none. Multi-seed runs skip it.
+- `known_failures`: a fault that is not fixed yet. The run prints a note when the KPI passes, so the entry leaves the file with the fix.
+
+The smoke test (`scripts/smoke.py`) covers what neither tool reaches: a publisher
+with ffmpeg ingest and three viewers on loopback, checked through the player API.
+It asserts that the page loads, the status reads `playing`, chunks advance, the
+WebSocket delivers media and a request from a foreign origin gets a 403.
 
 ## Level 1: unit and property tests per crate
 
@@ -74,7 +130,7 @@ seed. Timers are advanced explicitly, so there is no wall-clock dependence.
 ## Level 4: simulator scenario gates
 
 Each `scenarios/*.toml` declares KPI thresholds. `check.sh` runs every scenario
-and treats a non-zero exit as a failed gate.
+on its own seed through `scripts/gates.py run`, eight at a time.
 
 ```
 cargo run -q -p bs-sim --profile sim -- run scenarios/baseline_100.toml --out results/baseline_100
@@ -138,6 +194,10 @@ fleet/up.sh --viewers 20 --profile lossy
 fleet/report.py results/fleet          # same verdict.json schema as the simulator
 fleet/down.sh
 ```
+
+`fleet/matrix.py run` runs the cases `clean`, `lossy-churn` and `cellular` three
+times each and judges the medians. `cellular` is reported and does not fail the
+matrix until the profile meets its starvation limit.
 
 Every viewer writes its reassembled output hash; the report compares them with
 the publisher's. Hash equality is the end-to-end data-correctness check at

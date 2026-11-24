@@ -1,0 +1,21 @@
+{
+ "seed_bound": {
+  "nat_symmetric": {
+   "fact:bridges_bound": "Counts a mechanism that runs only when a symmetric viewer finds no direct parent. Seeds 1 and 4 need no bridge and every viewer plays."
+  },
+  "tree_short_of_relays": {
+   "fact:balance_grants": "The count of grants follows how short the tree is on the seed. Every seed takes 2 grants or more and passes its starvation limit."
+  }
+ },
+ "known_failures": {
+  "small_swarm": {
+   "active_fraction": "Viewers never play on 3 seeds of 5. On seed 1 no relay of 5 is assigned tree 1, the publisher's 3 slots in that tree fill, and 6 viewers of 9 find no parent. The balance grant does not act below 6 relays per tree."
+  },
+  "rank_preemption": {
+   "fact:attached_all:contributors": "On 3 seeds of 5, 12 to 18 % of the contributors miss one tree at the end of the run. Not yet investigated."
+  },
+  "layer_fold": {
+   "sjl_p95_s": "The threshold of 60 s was set on seed 11. The fold completes at 60 to 64 s on 4 seeds of 5. The threshold needs a decision."
+  }
+ }
+}

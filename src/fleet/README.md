@@ -49,8 +49,10 @@ start, which took most viewers down before they ran.
 `.churned`; `report.py` scores the survivors only and adds a `survivors_stalled` KPI
 (a survivor must not starve more than 10 % of its chunks after the churn).
 
-`BS_FLEET=1 scripts/check.sh` runs the lossy profile with that churn as a gate after
-the simulator gates. It needs docker and `fleet/media/sample.mp4` (or `BS_FLEET_FILE`).
+`scripts/check.sh fleet` runs `fleet/matrix.py run`: the cases `clean`, `lossy-churn`
+and `cellular`, three runs each, judged on the median against `baselines/fleet.json`.
+It needs docker and `fleet/media/sample.mp4` (or `BS_FLEET_FILE`). The rules are in
+[docs/TESTING.md](../docs/TESTING.md#regression-tracking).
 
 Profiles (`profiles/*.env`): `clean`, `lossy` (40 ms +-10, 2 % loss), `cellular`
 (120 ms +-40, 8 % loss, 8 Mbit/s). Add a profile by adding an env file.

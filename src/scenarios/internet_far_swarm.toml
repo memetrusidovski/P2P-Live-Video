@@ -38,7 +38,7 @@ jitter_ms = 10.0
 [kpis]
 psr_max = 0.02
 # Over eight seeds the join mean is 5.1 to 5.2 s and the repair p95 moves between
-# 2 s and 10 s (scripts/sim_seeds.sh). The limits leave room for that spread.
+# 2 s and 10 s (scripts/gates.py). The limits leave room for that spread.
 sjl_mean_max_s = 6.0
 sjl_p95_max_s = 9.0
 active_fraction_min = 0.95

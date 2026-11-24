@@ -12,7 +12,9 @@ plus the simulator, tooling and clients around it.
 Run everything:
 
 ```
-scripts/check.sh          # fmt, clippy, tests, python cross-decoder, sim gates -> results/check.json
+scripts/check.sh          # quick: fmt, clippy, tests, cross-decoder, sim gates, smoke test
+scripts/check.sh full     # quick, then the sim gates over 5 seeds against baselines/sim.json
+scripts/check.sh fleet    # the Docker fleet matrix against baselines/fleet.json
 ```
 
 Individual pieces: `cargo test --workspace`, `cd py && uv run pytest -q`,

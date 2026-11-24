@@ -157,7 +157,7 @@ Findings from the round:
 - `internet_rtt_step` passed before any fix: a route change alone does not evict parents in the simulator.
 - Real loss with the old parity rule was worse than the constant report: 2.4 % starvation at 2 % loss. The measurement and the rule had to change together.
 - Above 5 % loss the 30 % parity ceiling leaves 1.4 % of blocks per hop to PULL at 10 % loss. Cellular links need a larger block or a higher ceiling (ISSUE-077).
-- The repair p95 limits of `baseline_100` and `internet_nat_detect` were met by seed luck. They are now 6 s and 8 s, from six seeds each way. `scripts/sim_seeds.sh` runs a gate over several seeds.
+- The repair p95 limits of `baseline_100` and `internet_nat_detect` were met by seed luck. They are now 6 s and 8 s, from six seeds each way. `scripts/gates.py run --seeds N` runs the gates over several seeds.
 
 ## Round 3 (2026-11-11)
 

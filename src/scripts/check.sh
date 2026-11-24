@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # Single test entrypoint. Writes results/check.json and exits non-zero on any failure.
+#
+#   scripts/check.sh          quick: lints, tests, every simulator gate on its own
+#                             seed, and the end-to-end smoke test
+#   scripts/check.sh full     quick, then every simulator gate over 5 seeds against
+#                             the baseline (scripts/gates.py)
+#   scripts/check.sh fleet    the Docker fleet matrix only (fleet/matrix.py)
+#   scripts/check.sh all      full, then the fleet matrix
 set -euo pipefail
+TIER="${1:-quick}"
+case "$TIER" in quick|full|fleet|all) ;; *) echo "usage: $0 [quick|full|fleet|all]" >&2; exit 2 ;; esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -38,62 +47,37 @@ skip_step() {
   ENTRIES+=("{\"name\": $(printf '%s' "$name" | json_escape), \"status\": \"skip\", \"seconds\": 0, \"repro\": \"\", \"reason\": $(printf '%s' "$reason" | json_escape)}")
 }
 
-run_step "cargo fmt" "cargo fmt --all -- --check" cargo fmt --all -- --check
-run_step "cargo clippy" "cargo clippy --workspace --all-targets -- -D warnings" cargo clippy --workspace --all-targets -- -D warnings
-run_step "cargo test" "cargo test --workspace" cargo test --workspace
+if [ "$TIER" != fleet ]; then
+  run_step "cargo fmt" "cargo fmt --all -- --check" cargo fmt --all -- --check
+  run_step "cargo clippy" "cargo clippy --workspace --all-targets -- -D warnings" cargo clippy --workspace --all-targets -- -D warnings
+  run_step "cargo test" "cargo test --workspace" cargo test --workspace
 
-if command -v uv >/dev/null 2>&1; then
-  run_step "python cross-decoder" "cd py && uv run pytest -q" bash -c "cd py && uv run pytest -q"
-else
-  skip_step "python cross-decoder" "uv not installed"
-fi
-
-# Known test video for the file-source scenario (output is gitignored).
-if [ -x scripts/make_testdata.sh ]; then scripts/make_testdata.sh >/dev/null 2>&1 || true; fi
-
-# Simulator gates: only when bs-sim exposes a `run` subcommand.
-sim_ready=0
-if cargo metadata --format-version 1 --no-deps 2>/dev/null | python3 -c '
-import json,sys
-m=json.load(sys.stdin)
-ok=any(p["name"]=="bs-sim" and any(t["kind"]==["bin"] or "bin" in t["kind"] for t in p["targets"]) for p in m["packages"])
-sys.exit(0 if ok else 1)'; then
-  if cargo run -q -p bs-sim --profile sim -- --help 2>/dev/null | grep -q -w run; then sim_ready=1; fi
-fi
-
-if [ "$sim_ready" = 1 ]; then
-  shopt -s nullglob
-  scen=(scenarios/*.toml)
-  if [ ${#scen[@]} -eq 0 ]; then
-    skip_step "sim gates" "no scenarios/*.toml"
-  fi
-  for f in "${scen[@]}"; do
-    name="$(basename "$f" .toml)"
-    cmd="cargo run -q -p bs-sim --profile sim -- run $f --out results/$name"
-    run_step "sim gate: $name" "$cmd" bash -c "$cmd"
-  done
-else
-  skip_step "sim gates" "bs-sim not ready"
-fi
-
-# Docker fleet gate (opt-in: BS_FLEET=1, needs docker and a sample file). The lossy
-# profile with a churn of 30 % of the viewers at 30 s is Ch8 §8.3 scenario A on real nodes.
-if [ "${BS_FLEET:-0}" = 1 ]; then
-  sample="${BS_FLEET_FILE:-fleet/media/sample.mp4}"
-  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-    skip_step "fleet gate" "docker not available"
-  elif [ ! -f "$sample" ]; then
-    skip_step "fleet gate" "no sample file ($sample); set BS_FLEET_FILE"
+  if command -v uv >/dev/null 2>&1; then
+    run_step "python cross-decoder" "cd py && uv run pytest -q" bash -c "cd py && uv run pytest -q"
   else
-    # 25 MB of the sample is about a minute of video: the stream ends before the viewers
-    # do, so every surviving viewer holds the whole stream and the hash check is exact.
-    # The publisher writes its report when stopped, so the fleet comes down before the
-    # report is built (the results volume is kept).
-    fleet_cmd="fleet/up.sh --viewers ${BS_FLEET_VIEWERS:-20} --profile lossy --file $sample --max-bytes 25000000 --duration 90 && fleet/churn.sh --fraction 0.3 --at 30 && sleep 80 && fleet/down.sh --keep-results && python3 fleet/report.py && fleet/down.sh"
-    run_step "fleet gate: lossy churn" "$fleet_cmd" bash -c "$fleet_cmd"
+    skip_step "python cross-decoder" "uv not installed"
   fi
+
+  # Known test video for the file-source scenario (output is gitignored).
+  if [ -x scripts/make_testdata.sh ]; then scripts/make_testdata.sh >/dev/null 2>&1 || true; fi
+
+  # RULE: Every scenario must pass in full on the seed its file states. The
+  #       multi-seed run below can list exceptions; the run on the own seed cannot.
+  run_step "sim gates: own seed" "scripts/gates.py run" scripts/gates.py run
+  run_step "smoke test" "scripts/smoke.py" scripts/smoke.py
+fi
+
+if [ "$TIER" = full ] || [ "$TIER" = all ]; then
+  run_step "sim gates: 5 seeds" "scripts/gates.py run --seeds 5" scripts/gates.py run --seeds 5
 else
-  skip_step "fleet gate" "set BS_FLEET=1 to run the docker fleet"
+  skip_step "sim gates: 5 seeds" "run scripts/check.sh full"
+fi
+
+# COMPATIBILITY: BS_FLEET=1 added the fleet to a run before the tiers existed.
+if [ "$TIER" = fleet ] || [ "$TIER" = all ] || [ "${BS_FLEET:-0}" = 1 ]; then
+  run_step "fleet matrix" "fleet/matrix.py run" fleet/matrix.py run
+else
+  skip_step "fleet matrix" "run scripts/check.sh fleet"
 fi
 
 {
