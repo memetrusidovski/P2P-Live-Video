@@ -38,7 +38,7 @@ const COVER_WAIT: Duration = Duration::from_secs(4);
 pub struct BalanceState {
     /// The second-ranked tree this relay serves beside its first-ranked one.
     pub(super) granted: Option<TreeId>,
-    /// The grant covers a tree that had no relay. It is not a balance grant.
+    /// The grant is a coverage grant: the tree had no relay.
     coverage: bool,
     /// Since when the second-ranked tree shows no relay.
     empty_since: Option<Instant>,
