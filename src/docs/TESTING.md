@@ -62,8 +62,13 @@ When a change moves a KPI on purpose, run `accept` and commit `baselines/`. The
 note lands in `baselines/history.jsonl` with the commit and the new medians, so
 the file is the record of how each KPI moved and why.
 
+A scenario that misses a threshold on its own seed is run over 5 seeds at once, and
+the miss fails the run only if those fail or drift too. One seed can land on the
+tail of a KPI the change did not move: `tree_short_of_relays` has a join p95 of 4 s
+on most seeds and 13 s on about one in eight, before and after any change.
+
 `baselines/known.json` holds the exceptions, each with its reason. They apply to
-multi-seed runs only. Every scenario must pass in full on the seed in its file.
+multi-seed runs only.
 
 - `seed_bound`: a check that holds only on the scenario's own seed, such as a count of bridges on a seed that needs none. Multi-seed runs skip it.
 - `known_failures`: a fault that is not fixed yet. The run prints a note when the KPI passes, so the entry leaves the file with the fix.

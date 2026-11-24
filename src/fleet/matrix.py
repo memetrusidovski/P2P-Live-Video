@@ -17,6 +17,7 @@ import datetime
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import time
@@ -88,6 +89,8 @@ def run_case(name: str, case: dict, sample: pathlib.Path, index: int) -> dict:
             # The publisher writes its report when stopped.
             step(["fleet/down.sh", "--keep-results"])
             verdict_dir = OUT / f"{name}-{index}"
+            # The results of an earlier matrix must not mix with the results of this run.
+            shutil.rmtree(verdict_dir, ignore_errors=True)
             step([sys.executable, "fleet/report.py", "--out", str(verdict_dir)])
             verdict = verdict_dir / "verdict.json"
             if not verdict.exists():

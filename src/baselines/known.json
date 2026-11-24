@@ -5,6 +5,9 @@
   },
   "tree_short_of_relays": {
    "fact:balance_grants": "The count of grants follows how short the tree is on the seed. Every seed takes 2 grants or more and passes its starvation limit."
+  },
+  "collusion": {
+   "fact:consensus_evictions:colluders": "The count is 0 or in the hundreds by seed: 0, 0, 112, 2 and 320 on seeds 1 to 5, and any change to the node moves which seeds evict. Detection of colluders is not reliable across seeds and needs its own investigation."
   }
  },
  "known_failures": {

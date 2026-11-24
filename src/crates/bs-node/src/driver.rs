@@ -189,6 +189,27 @@ impl RunConfig {
 /// UDP port `RunConfig::publisher` binds.
 pub const PUBLISH_PORT: u16 = 4000;
 
+/// What a node did in one tree over a run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TreeReport {
+    /// Tree number, from 1.
+    pub tree: u8,
+    /// The node relays the tree.
+    pub assigned: bool,
+    /// The node relays the tree under a coverage or balance grant.
+    pub granted: bool,
+    /// Bitrate of the tree, kbps.
+    pub bitrate_kbps: u32,
+    /// Depth at the end (255 = no parent).
+    pub depth: u8,
+    /// Child slots at the end.
+    pub slots: u16,
+    /// Most children held at one time.
+    pub children_peak: usize,
+    /// Highest parity, symbols per block, sent to one child.
+    pub parity_peak: u16,
+}
+
 /// What a run produced.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunReport {
@@ -235,6 +256,9 @@ pub struct RunReport {
     pub source_hash: Option<String>,
     /// Frames sent by type.
     pub sent: HashMap<String, u64>,
+    /// One entry per tree of the forest.
+    #[serde(default)]
+    pub trees: Vec<TreeReport>,
     /// Registrations this node holds as a DHT guardian.
     pub guardian_peers: Option<usize>,
     /// Parent losses.
@@ -624,6 +648,8 @@ struct Driver {
     uplink_free_at: u64,
     /// Media datagrams dropped because the uplink budget was too far behind.
     datagrams_paced_out: u64,
+    /// Peaks per tree, sampled at each housekeeping tick.
+    tree_peaks: Vec<TreeReport>,
     /// Layers subscribed at the last played chunk.
     layers_subscribed_last: u8,
     /// Whether any frame ever arrived from the bootstrap contact.
@@ -770,6 +796,7 @@ impl Driver {
             last_starved_at: None,
             uplink_free_at: 0,
             datagrams_paced_out: 0,
+            tree_peaks: Vec::new(),
             layers_subscribed_last: 0,
             bootstrap_answered: false,
             layers_complete_last: 0,
@@ -867,6 +894,7 @@ impl Driver {
                     self.publish_status();
                     self.feed_rtt_samples();
                     self.sync_peer_budget();
+                    self.sample_trees();
                 }
                 _ = publish.tick(), if is_pub && !self.ended && !live => {
                     if tokio::time::Instant::now() >= start_media_at {
@@ -1214,6 +1242,28 @@ impl Driver {
     /// signal, and the first frame from the contact clears the report.
     /// Tell the socket which source addresses have an open session. Their plain
     /// frames draw on the peer budget, all others on the first-contact budget.
+    /// Record the state of each tree and keep the peaks for the run report.
+    fn sample_trees(&mut self) {
+        let granted = self.node.granted_tree();
+        let trees = self.node.trees();
+        self.tree_peaks.resize(trees.len(), TreeReport::default());
+        for (peak, t) in self.tree_peaks.iter_mut().zip(trees) {
+            let parity = t.children.values().map(|c| c.parity).max().unwrap_or(0);
+            peak.tree = t.id.0;
+            peak.assigned = t.assigned;
+            peak.granted = granted == Some(t.id);
+            peak.bitrate_kbps = self
+                .node
+                .matrix()
+                .and_then(|m| m.tree(t.id))
+                .map_or(0, |i| u32::from(i.bitrate_kbps));
+            peak.depth = t.depth;
+            peak.slots = t.k_v;
+            peak.children_peak = peak.children_peak.max(t.children.len());
+            peak.parity_peak = peak.parity_peak.max(parity);
+        }
+    }
+
     fn sync_peer_budget(&self) {
         self.sock
             .set_peers(self.conns.keys().map(|peer| peer.ip()).collect());
@@ -1926,6 +1976,7 @@ impl Driver {
                 .iter()
                 .map(|(k, v)| (k.name().to_string(), *v))
                 .collect(),
+            trees: self.tree_peaks.clone(),
             guardian_peers: Some(self.node.dht_registrations()),
             parent_lost: self.parent_lost,
             repairs: self.repairs,

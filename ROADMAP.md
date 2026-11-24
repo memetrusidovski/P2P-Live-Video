@@ -454,3 +454,37 @@ noise:
 
 The fixes did not move it. The profile sits near 10 % with a wide spread, so the 3 to
 8 % of round 18 was three lucky runs. Judge any cellular change on five runs or more.
+
+## Round 21 (2026-11-24)
+
+The cellular profile, read from per-tree data now in each node's run report (`trees`
+in `result.json`: slots, peak children, peak parity).
+
+**Found and fixed**
+
+- **A relay sent more than its slots assumed.** Each chunk is padded to whole 16 KB blocks. The 511 kbps base tree measured about 640 kbps on the wire, so a relay with 8 slots offered 7 to 8.5 Mbps to a 7 Mbps uplink and its pacer dropped 12 to 15 % of the base layer for its whole subtree. Slots now follow the measured rate of the tree when it exceeds the declared one by over 8 %. Pacer drops on the busiest relay fell from 5,000 to 9,000 datagrams a run to under 2,200.
+- **The parent was asked last for a repair.** A parent serves its child's PULL whatever the choke state, but the child ranked providers by round trip and gave every other peer a default below the parent's measured one.
+- **Tooling.** A gate that misses on its own seed is rerun over five seeds, and fails only if those confirm it. `tree_short_of_relays` has a join p95 of 4 s on most seeds and 13 s on one in eight, with or without these changes.
+
+| Fleet case | Before | After |
+|---|---|---|
+| `clean` | 0 % starved | 0 % |
+| `lossy-churn` | 0.5 to 0.9 % | 0.05 to 0.16 % |
+| `cellular`, 13 runs | 1.2 to 19.7 %, median 8.9 % | 2.4 to 40 %, median 7.6 % |
+
+**Cellular is still not solved.** Its result is decided by who holds the publisher's
+base-tree seats. The publisher has 2 slots per tree at 7 Mbps. In the good runs a
+relay of the base tree sits there and feeds everyone, and starvation is 2 to 8 %. In
+the bad runs the base-tree relays never receive the tree (they end with their slots
+unmeasured and no children), and up to 10 viewers of 12 never play. A base-tree
+relay can displace a non-relay child at the publisher (ISSUE-061), so the next step
+is to find why that does not happen here. The INFO logs do not show join rounds.
+
+**Slow joins on cellular** (6 to 11 s against a 4 s limit), from the logs:
+
+- A child cannot attach below depth 1 until its parent has verified one whole segment, about 2.5 s per level.
+- A viewer attached before the stream starts drops its parent after 6 s without data. With the fleet's 8 s start delay, depth-1 seats reshuffle as data begins. A real viewer who opens the link early hits the same rule.
+- The 3 s playout buffer is the floor in every profile.
+
+Also found: colluder eviction in `collusion` is 0 on some seeds and in the hundreds on
+others, so that check is now marked seed-bound and needs its own look.

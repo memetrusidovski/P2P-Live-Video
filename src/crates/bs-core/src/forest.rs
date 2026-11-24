@@ -111,6 +111,16 @@ pub struct TreeState {
     pub join: JoinState,
     /// Segments in which at least one block arrived (for live edge accounting).
     pub last_segment_seen: SegmentSeq,
+    /// Segment whose blocks `rate_blocks` counts.
+    pub rate_segment: SegmentSeq,
+    /// Blocks of the tree verified in `rate_segment`.
+    pub rate_blocks: u32,
+    /// Bitrate of the tree as it is forwarded, kbps: whole blocks, with the padding
+    /// that fills the last block of each chunk. 0 until one segment is complete.
+    pub measured_kbps: u32,
+    /// Declared bitrate of the tree while `measured_kbps` was measured. A resize or
+    /// a fold changes what the tree carries, and the measurement then starts again.
+    pub measured_under: u16,
 }
 
 impl TreeState {
@@ -137,6 +147,10 @@ impl TreeState {
             lost_at: None,
             join: JoinState::Idle,
             last_segment_seen: SegmentSeq::NONE,
+            rate_segment: SegmentSeq::NONE,
+            rate_blocks: 0,
+            measured_kbps: 0,
+            measured_under: 0,
         }
     }
 

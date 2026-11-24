@@ -573,7 +573,7 @@ impl Node {
                 t.k_v = bridge_counts[i];
                 continue;
             }
-            let b = matrix
+            let declared = matrix
                 .tree(t.id)
                 .map(|i| i.bitrate_kbps)
                 .or_else(|| {
@@ -583,6 +583,21 @@ impl Node {
                         .map(|i| i.bitrate_kbps)
                 })
                 .unwrap_or(0);
+            // RULE: Slots are sized from the rate the tree is forwarded at. Each chunk
+            //       is padded to whole blocks, so a tree can cost a quarter more than
+            //       its declared bitrate, and the slots must fit the uplink.
+            let measured = if t.measured_under == declared {
+                t.measured_kbps.min(u16::MAX as u32) as u16
+            } else {
+                0
+            };
+            // RULE: The slot headroom covers a measured rate within 8 % of the declared
+            //       one. A fall in slots drains a child, so a small excess changes nothing.
+            let b = if measured as u32 * 100 > declared as u32 * 108 {
+                measured
+            } else {
+                declared
+            };
             // Bridge slots are paid from the bridge budget, on top of the tree's own.
             t.k_v = self.params.slots(upload, assigned_count, b, parity) + bridge_counts[i];
         }
@@ -2786,6 +2801,7 @@ impl Node {
         if idx < self.trees.len() && vb.segment > self.trees[idx].last_segment_seen {
             self.trees[idx].last_segment_seen = vb.segment;
         }
+        self.note_tree_rate(vb.tree, vb.segment);
         let forwarded = self.forward_block(&vb);
         self.preemit_block(&vb);
         let depth = self.trees.get(idx).map(|t| t.depth).unwrap_or(0);
@@ -2838,6 +2854,56 @@ impl Node {
             Some(t)
         } else {
             None
+        }
+    }
+
+    /// Count a verified block toward the measured bitrate of its tree.
+    ///
+    /// The count closes when a block of a later segment arrives. A rise applies at
+    /// once; a fall moves the measured rate a quarter of the way.
+    fn note_tree_rate(&mut self, tree: TreeId, segment: SegmentSeq) {
+        let declared = self
+            .matrix
+            .as_ref()
+            .and_then(|m| m.tree(tree))
+            .map_or(0, |i| i.bitrate_kbps);
+        let Some(t) = self.trees.get_mut(tree.index()) else {
+            return;
+        };
+        if t.measured_under != declared {
+            t.measured_under = declared;
+            t.measured_kbps = 0;
+            t.rate_segment = SegmentSeq::NONE;
+            t.rate_blocks = 0;
+        }
+        if segment == t.rate_segment {
+            t.rate_blocks += 1;
+            return;
+        }
+        if segment < t.rate_segment {
+            return;
+        }
+        let blocks = std::mem::replace(&mut t.rate_blocks, 1);
+        let first = !t.rate_segment.is_some();
+        // A gap in the segments means the count is of a partial segment.
+        let whole = t.rate_segment.0 + 1 == segment.0;
+        t.rate_segment = segment;
+        if first || !whole {
+            return;
+        }
+        let segment_s =
+            self.params.chunk_period.as_secs_f64() * bs_wire::consts::CHUNKS_PER_SEGMENT as f64;
+        let kbps =
+            (blocks as f64 * bs_wire::consts::BLOCK_SIZE as f64 * 8.0 / segment_s / 1000.0) as u32;
+        let before = t.measured_kbps;
+        t.measured_kbps = if kbps >= before {
+            kbps
+        } else {
+            (3 * before + kbps) / 4
+        };
+        // Slots follow a move of 3 % or more. A smaller move is noise.
+        if t.assigned && t.measured_kbps.abs_diff(before) * 100 > before.max(1) * 3 {
+            self.recompute_slots();
         }
     }
 
@@ -2952,6 +3018,7 @@ impl Node {
                 decoded: false,
                 source_lost: None,
             };
+            self.note_tree_rate(vb.tree, vb.segment);
             let n = self.forward_block(&vb);
             self.preemit_block(&vb);
             self.emit(Event::BlockVerified {

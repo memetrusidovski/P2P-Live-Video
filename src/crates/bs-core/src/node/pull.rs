@@ -265,15 +265,27 @@ impl Node {
             }
             // Providers that have unchoked us first (Ch5 §5.1); a request to a choked
             // provider is refused but is the "waiting" signal its bootstrap queue needs.
+            // RULE: The parent of the block's tree serves the block whatever its choke
+            //       state (`pull_allowed`), so it ranks with the unchoked providers.
+            //       Ranked by round trip alone, the parent came last: its measured
+            //       round trip is above the default every other peer gets.
+            let tree_parents: Vec<PeerAddr> = self
+                .trees
+                .get(m.tree.index())
+                .map(|t| {
+                    t.parent
+                        .iter()
+                        .chain(t.old_parent.iter())
+                        .map(|p| p.addr)
+                        .collect()
+                })
+                .unwrap_or_default();
             let mut providers: Vec<(bool, Duration, PeerAddr)> = holders
                 .iter()
                 .filter(|p| !tried.contains(p))
                 .map(|p| {
-                    (
-                        !self.incentive.unchoked_by.contains(p),
-                        self.peer_srtt(*p),
-                        *p,
-                    )
+                    let serves = self.incentive.unchoked_by.contains(p) || tree_parents.contains(p);
+                    (!serves, self.peer_srtt(*p), *p)
                 })
                 .collect();
             providers.sort();
