@@ -8,9 +8,6 @@
   }
  },
  "known_failures": {
-  "rank_preemption": {
-   "fact:attached_all:contributors": "On 3 seeds of 5, 12 to 18 % of the contributors miss one tree at the end of the run. Not yet investigated."
-  },
   "layer_fold": {
    "sjl_p95_s": "The threshold of 60 s was set on seed 11. The fold completes at 60 to 64 s on 4 seeds of 5. The threshold needs a decision."
   }

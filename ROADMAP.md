@@ -435,3 +435,10 @@ no relay of that tree for 4 s. `small_swarm` now plays on ten seeds of ten, wher
 viewers never played on 3 of the first 5. The five-seed run of the other 20 gates
 shows no drift. The spec had the joiner ask for the grant; Ch1 §1.2.1 §1.4 now has
 the relay take it, which reuses the balance-grant path and adds no admission rule.
+
+A viewer that shed two layers regained only one: the regrow step cleared its own
+timer. It now retries until every layer is back, and each failed return doubles the
+wait up to 40 s. In `rank_preemption` every contributor ends at full quality on five
+seeds of five, where 12 to 18 % stayed a layer short on three. The drift check caught
+the first version of the fix raising starvation in `layer_fold` from 7.5 to 9.4 %;
+the backoff removed that. One known failure is left, the `layer_fold` join limit.

@@ -122,6 +122,8 @@ pub struct Node {
     join_stats: Vec<JoinStats>,
     top_layer: u8,
     shed_retry_at: Option<Instant>,
+    /// Sheds since the node last held every layer it wants.
+    shed_count: u32,
     swarm: SwarmBuffer,
     sessions: BTreeMap<PeerAddr, Session>,
     passive: BTreeMap<NodeId, PeerRecord>,
@@ -241,6 +243,7 @@ impl Node {
             join_stats: Vec::new(),
             top_layer,
             shed_retry_at: None,
+            shed_count: 0,
             swarm,
             sessions: BTreeMap::new(),
             passive: BTreeMap::new(),
@@ -1287,7 +1290,11 @@ impl Node {
                 }
             }
         }
-        self.shed_retry_at = Some(self.now + self.params.shed_hysteresis);
+        // RULE: Each failed return doubles the wait, up to four times the hysteresis.
+        //       A swarm with no capacity for the layer is not probed every round.
+        let wait = self.params.shed_hysteresis * (1u64 << self.shed_count.min(2));
+        self.shed_count += 1;
+        self.shed_retry_at = Some(self.now + wait);
         self.check_active();
     }
 
@@ -1302,6 +1309,7 @@ impl Node {
         };
         if self.top_layer >= wanted {
             self.shed_retry_at = None;
+            self.shed_count = 0;
             return;
         }
         self.top_layer += 1;
@@ -1314,7 +1322,10 @@ impl Node {
                 self.begin_probing(id);
             }
         }
-        self.shed_retry_at = None;
+        // RULE: One layer returns per attempt. A node that shed two layers must try
+        //       again for the second, or it stays one layer short for good. The next
+        //       attempt also clears the shed count once every layer is back.
+        self.shed_retry_at = Some(self.now + self.params.shed_hysteresis);
     }
 
     fn on_accepted(&mut self, from: PeerAddr, a: Accepted) {
