@@ -540,8 +540,10 @@ stream and in the transport, and the fleet logs found all of them.
 
 `clean` and `lossy-churn` are at 0 %.
 
-Tried and removed: a child that asked its parent whether a stall came from above
-before it left. It gave no gain on cellular and slowed repairs in two gates.
+Tried and removed:
+
+- A child that asked its parent whether a stall came from above before it left. It gave no gain on cellular and slowed repairs in two gates.
+- A parity ceiling of 50 % of K in place of 30 %. Cellular starvation rose to a median of 9.8 % over six runs: at 7 Mbps the extra parity costs a slot per relay, and the trees run short of seats.
 
 One baseline moved. `baseline_100` repair p95 rose from 2.3 s to 5.0 s (limit 6 s) on
 three seeds of five. The run has about 13 repairs, so the p95 is one event. A relay that preempts a seat
@@ -549,4 +551,4 @@ is admitted pending. It receives nothing until the displaced child leaves, up to
 the 5-segment drain window. Open.
 
 Still open on cellular: 15 to 26 data stalls and 7 to 12 receipt evictions a run,
-the pending wait above, the 30 % parity ceiling, and one PULL slot at 7 Mbps.
+the pending wait above, and one PULL slot at 7 Mbps.
