@@ -196,9 +196,10 @@ The ladder makes an empty tree *unlikely*; it cannot make it impossible, and at 
 The **coverage grant** is a bounded, local, deterministic response that needs no publisher round-trip and no new frame. A relay evaluates it itself, every $2$ s, from the relay records it knows (its Active and Passive Sets, each of which carries assignments, Ch2 §2.3.2):
 
 *   A relay takes its **second-ranked** tree $m$ when it has known **no `RELAY`-class record assigned to $m$** for $4$ s. The wait covers a node that joined a moment ago and knows few records.
+*   It takes the tree on the same wait when the relays of $m$ **cannot seat the swarm**: $R_m \cdot K_v(m) < N$, with $R_m$ the relays of $m$ it knows scaled to the swarm's relay count, $K_v(m)$ the slots it would itself hold in $m$, and $N$ the swarm size from the Stream Record. In a swarm of a dozen relays the binomial share leaves a tree one relay in a few percent of streams, the balance grant's share rule does not apply below six relays per tree, and one relay plus the source seats half the viewers.
 *   It takes the grant **iff** it receives tree $m$, it can hold at least one slot in each of two trees ($(1 - r_{\text{pull}})\,u_v \ge 2\,\Omega_v B_m$ for both), and it has spare capacity for one slot of $m$ now. It then behaves as the balance grant below describes: spare capacity only, and bit $m-1$ set in its `AssignedTreeBitmap`, so joiners find it through ordinary discovery.
 *   A relay holds at most **one** granted tree beyond its ranked assignment. If no relay can take the grant, the source serves the tree directly.
-*   The grant lapses when the relay holds no child in $m$, has held the grant for $30$ s, and knows another relay of $m$.
+*   The grant lapses when the relay holds no child in $m$, has held the grant for $30$ s, knows another relay of $m$, and the other relays of $m$ seat the swarm without it.
 
 "Second-ranked" is a deterministic function of NodeID, so the relays that cover an empty tree are a fixed small set, about $N_{\text{relay}} / M$ of them. The grant is a *coverage* mechanism, not a back door to multi-tree standing: it is capacity-gated and limited to one tree. An earlier draft had the joiner ask for the grant with a `NEIGHBOR`; the relay-side rule reaches the same state without a second admission path, and the balance grant already needed it.
 
