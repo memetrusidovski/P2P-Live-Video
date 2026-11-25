@@ -13,6 +13,9 @@
  "known_failures": {
   "layer_fold": {
    "sjl_p95_s": "The threshold of 60 s was set on seed 11. The fold completes at 60 to 64 s on 4 seeds of 5. The threshold needs a decision."
+  },
+  "free_riders": {
+   "fact:psr:riders": "The receipt deadline now runs on time, so a relay that catches up no longer evicts in a burst. Free riders are evicted about 290 times a run where the count was 416, and starve 1.1 % of chunks against this floor of 1.5 %. Decide: lower the floor, or make the penalty stronger."
   }
  }
 }

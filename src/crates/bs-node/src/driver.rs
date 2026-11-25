@@ -1856,11 +1856,28 @@ impl Driver {
             }
             Event::ChildAdmitted {
                 tree,
+                child,
                 children,
                 k_v,
-                ..
-            } => info!("tree {tree}: child admitted ({children}/{k_v})"),
+            } => info!(
+                "tree {tree}: child {} admitted ({children}/{k_v})",
+                child.short()
+            ),
             Event::LayerShed { top_layer } => warn!("shed to layer {top_layer}"),
+            Event::JoinRoundFailed {
+                tree,
+                failed_rounds,
+                candidates,
+            } => debug!(
+                "tree {tree}: join round failed ({failed_rounds} in a row, {candidates} candidates)"
+            ),
+            Event::ChildRejected {
+                tree,
+                child,
+                reason,
+            } => {
+                debug!("tree {tree}: rejected {} ({reason})", child.short());
+            }
             Event::AddressRebound { addr } => {
                 info!("address rebound to {addr}: peers observe this node there");
             }

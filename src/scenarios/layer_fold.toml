@@ -35,7 +35,10 @@ active_fraction_min = 0.9
 cdo_max = 0.3
 # Repairs here are the starved base-tree joins that complete only after the fold, which
 # the dwell (Ch1 §1.2.1 §1.4) holds back for 30 s.
-repair_median_max_s = 10.0
+# The median was 2 s while parents also evicted children for receipts they had not
+# missed: those repairs were quick and outnumbered the fold waits. With 0 to 2
+# evictions a run, the fold waits are most of the repairs (gates.py, five seeds).
+repair_median_max_s = 30.0
 repair_p95_max_s = 30.0
 
 [kpis.facts_max]

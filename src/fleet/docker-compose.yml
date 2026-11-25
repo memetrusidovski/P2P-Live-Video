@@ -24,6 +24,7 @@ services:
       BS_RENDITIONS: "${BS_RENDITIONS:-360p:800,720p:2500}"
       BS_SEED: "${BS_SEED:-1}"
       BS_PUB_UPLOAD_KBPS: "${BS_PUB_UPLOAD_KBPS:-100000}"
+      RUST_LOG: "${RUST_LOG:-info}"
       BS_NETEM_PROFILE: "${BS_NETEM_PROFILE:-clean}"
     ports:
       - "8079:8080"
@@ -48,6 +49,7 @@ services:
       BS_KEEP_OUTPUT: "${BS_KEEP_OUTPUT:-}"
       BS_CLASS: "${BS_CLASS:-relay}"
       BS_UPLOAD_KBPS: "${BS_UPLOAD_KBPS:-20000}"
+      RUST_LOG: "${RUST_LOG:-info}"
       BS_NETEM_PROFILE: "${BS_NETEM_PROFILE:-clean}"
     # Host ports for the viewers' status pages are in docker-compose.ports.yml;
     # up.sh adds that file unless --no-ports is given.

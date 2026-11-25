@@ -65,6 +65,11 @@ struct ChildReceipts {
     checked_up_to: u32,
     /// Consecutive unreceipted segments.
     missed: u8,
+    /// Time credit, µs, the deadline check can still spend: one segment of credit
+    /// moves `checked_up_to` one segment.
+    credit_us: u64,
+    /// When `credit_us` was last topped up.
+    credit_at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -231,9 +236,11 @@ impl Node {
     pub(super) fn ban_peer(&mut self, from: PeerAddr, id: NodeId) {
         let until = self.now + self.params.eviction_cooldown;
         self.incentive.evicted_ids.insert(id, until);
-        self.incentive
-            .evicted_prefixes
-            .insert(prefix_key(from.ip()), until);
+        if prefix_counts(from.ip()) {
+            self.incentive
+                .evicted_prefixes
+                .insert(prefix_key(from.ip()), until);
+        }
     }
 
     /// Whether we currently serve PULL requests from `peer`.
@@ -494,6 +501,8 @@ impl Node {
                     last_receipted: seg,
                     checked_up_to: seg,
                     missed: 0,
+                    credit_us: 0,
+                    credit_at: self.now,
                 });
             if seg >= e.last_receipted {
                 e.last_receipted = seg;
@@ -593,6 +602,9 @@ impl Node {
             .session_rtt(child)
             .map(|rtt| (rtt.0 / RECEIPT_GRACE_RTT.0).min(RECEIPT_GRACE_MAX as u64) as u32)
             .unwrap_or(0);
+        let now = self.now;
+        let segment_us =
+            self.params.chunk_period.as_micros() * bs_wire::consts::CHUNKS_PER_SEGMENT as u64;
         let e = self
             .incentive
             .child_receipts
@@ -603,10 +615,24 @@ impl Node {
                 last_receipted: seg,
                 checked_up_to: seg,
                 missed: 0,
+                credit_us: 0,
+                credit_at: now,
             });
+        // RULE: The check moves one segment per segment of time. A parent that
+        //       catches up after a join or a repair pushes several segments in one
+        //       second. Counted by segment number alone, a child admitted a second
+        //       ago then missed three receipts and was evicted.
+        // The credit holds two segments at most: one for the steady pace and one so
+        // that a check a moment early is not put off by a whole segment.
+        e.credit_us =
+            (e.credit_us + now.duration_since(e.credit_at).as_micros()).min(2 * segment_us);
+        e.credit_at = now;
+        let allowed = (e.credit_us / segment_us.max(1)) as u32;
+        let seg = seg.min(e.checked_up_to.saturating_add(allowed));
         if seg <= e.checked_up_to {
             return true;
         }
+        e.credit_us -= (seg - e.checked_up_to) as u64 * segment_us;
         let mut newly_missed = 0u8;
         for k in (e.checked_up_to + 1)..=seg {
             let due = k.saturating_sub(2 + grace);
@@ -650,9 +676,11 @@ impl Node {
                 if id != NodeId::ZERO {
                     self.incentive.evicted_ids.insert(id, until);
                 }
-                self.incentive
-                    .evicted_prefixes
-                    .insert(prefix_key(child.ip()), until);
+                if prefix_counts(child.ip()) {
+                    self.incentive
+                        .evicted_prefixes
+                        .insert(prefix_key(child.ip()), until);
+                }
                 self.remove_child_from_tree(tree, child, "receipt deadline");
                 return false;
             }
@@ -670,6 +698,15 @@ impl Node {
                 .incentive
                 .evicted_prefixes
                 .contains_key(&prefix_key(from.ip()))
+    }
+
+    /// Forget the receipt bookkeeping of a child that left one tree.
+    ///
+    /// RULE: A child that returns starts a new count. With the old count kept, the
+    ///       segments of its absence read as missed receipts, and the parent
+    ///       evicted the child on the first block it pushed after the return.
+    pub(super) fn forget_child_receipts_in(&mut self, tree: TreeId, child: PeerAddr) {
+        self.incentive.child_receipts.remove(&(tree.0, child));
     }
 
     /// Forget receipt bookkeeping for a departed child.
@@ -1057,5 +1094,22 @@ impl Node {
             Some(now + self.params.optimistic_window),
         );
         true
+    }
+}
+
+/// Whether an eviction of a peer at `ip` also bans the prefix of `ip`.
+///
+/// RULE: A prefix is banned because a public address is costly to change. A private,
+///       loopback or link-local prefix costs nothing and holds every peer of a LAN
+///       or a VPN. One eviction there would lock all of them out of the parent.
+fn prefix_counts(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => !(v4.is_private() || v4.is_loopback() || v4.is_link_local()),
+        // Unique local (fc00::/7) and link-local (fe80::/10) addresses are the IPv6
+        // counterparts.
+        std::net::IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            !(v6.is_loopback() || first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80)
+        }
     }
 }

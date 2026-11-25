@@ -488,3 +488,32 @@ is to find why that does not happen here. The INFO logs do not show join rounds.
 
 Also found: colluder eviction in `collusion` is 0 on some seeds and in the hundreds on
 others, so that check is now marked seed-bound and needs its own look.
+
+## Round 22 (2026-11-24)
+
+Join-level logs from the fleet (`RUST_LOG="info,bs_node::driver=debug"` now reaches
+the containers) explained the cellular collapses. Four faults, all in the core:
+
+| Fault | Effect | Fix |
+|---|---|---|
+| A viewer attached before the stream starts dropped its parent after 6 s without data | Seats at the publisher reshuffled as the stream began | A node that never saw the stream waits 30 s |
+| An eviction banned the child's /24 for 60 s, private prefixes included | On a LAN, a VPN or the fleet, one eviction locked every peer out of that parent | Private, loopback and link-local prefixes are not banned; the NodeID still is |
+| A parent kept the receipt count of a child that left a tree | The child was evicted on its first block after it returned, with "19 in a row" | The count is dropped when the child leaves the tree |
+| The receipt deadline counted segment numbers | A relay that caught up pushed several segments in a second and evicted children it admitted a second before | The check moves one segment per segment of time |
+
+| Cellular | Starved chunks | Evictions per run | Runs with a viewer that never played |
+|---|---|---|---|
+| Before round 21 | 1.2 to 19.7 %, median 8.9 % | not counted | 1 of 5 |
+| After round 21 | 2.4 to 40 %, median 7.6 % | 19 to 32 | 3 of 13 |
+| After round 22, 6 runs | 4.5 to 13.5 %, median 7.9 % | 7 to 16 | 0 of 6 |
+
+The median did not move; the collapses are gone. `clean` stays at 0 % and
+`lossy-churn` at 0 to 0.11 %. Cellular joins still take 4 to 13 s.
+
+Two gates moved because honest children are no longer evicted, and both need a decision:
+
+- **`free_riders`.** Riders are evicted about 290 times a run, where the count was 416, and starve 1.1 % of chunks against a floor of 1.5 %. Listed as a known failure.
+- **`layer_fold`.** Evictions fell from 10 to 21 a run to 0 to 2 and starvation fell with them. The quick repairs those evictions caused are gone, so the median repair is now the 30 s fold wait. The median limit moved from 10 s to 30 s.
+
+Still open on cellular: 36 to 66 parent losses a run in a swarm with no churn, the
+slot drain when a relay first measures its tree, and the warm-up wait per tree level.

@@ -2020,6 +2020,7 @@ impl Node {
     fn detach_child_link(&mut self, tree: TreeId, addr: PeerAddr, reason: &str) {
         let idx = tree.index();
         self.nat_child_removed(addr, tree);
+        self.forget_child_receipts_in(tree, addr);
         if let Some(c) = self.trees[idx].children.remove(&addr) {
             self.emit(Event::ChildRemoved {
                 tree: tree.0,
@@ -3134,6 +3135,13 @@ impl Node {
                             // gets three windows before the edge counts as lost.
                             match t.last_block_at {
                                 Some(b) => now.duration_since(b) > stall,
+                                // RULE: A node that never saw the stream waits for
+                                //       the publisher to start. A parent with no
+                                //       data is then no fault, and a rejoin would
+                                //       shuffle the seats as the stream begins.
+                                None if !self.swarm.live_edge.is_some() => {
+                                    now.duration_since(p.attached_at) > stall * 15
+                                }
                                 None => now.duration_since(p.attached_at) > stall * 3,
                             }
                         })
