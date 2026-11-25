@@ -164,6 +164,10 @@ pub struct Node {
     ping_sent: BTreeMap<PeerAddr, Instant>,
     /// When the last unanswered PROBE to a peer went out.
     probe_sent: BTreeMap<PeerAddr, Instant>,
+    /// Whether a probe answer named a live edge.
+    heard_live: bool,
+    /// When this node first knew that the stream runs.
+    live_known_at: Option<Instant>,
     /// Our reachability, configured or decided from reflections (Ch6 §6.1).
     reach: Reachability,
     /// NAT traversal and bridge state (Ch6).
@@ -269,6 +273,8 @@ impl Node {
             rtt_window: VecDeque::new(),
             ping_sent: BTreeMap::new(),
             probe_sent: BTreeMap::new(),
+            heard_live: false,
+            live_known_at: None,
             // RULE: Unknown reachability is treated as CONE until the reflections
             //       decide it: punches are then asked for, never relied on.
             reach: cfg.reachability.unwrap_or(Reachability::Cone),
@@ -314,6 +320,13 @@ impl Node {
     /// Whether this is the source.
     pub fn is_source(&self) -> bool {
         self.publisher.is_some()
+    }
+    /// Whether the stream has not started, as far as this node knows.
+    ///
+    /// A node that joins a live stream holds no segment either, but each probe answer
+    /// then names a live edge.
+    fn prestream(&self) -> bool {
+        !self.swarm.live_edge.is_some() && !self.heard_live
     }
     /// Per-tree state (read-only, for drivers and invariant checkers).
     pub fn trees(&self) -> &[TreeState] {
@@ -583,21 +596,7 @@ impl Node {
                         .map(|i| i.bitrate_kbps)
                 })
                 .unwrap_or(0);
-            // RULE: Slots are sized from the rate the tree is forwarded at. Each chunk
-            //       is padded to whole blocks, so a tree can cost a quarter more than
-            //       its declared bitrate, and the slots must fit the uplink.
-            let measured = if t.measured_under == declared {
-                t.measured_kbps.min(u16::MAX as u32) as u16
-            } else {
-                0
-            };
-            // RULE: The slot headroom covers a measured rate within 8 % of the declared
-            //       one. A fall in slots drains a child, so a small excess changes nothing.
-            let b = if measured as u32 * 100 > declared as u32 * 108 {
-                measured
-            } else {
-                declared
-            };
+            let b = t.slot_rate(declared);
             // Bridge slots are paid from the bridge budget, on top of the tree's own.
             t.k_v = self.params.slots(upload, assigned_count, b, parity) + bridge_counts[i];
         }
@@ -955,6 +954,9 @@ impl Node {
             }
         }
         let sent = self.probe_sent.remove(&from);
+        if pr.live_edge.is_some() {
+            self.heard_live = true;
+        }
         let Some(tree) = matched else {
             // WHY: An answer after its round ended still measures the path. Without
             //      the sample a node on long paths never learns to wait longer.
@@ -1202,7 +1204,10 @@ impl Node {
         } else {
             self.join_stats[idx].warming_rounds = 0;
         }
-        if !exempt && (saturated > 0 || saw_warming) && !self.in_resize_grace(tree) {
+        // RULE: Before the stream starts the forest still forms, and no layer plays.
+        //       A full round is then no reason to shed a layer.
+        let counts = !exempt && !self.prestream() && !self.in_resize_grace(tree);
+        if counts && (saturated > 0 || saw_warming) {
             self.join_stats[idx].failed_rounds += 1;
         }
         let js = &mut self.join_stats[idx];
@@ -1253,6 +1258,8 @@ impl Node {
             || self.trees[idx].parent.is_none() && self.trees[idx].lost_at.is_some();
         let steps = if repairing || exempt {
             0
+        } else if self.prestream() {
+            2
         } else {
             failed.min(2)
         };
@@ -1648,7 +1655,9 @@ impl Node {
             let t = &self.trees[idx];
             if !t.depth_allows_children(self.params.d_max) {
                 Err(DisconnectReason::RejectedDepth)
-            } else if t.k_avail(self.is_source()) == 0 && !t.children.contains_key(&from) {
+            } else if t.k_avail(self.is_source(), self.prestream()) == 0
+                && !t.children.contains_key(&from)
+            {
                 // ISSUE-061: a relay *assigned* to this tree displaces a pure subscriber
                 // (a child that does not relay the tree) through the drain path, so the
                 // tree can grow interior nodes. Verified against the rendezvous rule, not
@@ -1664,7 +1673,8 @@ impl Node {
                 let draining = t.children.values().any(|c| c.draining_until.is_some());
                 // Only a serving parent can displace: an unparented relay has nothing
                 // to push and an undefined depth.
-                let serving = self.is_source() || (t.parent.is_some() && t.verified_segments > 0);
+                let serving = self.is_source()
+                    || (t.parent.is_some() && (t.verified_segments > 0 || self.prestream()));
                 let victim = if requester_relays_m && !draining && serving {
                     t.children
                         .values()
@@ -1746,7 +1756,12 @@ impl Node {
                 let omega = (1.0
                     + self.params.default_parity as f64 / bs_wire::consts::K_BLOCK as f64)
                     * (1.0 + self.params.f_frame);
-                let pending = displacing && (self.cfg.upload_kbps as f64) < 10.0 * b_m * omega;
+                // RULE: Before the stream starts the extra child costs no upload. A
+                //       pending relay would have no seat to offer the drained child,
+                //       and both would wait for the other until the drain deadline.
+                let pending = displacing
+                    && (self.cfg.upload_kbps as f64) < 10.0 * b_m * omega
+                    && !self.prestream();
                 let rank_new = self.peer_rank(from);
                 let t = &mut self.trees[idx];
                 t.children.insert(
@@ -2454,9 +2469,9 @@ impl Node {
         let idx = p.tree_id.index();
         let (k_avail, hop, state, live_edge) = match self.trees.get(idx) {
             Some(t) => (
-                t.k_avail(self.is_source()),
+                t.k_avail(self.is_source(), self.prestream()),
                 t.advertised_depth(),
-                t.probe_state(self.is_source()),
+                t.probe_state(self.is_source(), self.prestream()),
                 t.live_edge,
             ),
             None => (0, u8::MAX, bs_wire::TreeState::Unparented, SegmentSeq::NONE),
@@ -2860,8 +2875,8 @@ impl Node {
 
     /// Count a verified block toward the measured bitrate of its tree.
     ///
-    /// The count closes when a block of a later segment arrives. A rise applies at
-    /// once; a fall moves the measured rate a quarter of the way.
+    /// The count closes when a block of a later segment arrives. The measured rate is
+    /// the mean of the last `RATE_WINDOW` whole segments.
     fn note_tree_rate(&mut self, tree: TreeId, segment: SegmentSeq) {
         let declared = self
             .matrix
@@ -2876,6 +2891,8 @@ impl Node {
             t.measured_kbps = 0;
             t.rate_segment = SegmentSeq::NONE;
             t.rate_blocks = 0;
+            t.rate_samples = 0;
+            t.rate_applied_kbps = 0;
         }
         if segment == t.rate_segment {
             t.rate_blocks += 1;
@@ -2896,14 +2913,16 @@ impl Node {
             self.params.chunk_period.as_secs_f64() * bs_wire::consts::CHUNKS_PER_SEGMENT as f64;
         let kbps =
             (blocks as f64 * bs_wire::consts::BLOCK_SIZE as f64 * 8.0 / segment_s / 1000.0) as u32;
-        let before = t.measured_kbps;
-        t.measured_kbps = if kbps >= before {
-            kbps
-        } else {
-            (3 * before + kbps) / 4
-        };
+        // WHY: An encoder varies its rate from one segment to the next. Slots that
+        //      followed each peak fell and rose again, and each fall drained a child.
+        const RATE_WINDOW: u32 = 16;
+        t.rate_samples = (t.rate_samples + 1).min(RATE_WINDOW);
+        let n = t.rate_samples as u64;
+        t.measured_kbps = ((t.measured_kbps as u64 * (n - 1) + kbps as u64) / n) as u32;
         // Slots follow a move of 3 % or more. A smaller move is noise.
-        if t.assigned && t.measured_kbps.abs_diff(before) * 100 > before.max(1) * 3 {
+        let applied = t.rate_applied_kbps;
+        if t.assigned && t.measured_kbps.abs_diff(applied) * 100 > applied.max(1) * 3 {
+            t.rate_applied_kbps = t.measured_kbps;
             self.recompute_slots();
         }
     }
@@ -3123,6 +3142,11 @@ impl Node {
         // the same window cannot feed this tree; treat the edge as lost and repair.
         // The children then get the stalled-repair drain above if we fail too.
         if !self.ending && !self.is_source() {
+            let prestream = self.prestream();
+            if !prestream && self.live_known_at.is_none() {
+                self.live_known_at = Some(now);
+            }
+            let live_at = self.live_known_at;
             let stalled_parents: Vec<TreeId> = self
                 .trees
                 .iter()
@@ -3130,19 +3154,23 @@ impl Node {
                     t.parent
                         .as_ref()
                         .map(|p| {
-                            // A parent that stopped delivering is stalled after one window.
-                            // A fresh or PENDING parent is warming or waits on a drain. It
-                            // gets three windows before the edge counts as lost.
                             match t.last_block_at {
                                 Some(b) => now.duration_since(b) > stall,
                                 // RULE: A node that never saw the stream waits for
                                 //       the publisher to start. A parent with no
                                 //       data is then no fault, and a rejoin would
                                 //       shuffle the seats as the stream begins.
-                                None if !self.swarm.live_edge.is_some() => {
-                                    now.duration_since(p.attached_at) > stall * 15
+                                None if prestream => now.duration_since(p.attached_at) > stall * 15,
+                                // A fresh or PENDING parent gets three windows to
+                                // deliver.
+                                // RULE: The windows start when the stream starts
+                                //       for a parent attached before then. The first
+                                //       segment needs time to come down the tree.
+                                None => {
+                                    let from =
+                                        live_at.map_or(p.attached_at, |l| l.max(p.attached_at));
+                                    now.duration_since(from) > stall * 3
                                 }
-                                None => now.duration_since(p.attached_at) > stall * 3,
                             }
                         })
                         .unwrap_or(false)

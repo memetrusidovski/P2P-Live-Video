@@ -380,6 +380,12 @@ enum Ev {
         peer: SocketAddr,
         /// `quinn::Connection::stable_id` of the connection that closed.
         id: usize,
+        /// The peer closed the connection as the loser of a simultaneous open.
+        duplicate: bool,
+    },
+    /// The wait for the winner of a simultaneous open is over.
+    DuplicateSettled {
+        peer: SocketAddr,
     },
 }
 
@@ -604,6 +610,8 @@ struct Driver {
     ev_tx: mpsc::UnboundedSender<Ev>,
     ev_rx: mpsc::UnboundedReceiver<Ev>,
     conns: HashMap<SocketAddr, Conn>,
+    /// Peers with an outbound connect in flight.
+    dialing: std::collections::HashSet<SocketAddr>,
     epoch: tokio::time::Instant,
     source: Option<Box<dyn Source + Send>>,
     source_hash: Option<bs_wire::Hash>,
@@ -660,6 +668,8 @@ struct Driver {
 /// A viewer whose bootstrap stayed silent this long reports the address as the
 /// problem. Longer than one DHT round trip plus a retry, short enough to read as
 /// an answer to "is the link right?".
+/// Close reason of the connection that lost a simultaneous open.
+const DUPLICATE: &[u8] = b"duplicate";
 const BOOTSTRAP_SILENCE: std::time::Duration = std::time::Duration::from_secs(5);
 /// Share of the declared upload that media datagrams can use, percent. The rest
 /// carries control streams, PULL answers, DHT frames and QUIC acknowledgements.
@@ -673,6 +683,8 @@ const DATAGRAM_OVERHEAD_BYTES: u64 = 60;
 const REJECTED_PEERS_MAX: usize = 4096;
 /// How long a closed session's connection stays open so queued frames are written.
 const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+/// Time the winner of a simultaneous open has to arrive after the loser closed.
+const DUPLICATE_SETTLE: std::time::Duration = std::time::Duration::from_secs(1);
 /// How long a node that stops keeps running so its last frames leave.
 const QUIT_GRACE: std::time::Duration = std::time::Duration::from_millis(400);
 /// A viewer that played and then gets no media for this long reports the stream dead.
@@ -761,6 +773,7 @@ impl Driver {
             ev_tx,
             ev_rx,
             conns: HashMap::new(),
+            dialing: std::collections::HashSet::new(),
             epoch: tokio::time::Instant::now(),
             source,
             source_hash,
@@ -1378,16 +1391,19 @@ impl Driver {
                 node_id,
                 conn,
             } => {
+                if outbound {
+                    self.dialing.remove(&peer);
+                }
                 // RULE: Two peers that dial each other at once keep one connection:
                 //       the one that the lower NodeID dialed. Both ends apply the
                 //       rule, so both keep the same connection.
                 if let Some(old) = self.conns.get(&peer) {
                     let lower_dialed = |out: bool| out == (self.node.node_id() < node_id);
                     if old.outbound != outbound && lower_dialed(old.outbound) {
-                        conn.close(0u32.into(), b"duplicate");
+                        conn.close(0u32.into(), DUPLICATE);
                         return;
                     }
-                    old.conn.close(0u32.into(), b"duplicate");
+                    old.conn.close(0u32.into(), DUPLICATE);
                 }
                 self.sessions += 1;
                 self.note_bootstrap_answered(peer);
@@ -1417,6 +1433,7 @@ impl Driver {
                 });
             }
             Ev::ConnectFailed { peer, err } => {
+                self.dialing.remove(&peer);
                 debug!("connect to {peer} failed: {err}");
                 // A bootstrap that answers DHT lookups but rejects the session is
                 // most often a parameter mismatch (proof-of-work difficulty).
@@ -1440,7 +1457,11 @@ impl Driver {
                 channel: Channel::Datagram,
                 frame,
             }),
-            Ev::Closed { peer, id } => {
+            Ev::Closed {
+                peer,
+                id,
+                duplicate,
+            } => {
                 // RULE: Only the live connection ends the session. A duplicate that
                 //       lost the simultaneous open closes while the session is open.
                 if self.conns.get(&peer).map(|c| c.conn.stable_id()) != Some(id) {
@@ -1448,7 +1469,25 @@ impl Driver {
                 }
                 self.conns.remove(&peer);
                 self.sync_peer_budget();
+                // RULE: The peer can close the duplicate before this node sees the
+                //       connection that won. The session then continues on the
+                //       winner. An end of session here would drop the tree links
+                //       that the peer keeps.
+                if duplicate {
+                    let tx = self.ev_tx.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(DUPLICATE_SETTLE).await;
+                        let _ = tx.send(Ev::DuplicateSettled { peer });
+                    });
+                    return;
+                }
                 self.feed(Input::SessionClosed { peer });
+            }
+            Ev::DuplicateSettled { peer } => {
+                // The connection that won never arrived: the session is over.
+                if !self.conns.contains_key(&peer) {
+                    self.feed(Input::SessionClosed { peer });
+                }
             }
         }
     }
@@ -1519,8 +1558,15 @@ impl Driver {
         let tx = self.ev_tx.clone();
         tokio::spawn(async move {
             let id = conn.stable_id();
-            let _ = conn.closed().await;
-            let _ = tx.send(Ev::Closed { peer, id });
+            let duplicate = matches!(
+                conn.closed().await,
+                quinn::ConnectionError::ApplicationClosed(ref c) if c.reason.as_ref() == DUPLICATE
+            );
+            let _ = tx.send(Ev::Closed {
+                peer,
+                id,
+                duplicate,
+            });
         });
     }
 
@@ -1583,7 +1629,10 @@ impl Driver {
                 }
             }
             Output::OpenSession(peer) => {
-                if self.conns.contains_key(&peer) {
+                // RULE: One connect per peer at a time. The two ends do not agree on
+                //       a winner between two connections that one side dialed. Each
+                //       end can then close the connection the other end keeps.
+                if self.conns.contains_key(&peer) || !self.dialing.insert(peer) {
                     return;
                 }
                 let ep = self.endpoint.clone();

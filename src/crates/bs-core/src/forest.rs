@@ -121,6 +121,10 @@ pub struct TreeState {
     /// Declared bitrate of the tree while `measured_kbps` was measured. A resize or
     /// a fold changes what the tree carries, and the measurement then starts again.
     pub measured_under: u16,
+    /// Whole segments counted into `measured_kbps`, up to `RATE_WINDOW`.
+    pub rate_samples: u32,
+    /// Value of `measured_kbps` when the slots last followed it, kbps.
+    pub rate_applied_kbps: u32,
 }
 
 impl TreeState {
@@ -151,6 +155,8 @@ impl TreeState {
             rate_blocks: 0,
             measured_kbps: 0,
             measured_under: 0,
+            rate_samples: 0,
+            rate_applied_kbps: 0,
         }
     }
 
@@ -171,26 +177,50 @@ impl TreeState {
         self.subscribed || self.assigned || self.bridging
     }
 
+    /// Bitrate that sizes the slots of this tree, kbps.
+    ///
+    /// RULE: Slots are sized from the rate the tree is forwarded at. Each chunk is
+    ///       padded to whole blocks, so a tree can cost a quarter more than its
+    ///       declared bitrate, and the slots must fit the uplink. The slot headroom
+    ///       covers a measured rate within 8 % of the declared one.
+    pub fn slot_rate(&self, declared: u16) -> u16 {
+        let measured = if self.measured_under == declared {
+            self.measured_kbps.min(u16::MAX as u32) as u16
+        } else {
+            0
+        };
+        if measured as u32 * 100 > declared as u32 * 108 {
+            measured
+        } else {
+            declared
+        }
+    }
+
     /// Free slots advertised to joiners: 0 while warming (Ch1 §1.2.2 warm-up gating),
     /// 0 if not assigned, else `K_v − children` (draining children still count).
-    pub fn k_avail(&self, is_source: bool) -> u16 {
+    ///
+    /// RULE: Before the stream starts no relay can verify a segment. A parented relay
+    ///       then advertises its slots, or the forest has one level when data begins.
+    pub fn k_avail(&self, is_source: bool, prestream: bool) -> u16 {
         if !self.assigned {
             return 0;
         }
-        if !is_source && (self.verified_segments == 0 || self.parent.is_none()) {
+        let warm = self.verified_segments > 0 || prestream;
+        if !is_source && (!warm || self.parent.is_none()) {
             return 0;
         }
         self.k_v.saturating_sub(self.children.len() as u16)
     }
 
-    /// `TreeState` for PROBE_RESPONSE.
-    pub fn probe_state(&self, is_source: bool) -> bs_wire::TreeState {
+    /// `TreeState` for PROBE_RESPONSE. Before the stream starts a parented relay reports
+    /// `SERVING`, as in `k_avail`.
+    pub fn probe_state(&self, is_source: bool, prestream: bool) -> bs_wire::TreeState {
         if is_source {
             return bs_wire::TreeState::Serving;
         }
         match (&self.parent, self.verified_segments) {
             (None, _) => bs_wire::TreeState::Unparented,
-            (Some(_), 0) => bs_wire::TreeState::Warming,
+            (Some(_), 0) if !prestream => bs_wire::TreeState::Warming,
             _ => bs_wire::TreeState::Serving,
         }
     }

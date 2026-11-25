@@ -517,3 +517,36 @@ Two gates moved because honest children are no longer evicted, and both need a d
 
 Still open on cellular: 36 to 66 parent losses a run in a swarm with no churn, the
 slot drain when a relay first measures its tree, and the warm-up wait per tree level.
+
+## Round 23 (2026-11-25)
+
+Cellular passes its limits for the first time. The faults were at the start of the
+stream and in the transport, and the fleet logs found all of them.
+
+| Fault | Effect | Fix |
+|---|---|---|
+| A relay hid its slots until it verified a segment, also before the stream starts | Viewers who arrive early queued at the publisher. The tree formed after the first segment, and most cellular viewers played 10 to 15 s late | Before the stream starts a parented relay advertises its slots, a full round does not count toward a shed, and a displaced child is not held behind a pending seat (Ch1 §1.2.2) |
+| The "never delivered" clock of a parent ran from the attach | Seated viewers dropped their parents at the first segment | The clock starts when the node learns that the stream runs |
+| Slots followed the peak segment of a variable-rate encoder | Slots moved between 5 and 8, and each fall drained children | The measured rate is the mean of 16 segments |
+| The coverage grant fired only for a tree with no relay | A base tree with one relay left two viewers without a parent for a whole run | A relay also covers a tree whose relays cannot seat the swarm |
+| Two peers that dialed each other closed the loser at different times | One end ended the session and dropped its child. The other end kept the parent and waited 30 s without data | The session continues when the peer closes the duplicate, with a 1 s fallback |
+| A node dialed the same peer once per tree | Each end kept a different connection | One connect per peer at a time |
+| A node closed a neighbor it had asked for a seat | The answer arrived after the close | A peer asked for a seat is not evicted from the active set |
+
+| Cellular, 6 runs | Starved chunks | Mean join | Runs with a viewer that never played |
+|---|---|---|---|
+| After round 22 | 4.5 to 13.5 %, median 7.9 % | 4.3 to 13.5 s | 0 of 6 |
+| After round 23 | 2.2 to 7.7 %, median 3.5 % | 3.2 to 3.8 s | 0 of 6 |
+
+`clean` and `lossy-churn` are at 0 %.
+
+Tried and removed: a child that asked its parent whether a stall came from above
+before it left. It gave no gain on cellular and slowed repairs in two gates.
+
+One baseline moved. `baseline_100` repair p95 rose from 2.3 s to 5.0 s (limit 6 s) on
+three seeds of five. The run has about 13 repairs, so the p95 is one event. A relay that preempts a seat
+is admitted pending. It receives nothing until the displaced child leaves, up to
+the 5-segment drain window. Open.
+
+Still open on cellular: 15 to 26 data stalls and 7 to 12 receipt evictions a run,
+the pending wait above, the 30 % parity ceiling, and one PULL slot at 7 Mbps.

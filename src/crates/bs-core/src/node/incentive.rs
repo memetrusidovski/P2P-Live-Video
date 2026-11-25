@@ -401,7 +401,7 @@ impl Node {
         } else {
             self.trees
                 .get(TreeId(tree).index())
-                .map(|t| t.k_avail(self.is_source()))
+                .map(|t| t.k_avail(self.is_source(), self.prestream()))
                 .unwrap_or(0)
         };
         let mut pou = ProofOfUpload {

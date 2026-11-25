@@ -38,9 +38,9 @@ const COVER_WAIT: Duration = Duration::from_secs(4);
 pub struct BalanceState {
     /// The second-ranked tree this relay serves beside its first-ranked one.
     pub(super) granted: Option<TreeId>,
-    /// The grant is a coverage grant: the tree had no relay.
+    /// The grant is a coverage grant: the tree had no relay, or too few for the swarm.
     coverage: bool,
-    /// Since when the second-ranked tree shows no relay.
+    /// Since when the second-ranked tree shows too few relays to seat the swarm.
     empty_since: Option<Instant>,
     granted_at: Instant,
     pub(super) next_round: Instant,
@@ -100,6 +100,39 @@ impl Node {
         (counts, relays)
     }
 
+    /// Whether the relays of `tree` have fewer child slots than the swarm has peers.
+    ///
+    /// Each relay is taken to hold the slots this node would hold. A node knows a
+    /// sample of the relays, so the count is scaled to the relay count of the swarm.
+    ///
+    /// Args:
+    ///     matrix: The slicing matrix in force.
+    ///     tree: The tree to judge.
+    ///     in_tree: Known relays of the tree.
+    ///     known: Known relays of all trees.
+    fn tree_lacks_seats(
+        &self,
+        matrix: &bs_media::SlicingMatrix,
+        tree: TreeId,
+        in_tree: usize,
+        known: usize,
+    ) -> bool {
+        if in_tree == 0 {
+            return true;
+        }
+        let Some(info) = matrix.tree(tree) else {
+            return false;
+        };
+        let slots = self.params.slots(
+            self.cfg.upload_kbps,
+            1,
+            self.trees[tree.index()].slot_rate(info.bitrate_kbps),
+            self.mean_child_parity(),
+        );
+        let scale = (self.relay_count as f64 / known.max(1) as f64).max(1.0);
+        in_tree as f64 * scale * (slots as f64) < self.swarm_size as f64
+    }
+
     /// Take or release the balance grant. Runs every `BALANCE_PERIOD`.
     pub(super) fn balance_round(&mut self) {
         if self.now < self.balance.next_round {
@@ -140,9 +173,11 @@ impl Node {
             //       The tree must also be no longer short (Ch1 §1.2.1 §1.3).
             let idle = self.trees[g.index()].children.is_empty()
                 && self.now.duration_since(self.balance.granted_at) >= GRANT_HOLD;
-            // `in_second` counts this relay. A covered tree needs one relay more.
+            // `in_second` counts this relay. A covered tree needs one relay more, and
+            // the other relays must seat the swarm without this relay.
             let filled = if self.balance.coverage {
                 in_second >= 2.0
+                    && !self.tree_lacks_seats(&matrix, second, counts[second.index()] - 1, relays)
             } else {
                 relays >= MIN_SAMPLE && in_second >= mean
             };
@@ -155,8 +190,11 @@ impl Node {
             return;
         }
         // RULE: A tree with no relay is covered at any swarm size (coverage grant).
-        //       The tree must stay empty for `COVER_WAIT` first.
-        if counts[second.index()] > 0 {
+        //       So is a tree whose relays cannot seat the swarm. Among a few relays
+        //       the share rule below says nothing, and one relay for a tree leaves
+        //       viewers with no parent. The tree must stay short for `COVER_WAIT`.
+        let lacks = self.tree_lacks_seats(&matrix, second, counts[second.index()], relays);
+        if !lacks {
             self.balance.empty_since = None;
         } else if self.balance.empty_since.is_none() {
             self.balance.empty_since = Some(self.now);

@@ -447,6 +447,12 @@ impl Node {
             for c in t.children.keys() {
                 s.insert(*c);
             }
+            // RULE: A peer asked for a seat is a tree peer. The answer can arrive
+            //       after the session closed, and the node would then hold a parent
+            //       that does not hold the node as a child.
+            if let super::JoinState::Requesting { current, .. } = &t.join {
+                s.insert(*current);
+            }
         }
         s
     }

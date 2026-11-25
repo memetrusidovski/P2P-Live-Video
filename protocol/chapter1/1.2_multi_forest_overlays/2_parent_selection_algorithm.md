@@ -16,13 +16,17 @@ $$\text{CapacityCredit}(p) = \min\left(\sqrt{K_{\text{avail}}},\ \sqrt{K_{\text{
 
 **Warm-Up Gating:** A freshly joined relay has no data to forward until it has received and Merkle-verified its first complete segment (~1 second of buffering). During this window it MUST advertise $K_{\text{avail}} = 0$, which removes it from parent selection entirely (probes are skipped by the `available_slots > 0` check below). Without this rule, a new relay's high capacity score attracts children who then receive nothing for a full second — the relay answers keepalives (so it is never evicted as dead) while its empty bitfield forces every child into mesh-PULL fallback, compounding into latency spikes during rapid-growth phases when many relays are warming up at once.
 
+**Before the stream starts there is nothing to warm up on.** A relay that has seen no segment of the stream (it holds no manifest, and no `PROBE_RESPONSE` it received carried a `LiveEdgeSegmentSeq`) cannot verify one, and the gate would hold the forest at one level until the publisher emits: viewers who open a link early would then queue behind the source's slots and build the tree only after the first segment, one warm-up window per level. A relay in this state that has a parent in the tree therefore advertises its real $K_{\text{avail}}$ and `TreeState = SERVING`. The gate applies from the first manifest the relay accepts or the first live edge a probe answer names, so a peer that joins a running stream is gated as before. Until then a full probe round does not count toward the shed threshold of [§1.1.5](../1.1_scale_latency/5_capacity_adaptation.md): no layer plays yet, and the forest is still forming.
+
 **Warm-up is per tree, not per node.** A multi-tree super node (§1.3) may hold verified segments for $T_1$ while still warming up in $T_4$. It advertises its real slot count in the trees it can serve and zero in the trees it cannot, so one warming assignment never hides its whole capacity from the forest.
 
 ```python
 # Capacity gossip advertisement, evaluated per assigned tree:
 def advertise_K_avail(tree_id):
-    if len(verified_segment_buffer[tree_id]) == 0:
+    if len(verified_segment_buffer[tree_id]) == 0 and stream_seen:
         return 0                                    # warm-up: hidden from selection
+    if parent[tree_id] is None:
+        return 0                                    # nothing to forward from
     B_m = tree_mapping[tree_id].bitrate             # the tree's OWN declared bitrate (§4.2.1)
     K_v = floor((1 - R_PULL) * u_v / (t_v * B_m * omega_v))   # per-tree slot count (§1.3)
     return K_v - current_children[tree_id]
